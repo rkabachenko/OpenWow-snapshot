@@ -1,0 +1,24 @@
+# Anchored to the repo root on purpose. An unanchored directory pattern
+# matches at every depth, and the tree has source directories whose names
+# collide with build-output names -- src/openwow/game/combat/logs/ is a domain
+# package, not a log dump. Unanchored `logs/` silently excluded it from the
+# published snapshot, and CI failed at configure with "Cannot find source file:
+# ../game/combat/logs/adapters/lua/combat_log_lua_api.cpp".
+/build/
+.vcpkg
+.vcpkg/
+vcpkg_installed
+vcpkg_installed/
+.cache/
+compile_commands.json
+
+.DS_Store
+*.swp
+*~
+
+# The client writes default.log next to whatever directory it was launched
+# from, which is why a logs rule exists at all. Match the files themselves
+# rather than every directory named "logs".
+*.log
+/logs/
+/artifacts/

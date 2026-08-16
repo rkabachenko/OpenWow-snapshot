@@ -1,0 +1,465 @@
+diff --git a/bgfx/src/renderer_mtl.mm b/bgfx/src/renderer_mtl.mm
+index c02d66a..5d608d8 100644
+--- a/bgfx/src/renderer_mtl.mm
++++ b/bgfx/src/renderer_mtl.mm
+@@ -17,8 +17,6 @@
+ 
+ #import <Foundation/Foundation.h>
+ 
+-#define UNIFORM_BUFFER_SIZE (8*1024*1024)
+-
+ namespace bgfx { namespace mtl
+ {
+ 	static char s_viewName[BGFX_CONFIG_MAX_VIEWS][BGFX_CONFIG_MAX_VIEW_NAME];
+@@ -474,6 +472,50 @@ namespace bgfx { namespace mtl
+ #define SHADER_FUNCTION_NAME "xlatMtlMain"
+ #define SHADER_UNIFORM_NAME  "_mtl_u"
+ 
++	static const uint32_t kUniformScratchChunkSize = 2 << 20;
++	static const uint32_t kUniformScratchAlignment = 256;
++	static const uint32_t kUniformStageScratchSize = 64 << 10;
++
++	struct ChunkedScratchBufferOffset
++	{
++		Buffer buffer;
++		uint32_t offsets[2];
++	};
++
++	struct ChunkMtl
++	{
++		Buffer buffer;
++		uint8_t* data;
++	};
++
++	struct ChunkedScratchBufferMtl
++	{
++		struct Frame
++		{
++			stl::vector<ChunkMtl> chunks;
++		};
++
++		ChunkedScratchBufferMtl();
++		void create();
++		void destroy();
++		void begin(uint32_t _frameIndex);
++		void write(
++			  ChunkedScratchBufferOffset& _out
++			, const void* _vsData
++			, uint32_t _vsSize
++			, const void* _fsData = NULL
++			, uint32_t _fsSize = 0
++			);
++
++	private:
++		void addChunk(Frame& _frame);
++
++		Frame m_frames[BGFX_CONFIG_MAX_FRAME_LATENCY];
++		uint32_t m_frameIndex;
++		uint32_t m_chunkIndex;
++		uint32_t m_chunkOffset;
++	};
++
+ 	struct RendererContextMtl;
+ 	static RendererContextMtl* s_renderMtl;
+ 
+@@ -572,12 +608,6 @@ namespace bgfx { namespace mtl
+ 			m_samplerDescriptor = newSamplerDescriptor();
+ 
+-			for (uint8_t ii = 0; ii < BGFX_CONFIG_MAX_FRAME_LATENCY; ++ii)
+-			{
+-				m_uniformBuffers[ii] = m_device.newBufferWithLength(UNIFORM_BUFFER_SIZE, 0);
+-			}
+-
+-			m_uniformBufferVertexOffset   = 0;
+-			m_uniformBufferFragmentOffset = 0;
++			m_uniformScratchBuffer.create();
+ 
+ 			const char* vshSource =
+ 				"using namespace metal;\n"
+@@ -938,11 +968,8 @@ namespace bgfx { namespace mtl
+ 
+ 			m_mainFrameBuffer.destroy();
+ 
+-			for (uint8_t i=0; i < BGFX_CONFIG_MAX_FRAME_LATENCY; ++i)
+-			{
+-				MTL_RELEASE(m_uniformBuffers[i]);
+-			}
+ 			m_cmd.shutdown();
++			m_uniformScratchBuffer.destroy();
+ 			MTL_RELEASE(m_device);
+ 		}
+ 
+@@ -1444,33 +1471,26 @@ namespace bgfx { namespace mtl
+ 				const uint32_t vertexUniformBufferSize   = pso->m_vshConstantBufferSize;
+ 				const uint32_t fragmentUniformBufferSize = pso->m_fshConstantBufferSize;
+ 
++				float proj[16];
++				bx::mtxOrtho(proj, 0.0f, (float)width, (float)height, 0.0f, 0.0f, 1000.0f, 0.0f, false);
++
++				PredefinedUniform& predefined = pso->m_predefined[0];
++				uint8_t flags = predefined.m_type;
++				setShaderUniform(flags, predefined.m_loc, proj, 4);
++
++				ChunkedScratchBufferOffset scratch;
++				m_uniformScratchBuffer.write(scratch, m_vsScratch, vertexUniformBufferSize, m_fsScratch, fragmentUniformBufferSize);
++
+ 				if (vertexUniformBufferSize)
+ 				{
+-					m_uniformBufferVertexOffset = bx::alignUp(
+-						  m_uniformBufferVertexOffset
+-						, pso->m_vshConstantBufferAlignment
+-						);
+-					rce.setVertexBuffer(m_uniformBuffer, m_uniformBufferVertexOffset, 0);
++					rce.setVertexBuffer(scratch.buffer, scratch.offsets[0], 0);
+ 				}
+ 
+-				m_uniformBufferFragmentOffset = m_uniformBufferVertexOffset + vertexUniformBufferSize;
+-
+ 				if (0 != fragmentUniformBufferSize)
+ 				{
+-					m_uniformBufferFragmentOffset = bx::alignUp(
+-						  m_uniformBufferFragmentOffset
+-						, pso->m_fshConstantBufferAlignment
+-						);
+-					rce.setFragmentBuffer(m_uniformBuffer, m_uniformBufferFragmentOffset, 0);
++					rce.setFragmentBuffer(scratch.buffer, scratch.offsets[1], 0);
+ 				}
+ 
+-				float proj[16];
+-				bx::mtxOrtho(proj, 0.0f, (float)width, (float)height, 0.0f, 0.0f, 1000.0f, 0.0f, false);
+-
+-				PredefinedUniform& predefined = pso->m_predefined[0];
+-				uint8_t flags = predefined.m_type;
+-				setShaderUniform(flags, predefined.m_loc, proj, 4);
+-
+ 				m_textures[_blitter.m_texture.idx].commit(0, false, true);
+ 
+ 				VertexBufferMtl& vb = m_vertexBuffers[_blitter.m_vb->handle.idx];
+@@ -1719,12 +1737,27 @@ namespace bgfx { namespace mtl
+ 
+ 		void setShaderUniform(uint8_t _flags, uint32_t _loc, const void* _val, uint32_t _numRegs)
+ 		{
+-			uint32_t offset = 0 != (_flags&kUniformFragmentBit)
+-				? m_uniformBufferFragmentOffset
+-				: m_uniformBufferVertexOffset
+-				;
+-			uint8_t* dst = (uint8_t*)m_uniformBuffer.contents();
+-			bx::memCopy(&dst[offset + _loc], _val, _numRegs*16);
++			const bool inBounds = _loc <= kUniformStageScratchSize
++				&& _numRegs <= (kUniformStageScratchSize - _loc) / 16
++				;
++			if (!inBounds)
++			{
++				BGFX_FATAL(
++					  false
++					, Fatal::InvalidShader
++					, "Metal uniform write exceeds stage scratch buffer (offset %u, registers %u, capacity %u)."
++					, _loc
++					, _numRegs
++					, kUniformStageScratchSize
++					);
++				return;
++			}
++
++			uint8_t* dst = 0 != (_flags&kUniformFragmentBit)
++				? m_fsScratch
++				: m_vsScratch
++				;
++			bx::memCopy(&dst[_loc], _val, _numRegs*16);
+ 		}
+ 
+ 		void setShaderUniform4f(uint8_t _flags, uint32_t _loc, const void* _val, uint32_t _numRegs)
+@@ -1855,28 +1884,6 @@ namespace bgfx { namespace mtl
+ 			);
+ 			m_renderCommandEncoder.setRenderPipelineState(pso->m_rps);
+ 
+-			const uint32_t vertexUniformBufferSize   = pso->m_vshConstantBufferSize;
+-			const uint32_t fragmentUniformBufferSize = pso->m_fshConstantBufferSize;
+-
+-			if (0 != vertexUniformBufferSize)
+-			{
+-				m_uniformBufferVertexOffset = bx::alignUp(
+-					  m_uniformBufferVertexOffset
+-					, pso->m_vshConstantBufferAlignment
+-					);
+-				m_renderCommandEncoder.setVertexBuffer(m_uniformBuffer, m_uniformBufferVertexOffset, 0);
+-			}
+-
+-			m_uniformBufferFragmentOffset = m_uniformBufferVertexOffset + vertexUniformBufferSize;
+-			if (fragmentUniformBufferSize)
+-			{
+-				m_uniformBufferFragmentOffset = bx::alignUp(
+-					  m_uniformBufferFragmentOffset
+-					, pso->m_fshConstantBufferAlignment
+-					);
+-				m_renderCommandEncoder.setFragmentBuffer(m_uniformBuffer, m_uniformBufferFragmentOffset, 0);
+-			}
+-
+ 			float mrtClearColor[BGFX_CONFIG_MAX_FRAME_BUFFER_ATTACHMENTS][4];
+ 			float mrtClearDepth[4] = { _clear.m_depth };
+ 
+@@ -1904,19 +1910,32 @@ namespace bgfx { namespace mtl
+ 			}
+ 
++			const uint32_t vertexUniformBufferSize   = pso->m_vshConstantBufferSize;
++			const uint32_t fragmentUniformBufferSize = pso->m_fshConstantBufferSize;
++
+ 			bx::memCopy(
+-				  (uint8_t*)m_uniformBuffer.contents() + m_uniformBufferVertexOffset
++				  m_vsScratch
+ 				, mrtClearDepth
+ 				, bx::uint32_min(vertexUniformBufferSize, sizeof(mrtClearDepth) )
+ 				);
+ 
+ 			bx::memCopy(
+-				  (uint8_t*)m_uniformBuffer.contents() + m_uniformBufferFragmentOffset
++				  m_fsScratch
+ 				, mrtClearColor
+ 				, bx::uint32_min(fragmentUniformBufferSize, sizeof(mrtClearColor) )
+ 				);
+ 
+-			m_uniformBufferFragmentOffset += fragmentUniformBufferSize;
+-			m_uniformBufferVertexOffset    = m_uniformBufferFragmentOffset;
++			ChunkedScratchBufferOffset scratch;
++			m_uniformScratchBuffer.write(scratch, m_vsScratch, vertexUniformBufferSize, m_fsScratch, fragmentUniformBufferSize);
++
++			if (0 != vertexUniformBufferSize)
++			{
++				m_renderCommandEncoder.setVertexBuffer(scratch.buffer, scratch.offsets[0], 0);
++			}
++
++			if (0 != fragmentUniformBufferSize)
++			{
++				m_renderCommandEncoder.setFragmentBuffer(scratch.buffer, scratch.offsets[1], 0);
++			}
+ 
+ 			const VertexBufferMtl& vb = m_vertexBuffers[_clearQuad.m_vb.idx];
+ 
+@@ -2755,10 +2773,10 @@ namespace bgfx { namespace mtl
+ 		bool m_hasVSync;
+ 		bool m_hasMaximumDrawableCount;
+ 
+-		Buffer   m_uniformBuffer;
+-		Buffer   m_uniformBuffers[BGFX_CONFIG_MAX_FRAME_LATENCY];
+-		uint32_t m_uniformBufferVertexOffset;
+-		uint32_t m_uniformBufferFragmentOffset;
++		ChunkedScratchBufferMtl m_uniformScratchBuffer;
++
++		uint8_t m_vsScratch[kUniformStageScratchSize];
++		uint8_t m_fsScratch[kUniformStageScratchSize];
+ 
+ 		uint8_t  m_bufferIndex;
+ 
+@@ -2826,6 +2844,110 @@ namespace bgfx { namespace mtl
+ 		FrameBufferHandle     m_renderCommandEncoderFrameBufferHandle;
+ 	};
+ 
++	ChunkedScratchBufferMtl::ChunkedScratchBufferMtl()
++		: m_frameIndex(0)
++		, m_chunkIndex(0)
++		, m_chunkOffset(0)
++	{
++	}
++
++	void ChunkedScratchBufferMtl::create()
++	{
++		for (uint32_t ii = 0; ii < BGFX_CONFIG_MAX_FRAME_LATENCY; ++ii)
++		{
++			addChunk(m_frames[ii]);
++		}
++	}
++
++	void ChunkedScratchBufferMtl::destroy()
++	{
++		for (uint32_t ii = 0; ii < BGFX_CONFIG_MAX_FRAME_LATENCY; ++ii)
++		{
++			Frame& frame = m_frames[ii];
++			for (stl::vector<ChunkMtl>::iterator it = frame.chunks.begin(), end = frame.chunks.end(); it != end; ++it)
++			{
++				MTL_RELEASE(it->buffer);
++			}
++			frame.chunks.clear();
++		}
++	}
++
++	void ChunkedScratchBufferMtl::begin(uint32_t _frameIndex)
++	{
++		BX_ASSERT(_frameIndex < BGFX_CONFIG_MAX_FRAME_LATENCY, "Invalid Metal frame-in-flight index %u.", _frameIndex);
++		m_frameIndex = _frameIndex;
++		m_chunkIndex = 0;
++		m_chunkOffset = 0;
++	}
++
++	void ChunkedScratchBufferMtl::addChunk(Frame& _frame)
++	{
++		ChunkMtl chunk;
++		chunk.buffer = s_renderMtl->m_device.newBufferWithLength(kUniformScratchChunkSize, 0);
++		BGFX_FATAL(NULL != chunk.buffer, Fatal::UnableToInitialize, "Unable to allocate Metal uniform scratch chunk.");
++		chunk.data = (uint8_t*)chunk.buffer.contents();
++		BGFX_FATAL(NULL != chunk.data, Fatal::UnableToInitialize, "Unable to map Metal uniform scratch chunk.");
++		_frame.chunks.push_back(chunk);
++	}
++
++	void ChunkedScratchBufferMtl::write(
++		  ChunkedScratchBufferOffset& _out
++		, const void* _vsData
++		, uint32_t _vsSize
++		, const void* _fsData
++		, uint32_t _fsSize
++		)
++	{
++		const bool stageSizesValid = _vsSize <= kUniformStageScratchSize
++			&& _fsSize <= kUniformStageScratchSize
++			;
++		if (!stageSizesValid)
++		{
++			BGFX_FATAL(
++				  false
++				, Fatal::InvalidShader
++				, "Metal shader constant buffer exceeds stage scratch capacity (vertex %u, fragment %u, capacity %u)."
++				, _vsSize
++				, _fsSize
++				, kUniformStageScratchSize
++				);
++			return;
++		}
++
++		const uint32_t vsSize = bx::strideAlign(_vsSize, kUniformScratchAlignment);
++		const uint32_t fsSize = bx::strideAlign(_fsSize, kUniformScratchAlignment);
++		const uint32_t size = vsSize + fsSize;
++		Frame& frame = m_frames[m_frameIndex];
++		ChunkMtl* chunk = &frame.chunks[m_chunkIndex];
++
++		if (size > chunk->buffer.length() || m_chunkOffset > chunk->buffer.length() - size)
++		{
++			++m_chunkIndex;
++			m_chunkOffset = 0;
++			if (m_chunkIndex == frame.chunks.size())
++			{
++				addChunk(frame);
++			}
++			chunk = &frame.chunks[m_chunkIndex];
++		}
++
++		BGFX_FATAL(size <= chunk->buffer.length(), Fatal::InvalidShader, "Metal uniform allocation exceeds scratch chunk.");
++		_out.buffer = chunk->buffer;
++		_out.offsets[0] = m_chunkOffset;
++		_out.offsets[1] = m_chunkOffset + vsSize;
++
++		if (NULL != _vsData && 0 != _vsSize)
++		{
++			bx::memCopy(&chunk->data[_out.offsets[0]], _vsData, _vsSize);
++		}
++		if (NULL != _fsData && 0 != _fsSize)
++		{
++			bx::memCopy(&chunk->data[_out.offsets[1]], _fsData, _fsSize);
++		}
++
++		m_chunkOffset += size;
++	}
++
+ 	RendererContextI* rendererCreate(const Init& _init)
+ 	{
+ 		s_renderMtl = BX_NEW(g_allocator, RendererContextMtl);
+@@ -4322,10 +4445,7 @@ namespace bgfx { namespace mtl
+ 			MTL_RELEASE(m_screenshotTarget);
+ 		}
+ 
+-		m_uniformBuffer = m_uniformBuffers[m_bufferIndex];
+-		m_bufferIndex = (m_bufferIndex + 1) % BGFX_CONFIG_MAX_FRAME_LATENCY;
+-		m_uniformBufferVertexOffset = 0;
+-		m_uniformBufferFragmentOffset = 0;
++		m_uniformScratchBuffer.begin(m_bufferIndex);
+ 
+ 		if (0 < _render->m_iboffset)
+ 		{
+@@ -4705,15 +4825,6 @@ namespace bgfx { namespace mtl
+ 						{
+ 							uint32_t vertexUniformBufferSize = currentPso->m_vshConstantBufferSize;
+ 
+-							if (0 != vertexUniformBufferSize)
+-							{
+-								m_uniformBufferVertexOffset = bx::alignUp(
+-									  m_uniformBufferVertexOffset
+-									, currentPso->m_vshConstantBufferAlignment
+-									);
+-								m_computeCommandEncoder.setBuffer(m_uniformBuffer, m_uniformBufferVertexOffset, 0);
+-							}
+-
+ 							UniformBuffer* vcb = currentPso->m_vshConstantBuffer;
+ 							if (NULL != vcb)
+ 							{
+@@ -4722,7 +4833,12 @@ namespace bgfx { namespace mtl
+ 
+ 							viewState.setPredefined<4>(this, view, *currentPso, _render, compute);
+ 
+-							m_uniformBufferVertexOffset += vertexUniformBufferSize;
++							if (0 != vertexUniformBufferSize)
++							{
++								ChunkedScratchBufferOffset scratch;
++								m_uniformScratchBuffer.write(scratch, m_vsScratch, vertexUniformBufferSize);
++								m_computeCommandEncoder.setBuffer(scratch.buffer, scratch.offsets[0], 0);
++							}
+ 						}
+ 						BX_UNUSED(programChanged);
+ 
+@@ -5071,27 +5186,8 @@ namespace bgfx { namespace mtl
+ 				if (isValid(currentProgram) )
+ 				{
+ 					const uint32_t vertexUniformBufferSize   = currentPso->m_vshConstantBufferSize;
+ 					const uint32_t fragmentUniformBufferSize = currentPso->m_fshConstantBufferSize;
+ 
+-					if (0 != vertexUniformBufferSize)
+-					{
+-						m_uniformBufferVertexOffset = bx::alignUp(
+-							  m_uniformBufferVertexOffset
+-							, currentPso->m_vshConstantBufferAlignment
+-							);
+-						rce.setVertexBuffer(m_uniformBuffer, m_uniformBufferVertexOffset, 0);
+-					}
+-
+-					m_uniformBufferFragmentOffset = m_uniformBufferVertexOffset + vertexUniformBufferSize;
+-					if (0 != fragmentUniformBufferSize)
+-					{
+-						m_uniformBufferFragmentOffset = bx::alignUp(
+-							  m_uniformBufferFragmentOffset
+-							, currentPso->m_fshConstantBufferAlignment
+-							);
+-						rce.setFragmentBuffer(m_uniformBuffer, m_uniformBufferFragmentOffset, 0);
+-					}
+-
+ 					UniformBuffer* vcb = currentPso->m_vshConstantBuffer;
+ 					if (NULL != vcb)
+ 					{
+@@ -5105,8 +5198,20 @@ namespace bgfx { namespace mtl
+ 
+ 					viewState.setPredefined<4>(this, view, *currentPso, _render, draw);
+ 
+-					m_uniformBufferFragmentOffset += fragmentUniformBufferSize;
+-					m_uniformBufferVertexOffset    = m_uniformBufferFragmentOffset;
++					if (0 != vertexUniformBufferSize || 0 != fragmentUniformBufferSize)
++					{
++						ChunkedScratchBufferOffset scratch;
++						m_uniformScratchBuffer.write(scratch, m_vsScratch, vertexUniformBufferSize, m_fsScratch, fragmentUniformBufferSize);
++
++						if (0 != vertexUniformBufferSize)
++						{
++							rce.setVertexBuffer(scratch.buffer, scratch.offsets[0], 0);
++						}
++						if (0 != fragmentUniformBufferSize)
++						{
++							rce.setFragmentBuffer(scratch.buffer, scratch.offsets[1], 0);
++						}
++					}
+ 				}
+ 
+ 				if (isValid(currentProgram) )
+@@ -5513,6 +5620,8 @@ namespace bgfx { namespace mtl
+ 
+ 			rce.endEncoding();
+ 		}
++
++		m_bufferIndex = (m_bufferIndex + 1) % BGFX_CONFIG_MAX_FRAME_LATENCY;
+ 	}
+ 
+ } /* namespace mtl */ } // namespace bgfx

@@ -1,0 +1,207 @@
+diff --git a/bgfx/src/renderer_mtl.h b/bgfx/src/renderer_mtl.h
+--- a/bgfx/src/renderer_mtl.h
++++ b/bgfx/src/renderer_mtl.h
+@@ -1025,9 +1025,23 @@
+ 			, bool _vertex
+ 			, bool _fragment
+ 			, uint32_t _flags = BGFX_SAMPLER_INTERNAL_DEFAULT
++			, uint8_t _mip = UINT8_MAX
++			);
++
++		void commitTexture(
++			  uint8_t _stage
++			, bool _vertex
++			, bool _fragment
+ 			, uint8_t _mip = UINT8_MAX
+ 			);
+ 
++		void commitSampler(
++			  uint8_t _stage
++			, bool _vertex
++			, bool _fragment
++			, uint32_t _flags = BGFX_SAMPLER_INTERNAL_DEFAULT
++			);
++
+ 		Texture getTextureMipLevel(int _mip);
+ 
+ 		Texture m_ptr;
+diff --git a/bgfx/src/renderer_mtl.mm b/bgfx/src/renderer_mtl.mm
+--- a/bgfx/src/renderer_mtl.mm
++++ b/bgfx/src/renderer_mtl.mm
+@@ -3547,31 +3547,41 @@
+ 
+ 	void TextureMtl::commit(uint8_t _stage, bool _vertex, bool _fragment, uint32_t _flags, uint8_t _mip)
+ 	{
++		commitTexture(_stage, _vertex, _fragment, _mip);
++		commitSampler(_stage, _vertex, _fragment, _flags);
++	}
++
++	void TextureMtl::commitTexture(uint8_t _stage, bool _vertex, bool _fragment, uint8_t _mip)
++	{
++		Texture p = _mip != UINT8_MAX ? getTextureMipLevel(_mip) : m_ptr;
+ 		if (_vertex)
+ 		{
+-			Texture p = _mip != UINT8_MAX ? getTextureMipLevel(_mip) : m_ptr;
+ 			s_renderMtl->m_renderCommandEncoder.setVertexTexture(p, _stage);
+-			s_renderMtl->m_renderCommandEncoder.setVertexSamplerState(
+-				  0 == (BGFX_SAMPLER_INTERNAL_DEFAULT & _flags)
+-					? s_renderMtl->getSamplerState(_flags)
+-					: m_sampler
+-				, _stage
+-				);
+ 		}
+ 
+ 		if (_fragment)
+ 		{
+-			Texture p = _mip != UINT8_MAX ? getTextureMipLevel(_mip) : m_ptr;
+ 			s_renderMtl->m_renderCommandEncoder.setFragmentTexture(p, _stage);
+-			s_renderMtl->m_renderCommandEncoder.setFragmentSamplerState(
+-				  0 == (BGFX_SAMPLER_INTERNAL_DEFAULT & _flags)
+-					? s_renderMtl->getSamplerState(_flags)
+-					: m_sampler
+-				, _stage
+-				);
+ 		}
+ 	}
+ 
++	void TextureMtl::commitSampler(uint8_t _stage, bool _vertex, bool _fragment, uint32_t _flags)
++	{
++		const SamplerState sampler = 0 == (BGFX_SAMPLER_INTERNAL_DEFAULT & _flags)
++			? s_renderMtl->getSamplerState(_flags)
++			: m_sampler
++			;
++		if (_vertex)
++		{
++			s_renderMtl->m_renderCommandEncoder.setVertexSamplerState(sampler, _stage);
++		}
++
++		if (_fragment)
++		{
++			s_renderMtl->m_renderCommandEncoder.setFragmentSamplerState(sampler, _stage);
++		}
++	}
++
+ 	Texture TextureMtl::getTextureMipLevel(int _mip)
+ 	{
+ 		if (_mip >= 0
+@@ -5097,7 +5107,7 @@
+ 					blendFactor = draw.m_rgba;
+ 				}
+ 
+-				bool programChanged = false;
++				const bool programChanged = key.m_program.idx != currentProgram.idx;
+ 				rendererUpdateUniforms(this, _render->m_uniformBuffer[draw.m_uniformIdx], draw.m_uniformBegin, draw.m_uniformEnd);
+ 
+ 				bool vertexStreamChanged = hasVertexStreamChanged(currentState, draw);
+@@ -5165,11 +5175,11 @@
+ 					}
+ 					else
+ 					{
+-						currentPso = NULL;
++						PipelineStateMtl* nextPso = NULL;
+ 
+ 						if (0 < numStreams)
+ 						{
+-							currentPso = getPipelineState(
++							nextPso = getPipelineState(
+ 								  newFlags
+ 								, draw.m_rgba
+ 								, fbh
+@@ -5180,13 +5190,18 @@
+ 								);
+ 						}
+ 
+-						if (NULL == currentPso)
++						if (NULL == nextPso)
+ 						{
+ 							currentProgram = BGFX_INVALID_HANDLE;
++							currentPso = NULL;
+ 							continue;
+ 						}
+ 
+-						rce.setRenderPipelineState(currentPso->m_rps);
++						if (programChanged || currentPso != nextPso)
++						{
++							rce.setRenderPipelineState(nextPso->m_rps);
++						}
++						currentPso = nextPso;
+ 					}
+ 
+ 					if (isValid(draw.m_instanceDataBuffer) )
+@@ -5195,7 +5210,6 @@
+ 						rce.setVertexBuffer(inst.m_ptr, draw.m_instanceDataOffset, numStreams+1);
+ 					}
+ 
+-					programChanged = true;
+ 				}
+ 
+ 				if (isValid(currentProgram) )
+@@ -5240,10 +5254,19 @@
+ 					{
+ 						const Binding& bind = renderBind.m_bind[stage];
+ 						Binding& current = currentBind.m_bind[stage];
+-						if (current.m_idx          != bind.m_idx
+-						||  current.m_type         != bind.m_type
+-						||  current.m_samplerFlags != bind.m_samplerFlags
+-						||  programChanged)
++						const bool resourceChanged = programChanged
++							|| current.m_idx    != bind.m_idx
++							|| current.m_type   != bind.m_type
++							|| current.m_format != bind.m_format
++							|| current.m_access != bind.m_access
++							|| current.m_mip    != bind.m_mip
++							;
++						const bool samplerChanged = programChanged
++							|| current.m_samplerFlags != bind.m_samplerFlags
++							|| (current.m_idx != bind.m_idx
++							&& 0 != (bind.m_samplerFlags & BGFX_SAMPLER_INTERNAL_DEFAULT) )
++							;
++						if (resourceChanged || samplerChanged)
+ 						{
+ 							if (kInvalidHandle != bind.m_idx)
+ 							{
+@@ -5275,24 +5298,31 @@
+ 									}
+ 
+ 									TextureMtl& texture = m_textures[bind.m_idx];
+-									texture.commit(
+-										  stage
+-										, 0 != (bindingTypes[stage] & PipelineStateMtl::BindToVertexShader)
+-										, 0 != (bindingTypes[stage] & PipelineStateMtl::BindToFragmentShader)
+-										, bind.m_samplerFlags
+-										, bind.m_mip
+-										);
++									const bool vertex = 0 != (bindingTypes[stage] & PipelineStateMtl::BindToVertexShader);
++									const bool fragment = 0 != (bindingTypes[stage] & PipelineStateMtl::BindToFragmentShader);
++									if (resourceChanged)
++									{
++										texture.commitTexture(stage, vertex, fragment, bind.m_mip);
++									}
++									if (samplerChanged)
++									{
++										texture.commitSampler(stage, vertex, fragment, bind.m_samplerFlags);
++									}
+ 								}
+ 								break;
+ 								case Binding::Texture:
+ 									{
+ 										TextureMtl& texture = m_textures[bind.m_idx];
+-										texture.commit(
+-											stage
+-											, 0 != (bindingTypes[stage] & PipelineStateMtl::BindToVertexShader)
+-											, 0 != (bindingTypes[stage] & PipelineStateMtl::BindToFragmentShader)
+-											, bind.m_samplerFlags
+-											);
++										const bool vertex = 0 != (bindingTypes[stage] & PipelineStateMtl::BindToVertexShader);
++										const bool fragment = 0 != (bindingTypes[stage] & PipelineStateMtl::BindToFragmentShader);
++										if (resourceChanged)
++										{
++											texture.commitTexture(stage, vertex, fragment);
++										}
++										if (samplerChanged)
++										{
++											texture.commitSampler(stage, vertex, fragment, bind.m_samplerFlags);
++										}
+ 									}
+ 									break;
+ 

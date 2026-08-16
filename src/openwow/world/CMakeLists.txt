@@ -1,0 +1,32 @@
+openwow_add_component(openwow_world_runtime
+  streaming/world_map.cpp
+  coordinates/world_coordinates.cpp
+  streaming/terrain_streamer.cpp
+  streaming/world_map_streaming.cpp
+  streaming/world_streaming_ownership.cpp
+  wmo/wmo_vertex_color_query.cpp
+  wmo/wmo_visibility.cpp
+  occlusion/world_occluder_volumes.cpp
+  terrain/terrain_lod_subdivision.cpp
+  terrain/terrain_occlusion.cpp
+  liquid/liquid_polygon_clip.cpp
+  liquid/wmo_liquid_surface.cpp
+  environment/chunk_ambient_audio.cpp
+  collision/collision.cpp
+  camera/world_camera.cpp
+  movement/movement_spline.cpp
+  interaction/world_cursor_policy.cpp
+  presentation/world_presentation_snapshot.cpp
+  environment/weather.cpp
+  environment/day_night.cpp
+  environment/lighting.cpp
+  environment/environment_detail.cpp
+  environment/wmo_fog.cpp
+  world_render_pipeline.cpp
+)
+target_link_libraries(openwow_world_runtime PRIVATE
+  openwow_data_runtime
+  openwow_foundation
+  openwow_platform_filesystem
+  openwow_render_api
+)

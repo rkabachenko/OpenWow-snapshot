@@ -1,0 +1,135 @@
+diff --git a/bgfx/src/renderer_mtl.h b/bgfx/src/renderer_mtl.h
+--- a/bgfx/src/renderer_mtl.h
++++ b/bgfx/src/renderer_mtl.h
+@@ -1157,19 +1157,24 @@
+ 		void shutdown();
+ 		CommandBuffer alloc();
+ 		void kick(bool _endFrame, bool _waitForFinish = false);
+ 		void finish(bool _finishAll = false);
++		Buffer allocUpload(Device _device, uint32_t _size);
++		void recycleUpload(Buffer _buffer);
+ 		void release(NSObject* _ptr);
+ 		void consume();
+ 
+ 		bx::Semaphore m_framesSemaphore;
+ 
+ 		CommandQueue  m_commandQueue;
+ 		CommandBuffer m_activeCommandBuffer;
+ 
+ 		int m_releaseWriteIndex;
+ 		int m_releaseReadIndex;
+ 		typedef stl::vector<NSObject*> ResourceArray;
+ 		ResourceArray m_release[BGFX_CONFIG_MAX_FRAME_LATENCY];
++		typedef stl::vector<Buffer> UploadBufferArray;
++		UploadBufferArray m_uploadAvailable;
++		UploadBufferArray m_uploadPending[BGFX_CONFIG_MAX_FRAME_LATENCY];
+ 	};
+ 
+ 	struct TimerQueryMtl
+diff --git a/bgfx/src/renderer_mtl.mm b/bgfx/src/renderer_mtl.mm
+--- a/bgfx/src/renderer_mtl.mm
++++ b/bgfx/src/renderer_mtl.mm
+@@ -474,6 +474,7 @@ namespace bgfx { namespace mtl
+ 	static const uint32_t kUniformScratchChunkSize = 2 << 20;
+ 	static const uint32_t kUniformScratchAlignment = 256;
+ 	static const uint32_t kUniformStageScratchSize = 64 << 10;
++	static const uint32_t kUploadBufferGranularity = 64 << 10;
+ 
+ 	struct ChunkedScratchBufferOffset
+ 	{
+@@ -3177,17 +3178,19 @@ namespace bgfx { namespace mtl
+ 
+ 			bx::memCopy(m_dynamic + _offset, _data, _size);
+-			uint32_t start = _offset & 4;
++			uint32_t start = _offset & ~3u;
+ 			uint32_t end   = bx::strideAlign(_offset + _size, 4);
+ 
+-			Buffer temp = s_renderMtl->m_device.newBufferWithBytes(m_dynamic, end - start, 0);
+-			bce.copyFromBuffer(temp, 0, m_ptr, start, end - start);
+-			s_renderMtl->m_cmd.release(temp);
++			Buffer upload = s_renderMtl->m_cmd.allocUpload(s_renderMtl->m_device, end - start);
++			bx::memCopy(upload.contents(), m_dynamic + start, end - start);
++			bce.copyFromBuffer(upload, 0, m_ptr, start, end - start);
++			s_renderMtl->m_cmd.recycleUpload(upload);
+ 		}
+ 		else
+ 		{
+-			Buffer temp = s_renderMtl->m_device.newBufferWithBytes(_data, _size, 0);
+-			bce.copyFromBuffer(temp, 0, m_ptr, _offset, _size);
+-			s_renderMtl->m_cmd.release(temp);
++			Buffer upload = s_renderMtl->m_cmd.allocUpload(s_renderMtl->m_device, _size);
++			bx::memCopy(upload.contents(), _data, _size);
++			bce.copyFromBuffer(upload, 0, m_ptr, _offset, _size);
++			s_renderMtl->m_cmd.recycleUpload(upload);
+ 		}
+ 	}
+ 
+@@ -4122,6 +4127,23 @@ namespace bgfx { namespace mtl
+ 	void CommandQueueMtl::shutdown()
+ 	{
+ 		finish(true);
++
++		for (UploadBufferArray::iterator it = m_uploadAvailable.begin(), end = m_uploadAvailable.end(); it != end; ++it)
++		{
++			MTL_RELEASE(*it);
++		}
++		m_uploadAvailable.clear();
++
++		for (uint32_t ii = 0; ii < BGFX_CONFIG_MAX_FRAME_LATENCY; ++ii)
++		{
++			UploadBufferArray& pending = m_uploadPending[ii];
++			for (UploadBufferArray::iterator it = pending.begin(), end = pending.end(); it != end; ++it)
++			{
++				MTL_RELEASE(*it);
++			}
++			pending.clear();
++		}
++
+ 		MTL_RELEASE(m_commandQueue);
+ 	}
+ 
+@@ -4188,6 +4211,33 @@ namespace bgfx { namespace mtl
+ 		}
+ 	}
+ 
++	Buffer CommandQueueMtl::allocUpload(Device _device, uint32_t _size)
++	{
++		for (UploadBufferArray::iterator it = m_uploadAvailable.begin(), end = m_uploadAvailable.end(); it != end; ++it)
++		{
++			if (_size <= it->length() )
++			{
++				Buffer buffer = *it;
++				m_uploadAvailable.erase(it);
++				return buffer;
++			}
++		}
++
++		const uint32_t capacity = bx::uint32_max(
++			  kUploadBufferGranularity
++			, bx::strideAlign(_size, kUploadBufferGranularity)
++			);
++		Buffer buffer = _device.newBufferWithLength(capacity, 0);
++		BGFX_FATAL(NULL != buffer, Fatal::UnableToInitialize, "Unable to allocate Metal upload buffer.");
++		BGFX_FATAL(NULL != buffer.contents(), Fatal::UnableToInitialize, "Unable to map Metal upload buffer.");
++		return buffer;
++	}
++
++	void CommandQueueMtl::recycleUpload(Buffer _buffer)
++	{
++		m_uploadPending[m_releaseWriteIndex].push_back(_buffer);
++	}
++
+ 	void CommandQueueMtl::release(NSObject* _ptr)
+ 	{
+ 		m_release[m_releaseWriteIndex].push_back(_ptr);
+@@ -4206,6 +4257,10 @@ namespace bgfx { namespace mtl
+ 		}
+ 
+ 		ra.clear();
++
++		UploadBufferArray& upload = m_uploadPending[m_releaseReadIndex];
++		m_uploadAvailable.insert(m_uploadAvailable.end(), upload.begin(), upload.end() );
++		upload.clear();
+ 	}
+ 
+ 	void TimerQueryMtl::init()

@@ -1,0 +1,46 @@
+{
+  "name": "openwow",
+  "version-string": "0.1.0",
+  "description": "OpenWoW drop-in client MVP (WotLK/AzerothCore)",
+  "dependencies": [
+    "sdl2",
+    {
+      "$comment": "Target-side bgfx: the renderer library only. The shader/texture/geometry compilers come from the host-side entry below so cross builds (riscv64-linux, arm64-windows, x64-osx on an arm64 runner) get tools that run on the build machine; when host and target triplets coincide vcpkg merges both entries into one bgfx[core,tools] install and nothing changes.",
+      "name": "bgfx"
+    },
+    {
+      "name": "bgfx",
+      "features": [
+        "tools"
+      ],
+      "host": true
+    },
+    {
+      "name": "imgui",
+      "features": [
+        "docking-experimental",
+        "freetype"
+      ]
+    },
+    "implot",
+    "openssl",
+    "pcre",
+    "boost-asio",
+    "boost-system",
+    "boost-json",
+    "spdlog",
+    "fmt",
+    "catch2",
+    "expat",
+    "libjpeg-turbo",
+    {
+      "name": "ffmpeg",
+      "features": [
+        "avcodec",
+        "avformat",
+        "swscale",
+        "swresample"
+      ]
+    }
+  ]
+}

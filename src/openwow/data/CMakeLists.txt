@@ -1,0 +1,67 @@
+openwow_add_component(openwow_data_runtime
+  blp/blp_decoder.cpp
+  blp/blp_loader.cpp
+  image/image_decoder.cpp
+  image/stb_write_impl.cpp
+  model/m2_model.cpp
+  model/m2_external_sequence_tracks.cpp
+  terrain/adt_file.cpp
+  terrain/wdt_file.cpp
+  terrain/wdl_file.cpp
+  wmo/wmo_file.cpp
+  formats/dbc/dbc_loader.cpp
+  formats/dbc/transport_dbc_index.cpp
+  formats/dbc/dbc_table_registry.cpp
+  formats/dbc/faction_reaction.cpp
+  blp/blp_info.cpp
+  terrain/adt_chunk_info.cpp
+  wmo/wmo_group_info.cpp
+  game_data_validator.cpp
+  startup_filesystem_state.cpp
+  archive_system.cpp
+  loading/dbc_locale_adapter.cpp
+  login_resource_validator.cpp
+  wdb_cache.cpp
+  wdb_persistence.cpp
+  texture_cache.cpp
+  blp/blp_texture_loader.cpp
+  spell_dbc_store.cpp
+  cache/quest_cache_record.cpp
+  creature_display_store.cpp
+  map_dbc_store.cpp
+  area_table_store.cpp
+  image/jpeg_decoder.cpp
+  map/heightmap_query.cpp
+  map/map_loader.cpp
+  map/tile_streaming.cpp
+  async_file_read.cpp
+  streaming_init.cpp
+  blp/blp_mip.cpp
+  image/tga_loader.cpp
+  blp/blp_dxt_blit_short.cpp
+  db_cache_core.cpp
+  db_cache_hashtable.cpp
+  db_cache_instances.cpp
+  db_client_object.cpp
+  dbc_loader.cpp
+  map/coarse_height_query.cpp
+)
+target_link_libraries(openwow_data_runtime PRIVATE
+  openwow_data_formats
+  openwow_foundation
+  openwow_foundation_diagnostics
+  openwow_foundation_text
+  openwow_lua
+  openwow_network_serialization
+  openwow_platform_filesystem
+  openwow_storage_persistence
+  JPEG::JPEG
+)
+target_compile_definitions(openwow_data_runtime PRIVATE
+  OPENWOW_HAS_STORMLIB=$<BOOL:${OPENWOW_HAS_STORMLIB}>
+)
+if(OPENWOW_HAS_STORMLIB)
+  target_link_libraries(openwow_data_runtime PRIVATE
+    ${OPENWOW_STORMLIB_TARGET}
+  )
+endif()

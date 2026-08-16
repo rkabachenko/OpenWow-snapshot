@@ -1,0 +1,4 @@
+Checks: 'bugprone-*,clang-analyzer-*,modernize-*,performance-*,-modernize-use-trailing-return-type'
+WarningsAsErrors: ''
+HeaderFilterRegex: 'src/|apps/|tests/'
+FormatStyle: file

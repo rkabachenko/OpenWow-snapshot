@@ -1,0 +1,35 @@
+#!/bin/sh
+# AppRun for the OpenWoW AppImage.
+#
+# The client is a drop-in binary that resolves the game folder from
+# (see apps/client/composition/main.cpp ResolveGameRoot):
+#   --game-data <path>  ->  $OPENWOW_GAME_DATA  ->  cwd if it has Data/  ->
+#   executable dir if it has Data/.
+# When run from an AppImage the executable directory is the mounted squashfs,
+# never the game folder, so the meaningful defaults are the working directory
+# and $OPENWOW_GAME_DATA. AppImage runtime exports $APPIMAGE (path of the
+# .AppImage file) and $OWD (the caller's working directory): if the AppImage
+# file itself sits inside a game folder (next to Data/) and neither an
+# explicit --game-data nor $OPENWOW_GAME_DATA nor a Data/ in cwd is
+# available, hand its directory to the client so "drop the AppImage into the
+# WoW folder and double-click it" behaves like the other platforms.
+HERE="$(dirname "$(readlink -f "$0")")"
+
+has_game_data_arg=0
+for arg in "$@"; do
+  if [ "$arg" = "--game-data" ]; then
+    has_game_data_arg=1
+    break
+  fi
+done
+
+if [ "$has_game_data_arg" -eq 0 ] && [ -z "${OPENWOW_GAME_DATA:-}" ] \
+   && [ ! -d "${OWD:-$PWD}/Data" ] && [ -n "${APPIMAGE:-}" ]; then
+  appimage_dir="$(dirname "$(readlink -f "$APPIMAGE")")"
+  if [ -d "$appimage_dir/Data" ]; then
+    OPENWOW_GAME_DATA="$appimage_dir"
+    export OPENWOW_GAME_DATA
+  fi
+fi
+
+exec "$HERE/usr/bin/openwow-client" "$@"

@@ -1,0 +1,177 @@
+--- a/bgfx/src/renderer_mtl.mm
++++ b/bgfx/src/renderer_mtl.mm
+@@ -2161,7 +2161,10 @@
+ 			}
+ 
+ 			m_renderCommandEncoder.setDepthStencilState(dss);
+-			m_renderCommandEncoder.setStencilReferenceValue(ref);
++			if (0 != _stencil)
++			{
++				m_renderCommandEncoder.setStencilReferenceValue(ref);
++			}
+ 		}
+ 
+ 		BX_PRAGMA_DIAGNOSTIC_PUSH();
+@@ -3276,6 +3279,7 @@
+ 			const bool writeOnly    = 0 != (_flags&BGFX_TEXTURE_RT_WRITE_ONLY);
+ 			const bool computeWrite = 0 != (_flags&BGFX_TEXTURE_COMPUTE_WRITE);
+ 			const bool renderTarget = 0 != (_flags&BGFX_TEXTURE_RT_MASK);
++			const bool readBack     = 0 != (_flags&BGFX_TEXTURE_READ_BACK);
+ 			const bool srgb         = 0 != (_flags&BGFX_TEXTURE_SRGB);
+ 
+ 			BX_TRACE("Texture %3d: %s (requested: %s), layers %d, %dx%d%s RT[%c], WO[%c], CW[%c], sRGB[%c]"
+@@ -3327,6 +3331,7 @@
+ 				desc.cpuCacheMode = MTLCPUCacheModeDefaultCache;
+ 
+ 				desc.storageMode = (MTLStorageMode)(false
++					|| (renderTarget && !readBack)
+ 					|| writeOnly
+ 					|| bimg::isDepth(bimg::TextureFormat::Enum(m_textureFormat) )
+ 					?     2 /* MTLStorageModePrivate */
+@@ -4550,6 +4555,8 @@
+ 		uint32_t blendFactor = 0;
+ 
+ 		bool wireframe = !!(_render->m_debug&BGFX_DEBUG_WIREFRAME);
++		bool currentFrontCcw = false;
++		bool frontWindingInitialized = false;
+ 
+ 		ProgramHandle currentProgram = BGFX_INVALID_HANDLE;
+ 		SortKey key;
+@@ -4638,6 +4645,7 @@
+ 
+ 						Rect viewRect = viewState.m_rect;
+ 						bool clearWithRenderPass = false;
++						bool newRenderEncoder = false;
+ 
+ 						if (NULL == m_renderCommandEncoder
+ 						||  fbh.idx != _render->m_view[view].m_fbh.idx)
+@@ -4727,9 +4735,11 @@
+ 										? MTLLoadActionClear
+ 										: MTLLoadActionLoad
+ 										;
+-										depthAttachment.storeAction = NULL != m_mainFrameBuffer.m_swapChain->m_backBufferColorMsaa
+-										? MTLStoreActionDontCare
+-										: MTLStoreActionStore
++										depthAttachment.storeAction =
++										0 != (BGFX_CLEAR_DISCARD_DEPTH & clr.m_flags)
++										|| NULL != m_mainFrameBuffer.m_swapChain->m_backBufferColorMsaa
++											? MTLStoreActionDontCare
++											: MTLStoreActionStore
+ 										;
+ 								}
+ 
+@@ -4742,9 +4752,11 @@
+ 										? MTLLoadActionClear
+ 										: MTLLoadActionLoad
+ 										;
+-									stencilAttachment.storeAction = NULL != m_mainFrameBuffer.m_swapChain->m_backBufferColorMsaa
+-										? MTLStoreActionDontCare
+-										: MTLStoreActionStore
++									stencilAttachment.storeAction =
++										0 != (BGFX_CLEAR_DISCARD_STENCIL & clr.m_flags)
++										|| NULL != m_mainFrameBuffer.m_swapChain->m_backBufferColorMsaa
++											? MTLStoreActionDontCare
++											: MTLStoreActionStore
+ 										;
+ 								}
+ 							}
+@@ -4776,7 +4788,10 @@
+ 								if (NULL != depthAttachment.texture)
+ 								{
+ 									depthAttachment.loadAction  = MTLLoadActionLoad;
+-									depthAttachment.storeAction = MTLStoreActionStore;
++									depthAttachment.storeAction =
++										0 != (BGFX_CLEAR_DISCARD_DEPTH & clr.m_flags)
++											? MTLStoreActionDontCare
++											: MTLStoreActionStore;
+ 								}
+ 
+ 								RenderPassStencilAttachmentDescriptor stencilAttachment = renderPassDescriptor.stencilAttachment;
+@@ -4784,7 +4799,10 @@
+ 								if (NULL != stencilAttachment.texture)
+ 								{
+ 									stencilAttachment.loadAction  = MTLLoadActionLoad;
+-									stencilAttachment.storeAction = MTLStoreActionStore;
++									stencilAttachment.storeAction =
++										0 != (BGFX_CLEAR_DISCARD_STENCIL & clr.m_flags)
++											? MTLStoreActionDontCare
++											: MTLStoreActionStore;
+ 								}
+ 							}
+ 
+@@ -4792,7 +4810,10 @@
+ 							rce = m_commandBuffer.renderCommandEncoderWithDescriptor(renderPassDescriptor);
+ 							m_renderCommandEncoder = rce;
+ 							m_renderCommandEncoderFrameBufferHandle = fbh;
+ 							MTL_RELEASE(renderPassDescriptor);
++							newRenderEncoder = true;
++							currentFrontCcw = false;
++							frontWindingInitialized = true;
+ 						}
+ 						else if (BX_ENABLED(BGFX_CONFIG_DEBUG_ANNOTATION) )
+ 						{
+@@ -4803,7 +4824,10 @@
+ 							rce.pushDebugGroup(s_viewName[view]);
+ 						}
+ 
+-						rce.setTriangleFillMode(wireframe ? MTLTriangleFillModeLines : MTLTriangleFillModeFill);
++						if (wireframe && newRenderEncoder)
++						{
++							rce.setTriangleFillMode(MTLTriangleFillModeLines);
++						}
+ 
+ #if BX_PLATFORM_VISIONOS
+ 						if (m_mainFrameBuffer.m_swapChain->m_useLayerRenderer)
+@@ -5043,7 +5067,7 @@
+ 				if (resetState)
+ 				{
+ 					currentState.clear();
+-					currentState.m_scissor = !draw.m_scissor;
++					currentState.m_scissor = viewHasScissor ? !draw.m_scissor : UINT16_MAX;
+ 					changedFlags = BGFX_STATE_MASK;
+ 					changedStencil = packStencil(BGFX_STENCIL_MASK, BGFX_STENCIL_MASK);
+ 					currentState.m_stateFlags = newFlags;
+@@ -5052,7 +5076,6 @@
+ 					currentBind.clear();
+ 
+ 					currentProgram = BGFX_INVALID_HANDLE;
+-					setDepthStencilState(newFlags, packStencil(BGFX_STENCIL_DEFAULT, BGFX_STENCIL_DEFAULT) );
+ 
+ 					const uint64_t pt = newFlags&BGFX_STATE_PT_MASK;
+ 					primIndex = uint8_t(pt>>BGFX_STATE_PT_SHIFT);
+@@ -5118,10 +5141,16 @@
+ 				{
+ 					if (BGFX_STATE_FRONT_CCW & changedFlags)
+ 					{
+-						rce.setFrontFacingWinding( (newFlags&BGFX_STATE_FRONT_CCW)
+-							? MTLWindingCounterClockwise
+-							: MTLWindingClockwise
+-							);
++						const bool nextFrontCcw = 0 != (newFlags&BGFX_STATE_FRONT_CCW);
++						if (!frontWindingInitialized || currentFrontCcw != nextFrontCcw)
++						{
++							rce.setFrontFacingWinding(nextFrontCcw
++								? MTLWindingCounterClockwise
++								: MTLWindingClockwise
++								);
++							currentFrontCcw = nextFrontCcw;
++							frontWindingInitialized = true;
++						}
+ 					}
+ 
+ 					if (BGFX_STATE_CULL_MASK & changedFlags)
+@@ -5582,10 +5611,13 @@
+ 		bx::memCopy(perfStats.numPrims, statsNumPrimsRendered, sizeof(perfStats.numPrims) );
+ 		perfStats.gpuMemoryMax  = -INT64_MAX;
+ 		perfStats.gpuMemoryUsed = -INT64_MAX;
+ 
+-		rce.setTriangleFillMode(MTLTriangleFillModeFill);
+ 		if (_render->m_debug & (BGFX_DEBUG_IFH|BGFX_DEBUG_STATS) )
+ 		{
++			if (wireframe)
++			{
++				rce.setTriangleFillMode(MTLTriangleFillModeFill);
++			}
+ 			rce.pushDebugGroup("debugstats");
+ 
+ 			TextVideoMem& tvm = m_textVideoMem;

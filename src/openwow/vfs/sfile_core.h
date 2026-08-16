@@ -1,0 +1,16 @@
+#pragma once
+
+#include "openwow/vfs/adapters/filesystem/native_filesystem.h"
+#include "openwow/vfs/retail/file_stack/file_stack_abi.h"
+#include "openwow/vfs/retail/file_stack/file_stack_provider.h"
+#include "openwow/vfs/retail/retail_path_resolver.h"
+#include "openwow/vfs/retail/sfile_archive.h"
+#include "openwow/vfs/retail/sfile_configuration.h"
+#include "openwow/vfs/retail/sfile_runtime.h"
+#include "openwow/vfs/retail/sfile_test_support.h"
+#include "openwow/vfs/retail/sound_cache/sound_cache.h"
+#include "openwow/vfs/retail/streaming/data_preload_controller.h"
+#include "openwow/vfs/retail/streaming/streaming_dispatch_lifetime.h"
+#include "openwow/vfs/retail/streaming/streaming_file_adapter.h"
+#include "openwow/vfs/retail/streaming/streaming_read_plan.h"
+#include "openwow/vfs/retail/streaming/streaming_source_transport.h"

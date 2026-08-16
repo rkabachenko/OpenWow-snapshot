@@ -1,0 +1,183 @@
+diff --git a/bgfx/src/renderer_mtl.mm b/bgfx/src/renderer_mtl.mm
+index d26ec8e..c0d3cf1 100644
+--- a/bgfx/src/renderer_mtl.mm
++++ b/bgfx/src/renderer_mtl.mm
+@@ -517,6 +517,48 @@ void write(
+ 		uint32_t m_chunkOffset;
+ 	};
+ 
++	// The complete input set of RendererContextMtl::getPipelineState's murmur hash,
++	// captured so that a repeated call can be answered without recomputing it. Field
++	// types match the values stock feeds to HashMurmur2A::add exactly, because add is
++	// a template over the argument type and a widened field would hash differently.
++	struct PipelineStateKeyMtl
++	{
++		bool equals(const PipelineStateKeyMtl& _rhs) const
++		{
++			if (m_state           != _rhs.m_state
++			||  m_rgba            != _rhs.m_rgba
++			||  m_frameBufferHash != _rhs.m_frameBufferHash
++			||  m_vshHash         != _rhs.m_vshHash
++			||  m_fshHash         != _rhs.m_fshHash
++			||  m_numInstanceData != _rhs.m_numInstanceData
++			||  m_numStreams      != _rhs.m_numStreams
++			||  m_hasFsh          != _rhs.m_hasFsh)
++			{
++				return false;
++			}
++
++			for (uint8_t ii = 0; ii < BX_COUNTOF(m_layoutHash); ++ii)
++			{
++				if (m_layoutHash[ii] != _rhs.m_layoutHash[ii])
++				{
++					return false;
++				}
++			}
++
++			return true;
++		}
++
++		uint64_t m_state;
++		uint32_t m_rgba;
++		uint32_t m_frameBufferHash;
++		uint32_t m_vshHash;
++		uint32_t m_fshHash;
++		uint32_t m_layoutHash[BGFX_CONFIG_MAX_VERTEX_STREAMS];
++		uint8_t  m_numInstanceData;
++		uint8_t  m_numStreams;
++		bool     m_hasFsh;
++	};
++
+ 	struct RendererContextMtl;
+ 	static RendererContextMtl* s_renderMtl;
+ 
+@@ -525,6 +567,7 @@ void write(
+ 		RendererContextMtl()
+ 			: m_bufferIndex(0)
+ 			, m_numWindows(0)
++			, m_lastPipelineState(NULL)
+ 			, m_rtMsaa(false)
+ 			, m_capture(NULL)
+ 			, m_captureSize(0)
+@@ -2377,31 +2420,66 @@ void processArguments(
+ 			const bool independentBlendEnable = !!(BGFX_STATE_BLEND_INDEPENDENT & _state);
+ 			const ProgramMtl& program = m_program[_program.idx];
+ 
+-			bx::HashMurmur2A murmur;
+-			murmur.begin();
+-			murmur.add(_state);
+-			murmur.add(independentBlendEnable ? _rgba : 0);
+-			murmur.add(_numInstanceData);
+-
+-			if (!isValid(_fbh) )
++			// Every value the hash below consumes, gathered before it is consumed.
++			// Terrain and WMO draw thousands of chunks that share a program, a state
++			// and a vertex layout while each owns a distinct vertex buffer, so
++			// hasVertexStreamChanged re-enters this function for every chunk with all
++			// of these bit-identical to the previous call. Comparing them is cheaper
++			// than the HashMurmur2A that would consume them - 70 render-thread samples
++			// against 48 for this function's whole body, in a parked Dalaran profile -
++			// and selects the same pipeline state by construction: equal inputs give an
++			// equal hash, and that hash is the only key m_pipelineStateCache has.
++			//
++			// Identity is carried by content hashes, never by handle indices, because a
++			// destroyed handle can be reissued to unrelated contents. m_hash on a shader
++			// is murmur over its code, m_pixelFormatHash over the attachment formats,
++			// and a VertexLayout's m_hash over its attributes.
++			PipelineStateKeyMtl key;
++			key.m_state           = _state;
++			key.m_rgba            = independentBlendEnable ? _rgba : 0;
++			key.m_numInstanceData = _numInstanceData;
++			key.m_frameBufferHash = !isValid(_fbh)
++				? m_mainFrameBuffer.m_pixelFormatHash
++				: m_frameBuffers[_fbh.idx].m_pixelFormatHash
++				;
++			key.m_vshHash  = program.m_vsh->m_hash;
++			key.m_hasFsh   = NULL != program.m_fsh;
++			// Distinguished from a program with no fragment shader by m_hasFsh, so a
++			// legitimate shader hash of zero cannot alias the absent case.
++			key.m_fshHash  = key.m_hasFsh ? program.m_fsh->m_hash : 0;
++			// Every slot is written, including the unused tail, so that comparing and
++			// copying the key never reads an indeterminate value.
++			key.m_numStreams = _numStreams;
++			for (uint8_t ii = 0; ii < BX_COUNTOF(key.m_layoutHash); ++ii)
+ 			{
+-				murmur.add(m_mainFrameBuffer.m_pixelFormatHash);
++				key.m_layoutHash[ii] = ii < _numStreams
++					? _layouts[ii]->m_hash
++					: 0
++					;
+ 			}
+-			else
++
++			if (NULL != m_lastPipelineState
++			&&  key.equals(m_lastPipelineStateKey) )
+ 			{
+-				FrameBufferMtl& frameBuffer = m_frameBuffers[_fbh.idx];
+-				murmur.add(frameBuffer.m_pixelFormatHash);
++				return m_lastPipelineState;
+ 			}
+ 
+-			murmur.add(program.m_vsh->m_hash);
+-			if (NULL != program.m_fsh)
++			bx::HashMurmur2A murmur;
++			murmur.begin();
++			murmur.add(key.m_state);
++			murmur.add(key.m_rgba);
++			murmur.add(key.m_numInstanceData);
++			murmur.add(key.m_frameBufferHash);
++
++			murmur.add(key.m_vshHash);
++			if (key.m_hasFsh)
+ 			{
+-				murmur.add(program.m_fsh->m_hash);
++				murmur.add(key.m_fshHash);
+ 			}
+ 
+ 			for (uint8_t ii = 0; ii < _numStreams; ++ii)
+ 			{
+-				murmur.add(_layouts[ii]->m_hash);
++				murmur.add(key.m_layoutHash[ii]);
+ 			}
+ 
+ 			uint32_t hash = murmur.end();
+@@ -2649,6 +2727,9 @@ void processArguments(
+ 				m_pipelineProgram.push_back({hash, _program});
+ 			}
+ 
++			m_lastPipelineStateKey = key;
++			m_lastPipelineState    = pso;
++
+ 			return pso;
+ 		}
+ 
+@@ -2837,6 +2918,15 @@ void endEncoding()
+ 		PipelineProgramArray             m_pipelineProgram;
+ 
+ 		StateCacheT<PipelineStateMtl*> m_pipelineStateCache;
++
++		// Memo of the previous getPipelineState answer. Cleared at the top of every
++		// submit, which is what keeps m_lastPipelineState from ever dangling:
++		// m_pipelineStateCache is emptied only by destroyProgram and by shutdown, and
++		// bgfx runs both from rendererExecCommands on m_cmdPre / m_cmdPost
++		// (bgfx.cpp, Context::renderFrame), never from inside submit.
++		PipelineStateKeyMtl            m_lastPipelineStateKey;
++		PipelineStateMtl*              m_lastPipelineState;
++
+ 		StateCacheT<DepthStencilState> m_depthStencilStateCache;
+ 		StateCacheT<SamplerState>      m_samplerStateCache;
+ 
+@@ -4477,6 +4567,13 @@ static void setTimestamp(void* _data)
+ 	{
+ 		m_cmd.finish(false);
+ 
++		// Drop the getPipelineState memo. Between two submits bgfx may have run
++		// destroyProgram, which deletes pipeline states and invalidates their cache
++		// entries, so a pointer memoized during the previous frame must not be
++		// reused. Doing this here rather than in destroyProgram is what makes the
++		// memo's lifetime provably shorter than any pipeline state it can name.
++		m_lastPipelineState = NULL;
++
+ 		if (NULL == m_commandBuffer)
+ 		{
+ 			m_commandBuffer = m_cmd.alloc();

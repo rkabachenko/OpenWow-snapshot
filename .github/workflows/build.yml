@@ -1,0 +1,363 @@
+# Reusable build matrix. Called by ci.yml (every push) and release.yml (v* tags).
+#
+# It exists so the two callers cannot drift: a release must be built exactly the
+# way CI builds, or CI stops being evidence about what gets published.
+#
+# Dependencies come from the vcpkg manifest, resolved at the baseline pinned in
+# vcpkg-configuration.json. A cold run builds FFmpeg, Boost, bgfx and SDL2 and
+# takes roughly an hour; later runs restore that from the caches below.
+#
+# Two caches, deliberately separate:
+#
+#   vcpkg-bincache  built ports. The port ABI hash includes the compiler, so
+#                   this is per-lane and is missed whenever the runner image
+#                   changes -- hence the ImageVersion in the key.
+#   vcpkg/downloads source tarballs. Architecture- and compiler-independent, so
+#                   every lane shares them. This is what keeps an upstream
+#                   outage from failing the whole matrix: when a project host
+#                   returns 502/504, a cached tarball means the build never has
+#                   to ask it. Saved on failure too, since a lane that got a
+#                   tarball before a host broke still leaves it behind.
+name: Build
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Version string used in package filenames.
+        required: false
+        type: string
+        default: 0.0.0-dev
+      package:
+        description: >
+          Install the client component and wrap it per platform (AppImage,
+          .app zip, .exe zip) instead of uploading the bare executable.
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64 (gcc)
+            os: ubuntu-24.04
+            preset: ci-linux-gcc
+            artifact: openwow-linux-x86_64
+            lane: linux-x86_64
+            package: linux
+          - name: macos-arm64
+            os: macos-14
+            preset: ci-macos-arm64
+            artifact: openwow-macos-arm64
+            lane: macos-arm64
+            package: macos
+          - name: windows-x64 (MSVC)
+            os: windows-2022
+            preset: ci-windows-x64
+            artifact: openwow-windows-x64
+            lane: windows-x64
+            package: windows
+
+    # Signing inputs, mapped once here so the packaging scripts only ever read
+    # plain environment variables and never reach into the workflow context.
+    # Every one is optional: with none of them set the macOS bundle is ad-hoc
+    # signed, the Windows executable ships unsigned and the AppImage carries no
+    # detached signature -- which is exactly what happens today, and what will
+    # keep happening until the corresponding secrets exist. Secrets are never
+    # exposed to pull requests from forks, so those runs are unsigned by
+    # construction.
+    env:
+      APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+      APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+      APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+      WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+      WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+      LINUX_GPG_PRIVATE_KEY: ${{ secrets.LINUX_GPG_PRIVATE_KEY }}
+      LINUX_GPG_PASSPHRASE: ${{ secrets.LINUX_GPG_PASSPHRASE }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read vcpkg baseline
+        id: baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          commit="$(python3 -c 'import json;print(json.load(open("vcpkg-configuration.json"))["default-registry"]["baseline"])')"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout vcpkg @ baseline
+        uses: actions/checkout@v4
+        with:
+          repository: microsoft/vcpkg
+          ref: ${{ steps.baseline.outputs.commit }}
+          path: vcpkg
+          fetch-depth: 1
+
+      - name: Record runner image version
+        shell: bash
+        run: |
+          echo "IMAGE_VERSION=${ImageVersion:-unknown}" >> "$GITHUB_ENV"
+          mkdir -p vcpkg-bincache
+
+      # The primary key ends in the run id, so it never collides and the save
+      # below can always write. Without that, an exact key hit made the save
+      # step's `cache-hit != 'true'` guard false and it was skipped -- which
+      # froze the cache at whatever it held the first time it was written.
+      # Any port built after that was rebuilt on every run, forever: the
+      # Windows lane restored 77 packages and then rebuilt openssl, sdl2,
+      # pcre, libpng, zlib, brotli, fmt, implot and libjpeg-turbo every time,
+      # which is the whole of its ~30 minute configure step.
+      - name: Restore built-port cache
+        id: bincache
+        uses: actions/cache/restore@v4
+        with:
+          path: vcpkg-bincache
+          key: vcpkg-${{ matrix.preset }}-${{ env.IMAGE_VERSION }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'vcpkg-overlay-ports/**', 'vcpkg-overlay-triplets/**') }}-${{ github.run_id }}
+          restore-keys: |
+            vcpkg-${{ matrix.preset }}-${{ env.IMAGE_VERSION }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'vcpkg-overlay-ports/**', 'vcpkg-overlay-triplets/**') }}-
+            vcpkg-${{ matrix.preset }}-${{ env.IMAGE_VERSION }}-
+            vcpkg-${{ matrix.preset }}-
+
+      - name: Count restored binary packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "BINCACHE_BEFORE=$(find vcpkg-bincache -type f 2>/dev/null | wc -l | tr -d ' ')" >> "$GITHUB_ENV"
+
+      - name: Restore source-download cache
+        id: downloads
+        uses: actions/cache/restore@v4
+        with:
+          path: vcpkg/downloads
+          key: vcpkg-dl-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'vcpkg-overlay-ports/**') }}-${{ matrix.preset }}-${{ github.run_id }}
+          restore-keys: |
+            vcpkg-dl-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'vcpkg-overlay-ports/**') }}-${{ matrix.preset }}-
+            vcpkg-dl-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'vcpkg-overlay-ports/**') }}-
+            vcpkg-dl-
+
+      - name: Count restored source tarballs
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "DOWNLOADS_BEFORE=$(find vcpkg/downloads -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')" >> "$GITHUB_ENV"
+
+      # libxcrypt's autoreconf gates on this list twice, and both gates live in
+      # ports/vcpkg-make/vcpkg_make.cmake:
+      #
+      #   autoconf-archive  the tool check -- without it the port aborts with
+      #                     "libxcrypt currently requires ... autoconf
+      #                     autoconf-archive automake libtoolize".
+      #   libltdl-dev       the ltdl check at :137, which greps
+      #                     aclocal-<triplet>-err.log for "libltdl" and aborts
+      #                     when configure.ac matches LT_CONFIG_LTDL_DIR or
+      #                     LT_SYS_SYMBOL_USCORE. libxcrypt uses the latter.
+      #                     libtool/libtool-bin ship the binaries, not ltdl.h --
+      #                     on Debian that is its own package. This also covers
+      #                     gperf and any other AUTORECONF port, because the
+      #                     gate only fires when ltdl is actually missing.
+      #
+      # libxcrypt is not a direct dependency: the sdl2 overlay port's dbus and
+      # ibus features pull dbus[systemd] -> libsystemd -> libxcrypt.
+      - name: Install system packages (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ninja-build pkg-config \
+            autoconf autoconf-archive automake libtool libtool-bin libltdl-dev nasm yasm python3 \
+            libx11-dev libxext-dev libxft-dev libxrandr-dev libxi-dev \
+            libxcursor-dev libxinerama-dev libxss-dev libxxf86vm-dev \
+            libxkbcommon-dev libwayland-dev wayland-protocols \
+            libegl1-mesa-dev libgl-dev libglu1-mesa-dev libibus-1.0-dev
+
+      # Only the release path needs these, so CI runs stay lean:
+      # appimagetool validates the .desktop file with desktop-file-utils, reads
+      # the ELF with file(1), and the type-2 runtime it wraps needs libfuse2.
+      - name: Install packaging tools (Linux)
+        if: ${{ inputs.package && runner.os == 'Linux' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y --no-install-recommends \
+            libfuse2t64 file desktop-file-utils zip
+
+      - name: Install system packages (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ninja nasm autoconf automake libtool
+
+      - name: Bootstrap vcpkg (Unix)
+        if: runner.os != 'Windows'
+        run: ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
+
+      - name: Bootstrap vcpkg (Windows)
+        if: runner.os == 'Windows'
+        run: ./vcpkg/bootstrap-vcpkg.bat -disableMetrics
+
+      - name: MSVC developer environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure
+        shell: bash
+        env:
+          VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+          VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-bincache
+        run: |
+          set -euo pipefail
+          # Retried with growing backoff: a project host that is briefly down
+          # fails the whole manifest install, and each retry resumes from the
+          # binary cache, so it only costs the ports not yet built.
+          attempt=1
+          until cmake --preset "${{ matrix.preset }}" \
+            -DVCPKG_INSTALL_OPTIONS=--clean-after-build; do
+            if [ "$attempt" -ge 5 ]; then
+              echo "::error::configure failed after $attempt attempts"; exit 1
+            fi
+            delay=$(( 30 * (1 << (attempt - 1)) ))
+            echo "::warning::configure attempt $attempt failed; retrying in ${delay} s"
+            attempt=$((attempt + 1)); sleep "$delay"
+          done
+
+      # -k 0 tells Ninja to build everything it still can after a failure
+      # instead of stopping at the first one.  Every configure preset here
+      # inherits its generator from "base", which is Ninja, so the native
+      # argument is valid on all three lanes.  A failed run therefore reports
+      # every independent compile error in the tree rather than the earliest
+      # one in the schedule, which is the difference between one CI round per
+      # defect and one round for all of them.  The exit status is unchanged:
+      # Ninja still fails the step.
+      - name: Build client
+        env:
+          VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+        run: cmake --build --preset ${{ matrix.preset }} --target openwow-client --parallel -- -k 0
+
+      # ------------------------------------------------------------------
+      # CI path: the bare executable, enough to prove the lane links.
+      # ------------------------------------------------------------------
+      - name: Stage client
+        if: ${{ !inputs.package }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          find "build/${{ matrix.preset }}" -name 'openwow-client*' -type f \
+            -not -name '*.o' -not -name '*.obj' -exec cp {} dist/ \;
+          ls -l dist
+
+      # ------------------------------------------------------------------
+      # Release path: the installed layout, wrapped the way each platform
+      # expects it. apps/client/CMakeLists.txt owns what the client component
+      # contains -- OpenWoW.app on macOS, the bare .exe on Windows,
+      # bin/ + .desktop + icon on Linux.
+      # ------------------------------------------------------------------
+      - name: Install client component
+        if: ${{ inputs.package }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf stage dist && mkdir -p stage dist
+          cmake --install "build/${{ matrix.preset }}" --component client --prefix stage
+          find stage -maxdepth 4 | sort
+
+      - name: Package (Linux AppImage, gpg-sign when a key is configured)
+        if: ${{ inputs.package && matrix.package == 'linux' }}
+        shell: bash
+        env:
+          OPENWOW_APPIMAGE_CACHE: ${{ github.workspace }}/.appimage-cache
+        run: |
+          set -euo pipefail
+          bash packaging/linux/build-appimage.sh stage \
+            "dist/OpenWoW-${{ inputs.version }}-${{ matrix.lane }}.AppImage"
+          ls -l dist
+
+      - name: Package (macOS .app zip, sign, notarize)
+        if: ${{ inputs.package && matrix.package == 'macos' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="$(find stage -maxdepth 2 -name '*.app' -type d | head -n1)"
+          [ -n "$app" ] || { echo "::error::no .app under stage" >&2; exit 1; }
+          # The script decides what it can do from the environment above. With
+          # a Developer ID certificate it signs, and with an App Store Connect
+          # key it also notarizes and staples. With neither it falls back to
+          # codesign --force --deep --sign -, which is what this step used to
+          # do inline and is still required rather than optional: cmake
+          # --install copies the linker-signed executable, and a plain copy
+          # invalidates that signature, so macOS SIGKILLs the process at launch
+          # with "Code Signature Invalid" rather than reporting a missing one.
+          bash packaging/macos/sign-and-notarize.sh "$app"
+          # ditto, not zip: it is the only archiver that preserves the bundle's
+          # symlinks and extended attributes intact.
+          ditto -c -k --keepParent "$app" \
+            "dist/OpenWoW-${{ inputs.version }}-${{ matrix.lane }}.zip"
+          ls -l dist
+
+      - name: Package (Windows .exe zip, sign)
+        if: ${{ inputs.package && matrix.package == 'windows' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Get-ChildItem -Path stage -Recurse -Filter 'openwow-client.exe' | Select-Object -First 1
+          if (-not $exe) { throw "no openwow-client.exe under stage" }
+          # Authenticode-signs in place when WINDOWS_CERT_PFX_BASE64 is set,
+          # and prints "unsigned" and returns 0 when it is not. Note the script
+          # takes a file-based .pfx, which the CA/Browser Forum's June 2023
+          # baseline no longer allows public CAs to issue for new OV
+          # certificates -- their keys must sit on certified hardware. A cloud
+          # signing service is the practical route now, and it is a different
+          # mechanism than signtool /f, so this script would be replaced rather
+          # than merely given a secret.
+          pwsh packaging/windows/sign.ps1 $exe.FullName
+          $zip = "dist/OpenWoW-${{ inputs.version }}-${{ matrix.lane }}.zip"
+          Compress-Archive -Path (Join-Path $exe.DirectoryName '*') -DestinationPath $zip -CompressionLevel Optimal
+          Get-ChildItem dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/*
+          if-no-files-found: error
+
+      # Saved on the content actually changing, not on a missed key: a run that
+      # built even one new port must persist it or the next run pays for it
+      # again. Skipping the upload when nothing was added keeps the repo's
+      # 10 GB cache budget from churning through half a gigabyte per lane per
+      # run for no reason.
+      - name: Did this run build anything new?
+        id: cachestate
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin=$(find vcpkg-bincache -type f 2>/dev/null | wc -l | tr -d ' ')
+          dl=$(find vcpkg/downloads -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
+          echo "ports: ${BINCACHE_BEFORE:-0} -> $bin, tarballs: ${DOWNLOADS_BEFORE:-0} -> $dl"
+          [ "$bin" != "${BINCACHE_BEFORE:-0}" ] && echo "ports=true" >> "$GITHUB_OUTPUT" || echo "ports=false" >> "$GITHUB_OUTPUT"
+          [ "$dl" != "${DOWNLOADS_BEFORE:-0}" ] && echo "tarballs=true" >> "$GITHUB_OUTPUT" || echo "tarballs=false" >> "$GITHUB_OUTPUT"
+
+      - name: Save built-port cache
+        if: always() && steps.cachestate.outputs.ports == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: vcpkg-bincache
+          key: ${{ steps.bincache.outputs.cache-primary-key }}
+
+      - name: Save source-download cache
+        if: always() && steps.cachestate.outputs.tarballs == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: vcpkg/downloads
+          key: ${{ steps.downloads.outputs.cache-primary-key }}

@@ -1,0 +1,60 @@
+#pragma once
+class SoundEngineState {
+protected:
+  explicit SoundEngineState(AudioEngine& audio_engine) : audio_engine_(audio_engine) {}
+  AudioEngine& audio_engine_;
+  struct VoiceCaptureRuntime {
+    bool recording_active{false};
+    std::uint8_t monitor_mode{0};
+    std::int32_t sample_rate_hz{0};
+    std::vector<std::uint8_t> scratch_buffer;
+    std::uint32_t record_buffer_length{0};
+    std::uint32_t record_channels{0};
+    std::uint32_t capture_device_id{0};
+    int capture_sample_rate{8000};
+    int capture_channels{1};
+    std::vector<std::int16_t> capture_temp_buffer;
+    std::vector<std::int16_t> converted_capture_buffer;
+    void* capture_conversion_stream{nullptr};
+    int active_capture_stream_handle{0};
+  };
+  bool initialized_{false};
+  bool capture_enabled_{false};
+  bool voice_chat_enabled_{false};
+  VoiceCaptureRuntime voice_capture_;
+  ICaptureIOSink* capture_io_sink_{nullptr};
+  std::mutex capture_mutex_;
+  std::mutex sound_mutex_;
+  std::mutex stream_mutex_;
+  std::mutex sound_log_mutex_;
+  std::mutex dsp_graph_mutex_;
+  std::vector<SEChannelGroup> channel_groups_;
+  std::vector<std::unique_ptr<SoundObj>> expired_sounds_;
+  PositionCallback position_callback_{nullptr};
+  SoundAudibilityCallback sound_audibility_callback_{nullptr};
+  DeviceChangedCallback device_changed_callback_{nullptr};
+  InputLevelCallback input_level_callback_{nullptr};
+  VoiceChatLoopback* voice_chat_loopback_{nullptr};
+  int microphone_signal_level_{0};
+  std::vector<SEDeviceInfo> output_devices_;
+  std::vector<SEDeviceInfo> voice_output_devices_;
+  std::vector<SEDeviceInfo> input_devices_;
+  std::vector<SEDeviceInfo> record_devices_;
+  std::string enumerated_default_output_device_name_;
+  std::string enumerated_default_voice_output_device_name_;
+  std::string enumerated_default_input_device_name_;
+  std::string current_output_device_name_;
+  std::string current_voice_output_device_name_;
+  std::string current_input_device_name_;
+  bool output_device_reopen_pending_{false};
+  std::uint32_t last_tick_ms_{0};
+  std::uint32_t expired_sound_cleanup_tick_ms_{0};
+  std::uint32_t last_voice_capture_context_tick_ms_{0};
+  std::uint32_t voice_capture_work_request_count_{0};
+  bool expired_sound_cleanup_clock_initialized_{false};
+  bool cache_lock_destroyed_{false};
+  std::unordered_map<std::uint32_t, std::uint32_t> sound_group_instance_counts_;
+  openwow::core::LegacyBufferedLogFile sound_log_file_;
+  bool sound_log_append_on_next_open_{false};
+  int sound_log_error_count_{0};
+};
