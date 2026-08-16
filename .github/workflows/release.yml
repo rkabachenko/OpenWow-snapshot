@@ -1,0 +1,123 @@
+# Publishes a GitHub Release from a v* tag.
+#
+#   git tag -a v0.1.0 -m 'OpenWoW 0.1.0' && git push origin v0.1.0
+#
+# The build itself is build.yml -- the same matrix, the same caches and the
+# same steps CI runs -- invoked with package: true so each lane produces a
+# distributable archive instead of a bare executable. Nothing is published
+# unless every lane succeeds: publish `needs` the build job, so a red lane
+# skips the release rather than shipping a partial matrix.
+#
+# Prerelease is decided by the tag: v1.2.3 is a release, v1.2.3-rc1 is a
+# prerelease.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing v* tag to (re)publish
+        required: true
+        type: string
+
+# Releases are not interchangeable the way CI runs are: never cancel one
+# in flight, or a half-uploaded release stays half-uploaded.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: Version string
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+    steps:
+      - id: v
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            tag="$INPUT_TAG"
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+          [[ "$tag" =~ ^v[0-9] ]] || { echo "not a v* tag: $tag" >&2; exit 1; }
+          version="${tag#v}"
+          prerelease=false
+          [[ "$version" == *-* ]] && prerelease=true
+          {
+            echo "tag=$tag"
+            echo "version=$version"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    uses: ./.github/workflows/build.yml
+    with:
+      version: ${{ needs.version.outputs.version }}
+      package: true
+
+  publish:
+    name: Publish GitHub Release
+    needs: [version, build]
+    runs-on: ubuntu-24.04
+    # The only job that needs write access; the build lanes stay read-only.
+    permissions:
+      contents: write
+    steps:
+      - name: Download every lane's package
+        uses: actions/download-artifact@v4
+        with:
+          pattern: openwow-*
+          path: packages
+          merge-multiple: true
+
+      - name: SHA256SUMS
+        shell: bash
+        working-directory: packages
+        run: |
+          set -euo pipefail
+          ls -l
+          # Written outside the directory first so the file being hashed cannot
+          # appear in its own listing on a re-run.
+          rm -f SHA256SUMS
+          find . -maxdepth 1 -type f -printf '%f\n' | sort | xargs sha256sum > "$RUNNER_TEMP/SHA256SUMS"
+          mv "$RUNNER_TEMP/SHA256SUMS" SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.version.outputs.tag }}
+          name: OpenWoW ${{ needs.version.outputs.version }}
+          prerelease: ${{ needs.version.outputs.prerelease == 'true' }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            packages/*
+          body: |
+            A from-scratch reimplementation of the World of Warcraft 3.3.5a
+            (build 12340) client. These builds ship no game data: put the
+            unpacked application inside your own 3.3.5a install, next to
+            `Data/`, and start it from there.
+
+            Verify your download against `SHA256SUMS`.
+
+            **These binaries are not signed with a trusted certificate**, and
+            this repository holds no signing secrets, so both desktop platforms
+            will object on first launch:
+
+            - macOS: the `.app` is ad-hoc signed, which makes it launchable but
+              not notarized. Gatekeeper will refuse it until you clear the
+              quarantine attribute:
+              `xattr -dr com.apple.quarantine OpenWoW.app`
+            - Windows: SmartScreen will warn on an unsigned executable --
+              More info -> Run anyway.

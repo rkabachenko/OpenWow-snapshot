@@ -1,0 +1,206 @@
+diff --git a/bgfx/src/bgfx_p.h b/bgfx/src/bgfx_p.h
+index 3c7d1cf..3485007 100644
+--- a/bgfx/src/bgfx_p.h
++++ b/bgfx/src/bgfx_p.h
+@@ -25,6 +25,10 @@
+ 
+ #include <inttypes.h>
+ 
++#if !BX_CRT_NONE
++#	include <string.h> // memcpy - constant-size copies are lowered inline, see uniformInlineCopy.
++#endif // !BX_CRT_NONE
++
+ // Check handle, cannot be bgfx::kInvalidHandle and must be valid.
+ #define BGFX_CHECK_HANDLE(_desc, _handleAlloc, _handle) \
+ 	BX_ASSERT(isValid(_handle)                          \
+@@ -1476,6 +1480,94 @@ namespace bgfx
+ 		| kUniformCompareBit
+ 		;
+ 
++	// Size of one shader constant register, the granularity uniform locations and
++	// counts are expressed in throughout the backends.
++	constexpr uint32_t kUniformRegisterSize = 16;
++
++	// Uniform payloads are g_uniformTypeSize[type]*num bytes: 4 for Sampler, 16 for
++	// Vec4, 36 for Mat3, 64 for Mat4, and the opcodes framing them are 4 bytes each.
++	// At or below one Mat4 the copy is entirely overhead-bound, so it is done inline;
++	// above it the CRT's vectorized memmove is the better trade.
++	constexpr uint32_t kUniformInlineCopyMaxBytes = 64;
++
++	// bx::memCopy is an out-of-line symbol in the bx library (bx/src/bx.cpp:116) whose
++	// whole body is a tail call to ::memcpy, so every uniform store leaves the calling
++	// translation unit and lands in the CRT's memmove: a cross-library call plus
++	// memmove's own size dispatch, to move 4..64 bytes. The tail call is also why
++	// bx::memCopy never appears in sampled stacks - the copies are attributed straight
++	// to their caller.
++	//
++	// That price is paid once per uniform per draw at several sites that no amount of
++	// application-side batching can thin out. On the submission side
++	// UniformBuffer::writeUniform emits an opcode and a value, two calls per
++	// bgfx::setUniform. On the render side UniformBuffer::read decodes one opcode per
++	// uniform, and each backend then stores the value into its own constant staging
++	// area for every draw, from a constant buffer built out of shader reflection at
++	// program creation rather than out of what the frame actually set.
++	//
++	// ::memcpy with a constant size is lowered to inline loads/stores by clang, gcc and
++	// msvc alike, and is free of the strict-aliasing question a fixed-size struct
++	// assignment would raise: neither end of these copies is guaranteed aligned.
++	// Semantics are ::memcpy's, exactly as bx::memCopy's are - callers already
++	// guarantee the ranges do not overlap - so the bytes moved are identical.
++	BX_FORCE_INLINE void uniformInlineCopy(void* _dst, const void* _src, uint32_t _numBytes)
++	{
++		if (_numBytes > kUniformInlineCopyMaxBytes)
++		{
++			bx::memCopy(_dst, _src, _numBytes);
++			return;
++		}
++
++		uint8_t*       dst = (uint8_t*)_dst;
++		const uint8_t* src = (const uint8_t*)_src;
++
++		uint32_t remaining = _numBytes;
++
++		while (remaining >= kUniformRegisterSize)
++		{
++			::memcpy(dst, src, kUniformRegisterSize);
++			dst       += kUniformRegisterSize;
++			src       += kUniformRegisterSize;
++			remaining -= kUniformRegisterSize;
++		}
++
++		// At most fifteen bytes are left. The tail is a straight-line ladder rather
++		// than a loop on purpose: a loop here is not provably short to the optimizer,
++		// which unrolls and vectorizes it into hundreds of bytes of never-taken code
++		// in a function that is inlined into the innermost draw loop.
++		if (remaining >= 8)
++		{
++			::memcpy(dst, src, 8);
++			dst       += 8;
++			src       += 8;
++			remaining -= 8;
++		}
++
++		if (remaining >= 4)
++		{
++			::memcpy(dst, src, 4);
++			dst       += 4;
++			src       += 4;
++			remaining -= 4;
++		}
++
++		// Every uniform payload size above is a multiple of four; these two keep the
++		// helper correct for any size - marker strings included - rather than relying
++		// on that.
++		if (remaining >= 2)
++		{
++			::memcpy(dst, src, 2);
++			dst       += 2;
++			src       += 2;
++			remaining -= 2;
++		}
++
++		if (remaining >= 1)
++		{
++			*dst = *src;
++		}
++	}
++
+ 	class UniformBuffer
+ 	{
+ 	public:
+@@ -1537,7 +1629,9 @@ namespace bgfx
+ 
+ 			if (m_pos + _size < m_size)
+ 			{
+-				bx::memCopy(&m_buffer[m_pos], _data, _size);
++				// Twice per bgfx::setUniform, on the submission thread, for every
++				// uniform of every draw (writeUniform: one opcode, one value).
++				uniformInlineCopy(&m_buffer[m_pos], _data, _size);
+ 				m_pos += _size;
+ 			}
+ 		}
+@@ -1558,7 +1652,9 @@ namespace bgfx
+ 		uint32_t read()
+ 		{
+ 			uint32_t result;
+-			bx::memCopy(&result, read(sizeof(uint32_t) ), sizeof(uint32_t) );
++			// Once per uniform per draw on the render thread, from every backend's
++			// constant-buffer replay and from rendererUpdateUniforms.
++			uniformInlineCopy(&result, read(sizeof(uint32_t) ), sizeof(uint32_t) );
+ 			return result;
+ 		}
+ 
+diff --git a/bgfx/src/renderer_mtl.mm b/bgfx/src/renderer_mtl.mm
+index 6cd1feb..457d592 100644
+--- a/bgfx/src/renderer_mtl.mm
++++ b/bgfx/src/renderer_mtl.mm
+@@ -1312,7 +1312,9 @@ void updateViewName(ViewId _id, const char* _name) override
+ 
+ 		void updateUniform(uint16_t _loc, const void* _data, uint32_t _size) override
+ 		{
+-			bx::memCopy(m_uniforms[_loc], _data, _size);
++			// One call per uniform command replayed by rendererUpdateUniforms
++			// (bgfx/src/bgfx.cpp:2512) for every draw of every frame.
++			uniformInlineCopy(m_uniforms[_loc], _data, _size);
+ 		}
+ 
+ 		void invalidateOcclusionQuery(OcclusionQueryHandle _handle) override
+@@ -1748,7 +1750,7 @@ void captureFinish()
+ 		void setShaderUniform(uint8_t _flags, uint32_t _loc, const void* _val, uint32_t _numRegs)
+ 		{
+ 			const bool inBounds = _loc <= kUniformStageScratchSize
+-				&& _numRegs <= (kUniformStageScratchSize - _loc) / 16
++				&& _numRegs <= (kUniformStageScratchSize - _loc) / kUniformRegisterSize
+ 				;
+ 			if (!inBounds)
+ 			{
+@@ -1767,7 +1769,15 @@ void setShaderUniform(uint8_t _flags, uint32_t _loc, const void* _val, uint32_t
+ 				? m_fsScratch
+ 				: m_vsScratch
+ 				;
+-			bx::memCopy(&dst[_loc], _val, _numRegs*16);
++			// One call per uniform the pipeline state's shaders declare, per draw,
++			// from both commit() and ViewState::setPredefined
++			// (bgfx/src/renderer.h:96) - the two hottest copy sites in this backend.
++			// commit() re-gathers every declared uniform rather than the ones the
++			// frame set: its constant buffer is built from Metal reflection in
++			// processArguments, so the count does not shrink when the application
++			// stops re-sending frame constants. The per-copy overhead is what is
++			// reducible here.
++			uniformInlineCopy(&dst[_loc], _val, _numRegs*kUniformRegisterSize);
+ 		}
+ 
+ 		void setShaderUniform4f(uint8_t _flags, uint32_t _loc, const void* _val, uint32_t _numRegs)
+@@ -1807,7 +1817,11 @@ void commit(UniformBuffer& _uniformBuffer)
+ 				else
+ 				{
+ 					UniformHandle handle;
+-					bx::memCopy(&handle, _uniformBuffer.read(sizeof(UniformHandle) ), sizeof(UniformHandle) );
++					// Every entry of every pipeline state's constant buffer takes this
++					// branch on every draw - they are all written with
++					// writeUniformHandle at program creation - so this two-byte read
++					// was a full cross-library call per uniform per draw.
++					uniformInlineCopy(&handle, _uniformBuffer.read(sizeof(UniformHandle) ), sizeof(UniformHandle) );
+ 					data = (const char*)m_uniforms[handle.idx];
+ 				}
+ 
+@@ -2955,13 +2969,17 @@ void endEncoding()
+ 		_out.offsets[0] = m_chunkOffset;
+ 		_out.offsets[1] = m_chunkOffset + vsSize;
+ 
++		// Programs with a small constant block - the UI and text pipelines above all -
++		// pay the same per-draw cross-library call here as the uniform stores do;
++		// uniformInlineCopy hands anything larger than one Mat4 straight to
++		// bx::memCopy, so the vectorized path is kept for terrain and skinned meshes.
+ 		if (NULL != _vsData && 0 != _vsSize)
+ 		{
+-			bx::memCopy(&chunk->data[_out.offsets[0]], _vsData, _vsSize);
++			uniformInlineCopy(&chunk->data[_out.offsets[0]], _vsData, _vsSize);
+ 		}
+ 		if (NULL != _fsData && 0 != _fsSize)
+ 		{
+-			bx::memCopy(&chunk->data[_out.offsets[1]], _fsData, _fsSize);
++			uniformInlineCopy(&chunk->data[_out.offsets[1]], _fsData, _fsSize);
+ 		}
+ 
+ 		m_chunkOffset += size;

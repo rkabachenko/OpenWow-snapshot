@@ -1,0 +1,110 @@
+diff --git a/bgfx/src/renderer_mtl.h b/bgfx/src/renderer_mtl.h
+index 620f67d..fc2443a 100644
+--- a/bgfx/src/renderer_mtl.h
++++ b/bgfx/src/renderer_mtl.h
+@@ -505,6 +505,17 @@ namespace bgfx { namespace mtl
+ 			[m_obj setVertexBuffer:_buffer offset:_offset atIndex:_index];
+ 		}
+ 
++		// Moves the binding within a buffer that is already bound at _index on this
++		// encoder. Binding a buffer registers it with the encoder's residency list -
++		// MTLResourceListAddResource / IOGPUResourceListAddResource, 241 samples on
++		// the render thread in a parked Dalaran profile - and setting only the offset
++		// skips that, because the resource is already resident. Apple requires that a
++		// buffer has been set at _index on this encoder first; callers must track that.
++		void setVertexBufferOffset(NSUInteger _offset, NSUInteger _index)
++		{
++			[m_obj setVertexBufferOffset:_offset atIndex:_index];
++		}
++
+ 		void setVertexSamplerState(id<MTLSamplerState> _sampler, NSUInteger _index)
+ 		{
+ 			[m_obj setVertexSamplerState:_sampler atIndex:_index];
+@@ -521,6 +532,12 @@ namespace bgfx { namespace mtl
+ 			[m_obj setFragmentBuffer:_buffer offset:_offset atIndex:_index];
+ 		}
+ 
++		// See setVertexBufferOffset.
++		void setFragmentBufferOffset(NSUInteger _offset, NSUInteger _index)
++		{
++			[m_obj setFragmentBufferOffset:_offset atIndex:_index];
++		}
++
+ 		void setFragmentSamplerState(id<MTLSamplerState> _sampler, NSUInteger _index)
+ 		{
+ 			[m_obj setFragmentSamplerState:_sampler atIndex:_index];
+diff --git a/bgfx/src/renderer_mtl.mm b/bgfx/src/renderer_mtl.mm
+index 457d592..d26ec8e 100644
+--- a/bgfx/src/renderer_mtl.mm
++++ b/bgfx/src/renderer_mtl.mm
+@@ -4576,6 +4576,22 @@ static void setTimestamp(void* _data)
+ 		bool currentFrontCcw = false;
+ 		bool frontWindingInitialized = false;
+ 
++		// Index 0 of both stages is the per-draw uniform block, and it is the only
++		// binding re-issued on literally every draw. Consecutive draws almost always
++		// land in the same scratch chunk - kUniformScratchChunkSize is 2 MiB against a
++		// few hundred bytes of constants per draw - so only the offset differs, and
++		// setVertexBufferOffset/setFragmentBufferOffset can move the binding without
++		// re-registering the buffer with the encoder's residency list.
++		//
++		// A tracked binding is only valid for the encoder that set it, so both are
++		// cleared wherever anything else can bind index 0 of the current encoder:
++		// where a new render command encoder is created below, and after clearQuad,
++		// which binds its own scratch there. Those are the only two such events inside
++		// this loop; blitRender and capture, the file's other index-0 binders, run
++		// after it.
++		id<MTLBuffer> boundVertexUniformBuffer   = nil;
++		id<MTLBuffer> boundFragmentUniformBuffer = nil;
++
+ 		ProgramHandle currentProgram = BGFX_INVALID_HANDLE;
+ 		SortKey key;
+ 		uint16_t view = UINT16_MAX;
+@@ -4828,6 +4844,8 @@ static void setTimestamp(void* _data)
+ 							m_renderCommandEncoder = rce;
+ 							m_renderCommandEncoderFrameBufferHandle = fbh;
+ 							MTL_RELEASE(renderPassDescriptor);
++							boundVertexUniformBuffer   = nil;
++							boundFragmentUniformBuffer = nil;
+ 							newRenderEncoder = true;
+ 							currentFrontCcw = false;
+ 							frontWindingInitialized = true;
+@@ -4883,6 +4901,8 @@ static void setTimestamp(void* _data)
+ 							&& !clearWithRenderPass)
+ 						{
+ 							clearQuad(_clearQuad, viewState.m_rect, clr, _render->m_colorPalette);
++							boundVertexUniformBuffer   = nil;
++							boundFragmentUniformBuffer = nil;
+ 						}
+ 					}
+ 				}
+@@ -5336,11 +5356,27 @@ static void setTimestamp(void* _data)
+ 
+ 						if (0 != vertexUniformBufferSize)
+ 						{
+-							rce.setVertexBuffer(scratch.buffer, scratch.offsets[0], 0);
++							if (scratch.buffer.m_obj == boundVertexUniformBuffer)
++							{
++								rce.setVertexBufferOffset(scratch.offsets[0], 0);
++							}
++							else
++							{
++								rce.setVertexBuffer(scratch.buffer, scratch.offsets[0], 0);
++								boundVertexUniformBuffer = scratch.buffer.m_obj;
++							}
+ 						}
+ 						if (0 != fragmentUniformBufferSize)
+ 						{
+-							rce.setFragmentBuffer(scratch.buffer, scratch.offsets[1], 0);
++							if (scratch.buffer.m_obj == boundFragmentUniformBuffer)
++							{
++								rce.setFragmentBufferOffset(scratch.offsets[1], 0);
++							}
++							else
++							{
++								rce.setFragmentBuffer(scratch.buffer, scratch.offsets[1], 0);
++								boundFragmentUniformBuffer = scratch.buffer.m_obj;
++							}
+ 						}
+ 					}
+ 				}

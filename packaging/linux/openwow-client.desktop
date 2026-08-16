@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=OpenWoW
+GenericName=World of Warcraft 3.3.5a client
+Comment=From-scratch reimplementation of the World of Warcraft 3.3.5a client
+Exec=openwow-client
+Icon=openwow
+Terminal=false
+Categories=Game;RolePlaying;
+Keywords=wow;warcraft;wotlk;
+StartupWMClass=openwow-client

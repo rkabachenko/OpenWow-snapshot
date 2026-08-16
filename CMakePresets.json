@@ -1,0 +1,237 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 24,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/.vcpkg/scripts/buildsystems/vcpkg.cmake",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "debug",
+      "inherits": [
+        "base"
+      ],
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "release",
+      "inherits": [
+        "base"
+      ],
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "BUILD_TESTING": "OFF"
+      }
+    },
+    {
+      "name": "release-lto",
+      "displayName": "Release + ThinLTO",
+      "inherits": [
+        "release"
+      ],
+      "cacheVariables": {
+        "OPENWOW_ENABLE_THINLTO": "ON"
+      }
+    },
+    {
+      "name": "release-pgo-generate",
+      "displayName": "Release + PGO instrumentation (step 1 of the PGO workflow)",
+      "inherits": [
+        "release"
+      ],
+      "cacheVariables": {
+        "OPENWOW_PGO_MODE": "generate"
+      }
+    },
+    {
+      "name": "release-pgo-use",
+      "displayName": "Release + ThinLTO + PGO (step 3 of the PGO workflow)",
+      "inherits": [
+        "release"
+      ],
+      "cacheVariables": {
+        "OPENWOW_ENABLE_THINLTO": "ON",
+        "OPENWOW_PGO_MODE": "use",
+        "OPENWOW_PGO_PROFILE_DATA": "${sourceDir}/build/release-pgo-generate/pgo/openwow.profdata"
+      }
+    },
+    {
+      "name": "ci-base",
+      "hidden": true,
+      "inherits": [
+        "base"
+      ],
+      "cacheVariables": {
+        "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "ci-linux-gcc",
+      "displayName": "CI Linux GCC (native x86_64 / aarch64)",
+      "inherits": [
+        "ci-base"
+      ],
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "gcc",
+        "CMAKE_CXX_COMPILER": "g++"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
+    {
+      "name": "ci-linux-clang",
+      "displayName": "CI Linux Clang (native x86_64 / aarch64)",
+      "inherits": [
+        "ci-base"
+      ],
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
+    {
+      "name": "ci-macos-arm64",
+      "displayName": "CI macOS arm64 (Apple Clang)",
+      "inherits": [
+        "ci-base"
+      ],
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "arm64-osx",
+        "VCPKG_HOST_TRIPLET": "arm64-osx",
+        "VCPKG_OVERLAY_TRIPLETS": "${sourceDir}/vcpkg-overlay-triplets",
+        "CMAKE_OSX_ARCHITECTURES": "arm64",
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "11.0"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      }
+    },
+    {
+      "name": "ci-macos-x86_64",
+      "displayName": "CI macOS x86_64 (Apple Clang, built on an arm64 runner)",
+      "inherits": [
+        "ci-base"
+      ],
+      "description": "GitHub retired its Intel macOS runners, so the x86_64 bundle is cross-built on Apple Silicon: x64-osx ports plus an arm64-osx host set for shaderc/pkgconf. The overlay triplets pin VCPKG_OSX_DEPLOYMENT_TARGET to the same 11.0 as CMAKE_OSX_DEPLOYMENT_TARGET so the vcpkg libraries and the client agree on the minimum OS.",
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "x64-osx",
+        "VCPKG_HOST_TRIPLET": "arm64-osx",
+        "VCPKG_OVERLAY_TRIPLETS": "${sourceDir}/vcpkg-overlay-triplets",
+        "CMAKE_OSX_ARCHITECTURES": "x86_64",
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "11.0"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      }
+    },
+    {
+      "name": "ci-windows-x64",
+      "displayName": "CI Windows x64 (MSVC, static CRT)",
+      "inherits": [
+        "ci-base"
+      ],
+      "description": "x64-windows-static builds every dependency (ffmpeg, SDL2, OpenSSL, ...) into the executable so the drop-in .exe has no DLLs beside it. The triplet uses the static CRT, and vcpkg.cmake does not propagate that choice to the consuming project, so CMAKE_MSVC_RUNTIME_LIBRARY is pinned here to keep the client and its libraries on the same runtime.",
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "x64-windows-static",
+        "VCPKG_HOST_TRIPLET": "x64-windows-static",
+        "CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreaded$<$<CONFIG:Debug>:Debug>"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    },
+    {
+      "name": "ci-windows-arm64",
+      "displayName": "CI Windows arm64 (MSVC x64->arm64 cross, static CRT)",
+      "inherits": [
+        "ci-base"
+      ],
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "arm64-windows-static",
+        "VCPKG_HOST_TRIPLET": "x64-windows-static",
+        "CMAKE_SYSTEM_NAME": "Windows",
+        "CMAKE_SYSTEM_PROCESSOR": "ARM64",
+        "CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreaded$<$<CONFIG:Debug>:Debug>",
+        "BUILD_TESTING": "OFF"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "debug",
+      "configurePreset": "debug"
+    },
+    {
+      "name": "release",
+      "configurePreset": "release"
+    },
+    {
+      "name": "release-lto",
+      "configurePreset": "release-lto"
+    },
+    {
+      "name": "release-pgo-generate",
+      "configurePreset": "release-pgo-generate"
+    },
+    {
+      "name": "release-pgo-use",
+      "configurePreset": "release-pgo-use"
+    },
+    {
+      "name": "ci-linux-gcc",
+      "configurePreset": "ci-linux-gcc"
+    },
+    {
+      "name": "ci-linux-clang",
+      "configurePreset": "ci-linux-clang"
+    },
+    {
+      "name": "ci-macos-arm64",
+      "configurePreset": "ci-macos-arm64"
+    },
+    {
+      "name": "ci-macos-x86_64",
+      "configurePreset": "ci-macos-x86_64"
+    },
+    {
+      "name": "ci-windows-x64",
+      "configurePreset": "ci-windows-x64"
+    },
+    {
+      "name": "ci-windows-arm64",
+      "configurePreset": "ci-windows-arm64"
+    }
+  ]
+}

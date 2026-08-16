@@ -1,0 +1,87 @@
+openwow_add_component(openwow_engine_core
+  session_manager.cpp
+  wtf_config.cpp
+  locale_system.cpp
+  screenshot_system.cpp
+  matrix_transform.cpp
+  string_interner.cpp
+  blizzard_hash_map_key.cpp
+  blizzard_hash_map.cpp
+  game_loop.cpp
+  system_manager.cpp
+  game_state_machine.cpp
+  window_manager.cpp
+  display_settings.cpp
+  game_subsystems.cpp
+  memory_pool_manager.cpp
+  runtime_config.cpp
+  storm_tls.cpp
+  storm_thread.cpp
+  storm_memory.cpp
+  storm_component.cpp
+  storm_string.cpp
+  storm_c_exports.cpp
+  storm_file_io.cpp
+  legacy_buffered_log_file.cpp
+  streaming_storage.cpp
+  console.cpp
+  cvar.cpp
+  gxcvar.cpp
+  md5.cpp
+  storm_alloc.cpp
+  storm_error.cpp
+  storm_ref_counted.cpp
+  cobject_heap.cpp
+  cmap_hashtable.cpp
+  client_init.cpp
+  client_misc.cpp
+  init_subsystems.cpp
+  client_init_funcs.cpp
+  csimple_bit_array.cpp
+  dynamic_string.cpp
+  file_stack_log_banner.cpp
+  io_unit_container.cpp
+  lmem_pool.cpp
+  login_state_handler.cpp
+  mpq_internals.cpp
+  rcstring.cpp
+  screenshot_jpeg_writer.cpp
+  screenshot_watermark.cpp
+  storm_big.cpp
+  storm_bitmap.cpp
+  storm_cmd.cpp
+  storm_comp.cpp
+  storm_debug.cpp
+  storm_huffman.cpp
+  storm_lock.cpp
+  storm_region.cpp
+  storm_sync.cpp
+  storm_utils.cpp
+)
+target_link_libraries(openwow_engine_core PRIVATE
+
+  openwow_audio
+  openwow_debug_runtime
+  openwow_foundation
+  openwow_foundation_diagnostics
+  openwow_foundation_text
+  openwow_game
+  openwow_input
+  openwow_lua
+  openwow_net
+  openwow_platform_dynamic_libraries
+  openwow_platform_filesystem
+  openwow_platform_runtime
+  openwow_storage_persistence
+  OpenSSL::Crypto
+  SDL2::SDL2
+  ZLIB::ZLIB
+)
+target_compile_definitions(openwow_engine_core PRIVATE
+  OPENWOW_HAS_STORMLIB=$<BOOL:${OPENWOW_HAS_STORMLIB}>
+)
+if(OPENWOW_HAS_STORMLIB)
+  target_link_libraries(openwow_engine_core PRIVATE
+    ${OPENWOW_STORMLIB_TARGET}
+  )
+endif()

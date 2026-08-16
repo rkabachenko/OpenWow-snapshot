@@ -1,0 +1,46 @@
+// Windows resources for openwow-client.exe: application icon, VERSIONINFO and
+// the embedded application manifest. Configured by CMake
+// (apps/client/CMakeLists.txt) into the build tree; the @...@ tokens are
+// substituted from the project version and the packaging source directory.
+// The manifest is embedded here as RT_MANIFEST id 1 (works with both rc.exe
+// and windres); the MSVC linker's own manifest generation is disabled
+// (/MANIFEST:NO) so the two never collide (CVT1100 duplicate resource).
+#include <winver.h>
+
+#define OPENWOW_RT_MANIFEST 24
+#define OPENWOW_MANIFEST_RESOURCE_ID 1
+
+// Icon id 1 is the first icon in the executable, which Explorer shows.
+1 ICON "@OPENWOW_WINDOWS_ICON_PATH@"
+
+OPENWOW_MANIFEST_RESOURCE_ID OPENWOW_RT_MANIFEST "@OPENWOW_WINDOWS_MANIFEST_PATH@"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION @OPENWOW_VERSION_RC_COMMA@
+ PRODUCTVERSION @OPENWOW_VERSION_RC_COMMA@
+ FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+ FILEFLAGS 0x0L
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+ FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        // 040904b0 = U.S. English, Unicode.
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName", "OpenWoW contributors"
+            VALUE "FileDescription", "OpenWoW client (World of Warcraft 3.3.5a reimplementation)"
+            VALUE "FileVersion", "@OPENWOW_VERSION_RC@"
+            VALUE "InternalName", "openwow-client"
+            VALUE "LegalCopyright", "OpenWoW contributors"
+            VALUE "OriginalFilename", "openwow-client.exe"
+            VALUE "ProductName", "OpenWoW"
+            VALUE "ProductVersion", "@OPENWOW_VERSION_RC@"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

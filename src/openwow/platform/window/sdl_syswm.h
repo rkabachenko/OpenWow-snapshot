@@ -1,0 +1,77 @@
+
+#pragma once
+
+#include <SDL2/SDL_syswm.h>
+
+#undef None
+#undef ParentRelative
+#undef CopyFromParent
+#undef PointerWindow
+#undef InputFocus
+#undef PointerRoot
+#undef AnyPropertyType
+#undef AnyKey
+#undef AnyButton
+#undef AllTemporary
+#undef CurrentTime
+#undef NoSymbol
+
+#undef Bool
+#undef Status
+#undef True
+#undef False
+#undef Success
+
+#undef KeyPress
+#undef KeyRelease
+#undef ButtonPress
+#undef ButtonRelease
+#undef MotionNotify
+#undef EnterNotify
+#undef LeaveNotify
+#undef FocusIn
+#undef FocusOut
+#undef KeymapNotify
+#undef Expose
+#undef GraphicsExpose
+#undef NoExpose
+#undef VisibilityNotify
+#undef CreateNotify
+#undef DestroyNotify
+#undef UnmapNotify
+#undef MapNotify
+#undef MapRequest
+#undef ReparentNotify
+#undef ConfigureNotify
+#undef ConfigureRequest
+#undef GravityNotify
+#undef ResizeRequest
+#undef CirculateNotify
+#undef CirculateRequest
+#undef PropertyNotify
+#undef SelectionClear
+#undef SelectionRequest
+#undef SelectionNotify
+#undef ColormapNotify
+#undef ClientMessage
+#undef MappingNotify
+
+#undef Above
+#undef Below
+#undef TopIf
+#undef BottomIf
+#undef Opposite
+#undef DestroyAll
+#undef RetainPermanent
+#undef RetainTemporary
+#undef GrabModeSync
+#undef GrabModeAsync
+#undef Complex
+#undef Nonconvex
+#undef Convex
+#undef CursorShape
+#undef TileShape
+#undef StippleShape
+#undef Always
+#undef NotUseful
+#undef WhenMapped

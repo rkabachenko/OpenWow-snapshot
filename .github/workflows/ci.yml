@@ -1,0 +1,22 @@
+# Builds the client on every supported platform, on every push and PR.
+#
+# The matrix, the caches and the build steps all live in build.yml, which
+# release.yml calls too -- see its header. This file only decides when that
+# runs. Artifacts here are the bare executable per lane, which is what proves a
+# lane compiles and links; the packaged AppImage / .app / .exe archives are
+# produced by the release path.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    uses: ./.github/workflows/build.yml
