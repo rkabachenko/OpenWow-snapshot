@@ -37,9 +37,9 @@
 #include "openwow/game/spellbook_system.h"
 #include "openwow/game/targeting.h"
 #include "openwow/game/taxi_map_frame.h"
-#include "openwow/game/trainer_system.h"
 #include "openwow/game/world_session.h"
 #include "openwow/foundation/diagnostics/logging.h"
+#include "openwow/net/wotlk/protocol/packet_sender.h"
 #include "openwow/runtime/time/game_clock.h"
 #include "openwow/foundation/math/row_major_mat4x4.h"
 #include "openwow/ui/game/cvar_system.h"
@@ -107,6 +107,16 @@ bool DispatchFriendlyUnitInteraction(WorldSession &session, const CGUnit_C &unit
   if ((npc_flags & UNIT_NPC_FLAG_GOSSIP) != 0) {
     session.interaction().SendGossipHello(guid);
     return true;
+  }
+
+  if ((npc_flags & UNIT_NPC_FLAG_QUESTGIVER) != 0 &&
+      !session.quests().FindQuestGiverStatus(unit.GetGuid()).has_value()) {
+    openwow::diagnostics::Log(
+        openwow::diagnostics::LogLevel::kWarn,
+        "NPC interaction stage=dispatch source=friendly-unit guid=" +
+            std::to_string(guid) + " entry=" + std::to_string(unit.GetEntry()) +
+            " flags=" + std::to_string(npc_flags) +
+            " reason=questgiver-status-unavailable");
   }
 
   const auto quest_overlay_status = unit.GetOverlayDisplayType();
@@ -210,6 +220,15 @@ void StartUnitApproach(WorldSession &session, const CGUnit_C &unit,
           unit.State().GetCombatReach()));
 }
 
+[[nodiscard]] bool CanStartRightClickAutoApproach(
+    const WorldSession &session, const CGPlayer_C &active_player) {
+  return static_cast<std::int32_t>(active_player.State().GetHealth()) > 0 &&
+         active_player.IsActiveMover() &&
+         ::openwow::ui::game::CVarSystem::Instance().GetCVarBool(
+             "autoInteract") &&
+         session.click_to_move().IsEnabled();
+}
+
 [[nodiscard]] bool IsFriendlyUnitInteractionInRangeOrStartAutoApproach(
     WorldSession &session, const CGUnit_C &unit, const CGPlayer_C &active_player) {
   if (unit.State().GetNpcFlags() == 0u) {
@@ -223,8 +242,7 @@ void StartUnitApproach(WorldSession &session, const CGUnit_C &unit,
   if (distance * distance <= interaction_range_squared) {
     return true;
   }
-  if (static_cast<std::int32_t>(active_player.State().GetHealth()) <= 0 ||
-      !active_player.IsActiveMover() || !session.click_to_move().IsEnabled()) {
+  if (!CanStartRightClickAutoApproach(session, active_player)) {
     return false;
   }
 
@@ -360,8 +378,10 @@ void RefreshVisibleFactionLinkedToUnit(const CGUnit_C &context_unit) {
 std::optional<ReactionType> ResolveReactionTowardActivePlayerControlledUnit(
     const data::dbc::FactionTemplateEntry &source_entry,
     const CGUnit_C &target) {
+  const auto *const controller =
+      target.Interaction().ResolveControllingPlayer();
   if (!target.Interaction().IsPlayerControlled() ||
-      !IsActivePlayerController(target.Interaction().ResolveControllingPlayer())) {
+      !IsActivePlayerController(controller)) {
     return std::nullopt;
   }
   const auto *const dbc = target.dbc_loader();
@@ -371,12 +391,16 @@ std::optional<ReactionType> ResolveReactionTowardActivePlayerControlledUnit(
   auto &reputation = ReputationInfo::Get();
   reputation.BindDbc(dbc);
   const auto faction_id = static_cast<std::int32_t>(source_entry.faction);
+  if ((source_entry.flags & 0x1000u) != 0u &&
+      (controller->GetUInt32(PLAYER_FLAGS) & 0x100u) != 0u) {
+    return ReactionType::kHostile;
+  }
   if (const auto forced =
           reputation.FindForcedReactionStanding(source_entry.faction);
       forced.has_value()) {
     return ClampReactionLevel(*forced);
   }
-  if ((target.State().GetUnitFlags2() & 0x4u) != 0u ||
+  if ((controller->State().GetDynamicFlags() & 0x4u) != 0u ||
       !reputation.HasReputationList(faction_id)) {
     return std::nullopt;
   }
@@ -386,10 +410,11 @@ std::optional<ReactionType> ResolveReactionTowardActivePlayerControlledUnit(
 
 std::optional<ReactionType> ResolveReactionFromActivePlayerControlledUnit(
     const CGUnit_C &viewer,
-    const data::dbc::FactionTemplateEntry &target_entry,
-    const CGUnit_C &target) {
+    const data::dbc::FactionTemplateEntry &target_entry) {
+  const auto *const controller =
+      viewer.Interaction().ResolveControllingPlayer();
   if (!viewer.Interaction().IsPlayerControlled() ||
-      !IsActivePlayerController(viewer.Interaction().ResolveControllingPlayer())) {
+      !IsActivePlayerController(controller)) {
     return std::nullopt;
   }
   const auto *const dbc = viewer.dbc_loader();
@@ -404,9 +429,13 @@ std::optional<ReactionType> ResolveReactionFromActivePlayerControlledUnit(
       forced.has_value()) {
     return ClampReactionLevel(*forced);
   }
-  if ((target.State().GetUnitFlags2() & 0x4u) != 0u ||
+  if ((controller->State().GetDynamicFlags() & 0x4u) != 0u ||
       !reputation.HasReputationList(faction_id)) {
     return std::nullopt;
+  }
+  if ((target_entry.flags & 0x1000u) != 0u &&
+      (controller->GetUInt32(PLAYER_FLAGS) & 0x100u) != 0u) {
+    return ReactionType::kHostile;
   }
   return reputation.IsAtWar(faction_id) ? ReactionType::kHostile
                                          : ReactionType::kFriendly;
@@ -502,16 +531,24 @@ void UnitInteractionRuntime::RightClickInteract(
     return;
   }
 
-  if (owner_.State().IsLootableCorpseNow()) {
+  const bool lootable_now = owner_.State().IsLootableCorpseNow();
+  if (owner_.State().IsDead()) {
+    diagnostics::Log(diagnostics::LogLevel::kInfo,
+        "unit_interaction: source=right_click corpse=" +
+            std::to_string(owner_.GetGuid().GetRawValue()) +
+            " entry=" + std::to_string(owner_.GetEntry()) +
+            " dynamic_flags=" + std::to_string(owner_.State().GetDynamicFlags()) +
+            " lootable_now=" + std::to_string(lootable_now) +
+            " distance=" + std::to_string(player_obj->GetDistance(owner_)));
+  }
+  if (lootable_now) {
 
     const double loot_range_squared =
         ui::game::detail::GetUnitInteractionRangeSquared(*player_obj, owner_);
     const float loot_distance = player_obj->GetDistance(owner_);
     if (static_cast<double>(loot_distance) * loot_distance >
         loot_range_squared) {
-      if (static_cast<std::int32_t>(player_obj->State().GetHealth()) > 0 &&
-          player_obj->IsActiveMover() &&
-          session->click_to_move().IsEnabled()) {
+      if (CanStartRightClickAutoApproach(*session, *player_obj)) {
         StartUnitApproach(*session, owner_, *player_obj);
         return;
       }
@@ -845,7 +882,7 @@ ReactionType UnitInteractionRuntime::GetReaction(const CGUnit_C &other) const {
     return *override;
   }
   if (const auto override = ResolveReactionFromActivePlayerControlledUnit(
-           owner_, *their_entry, other);
+           owner_, *their_entry);
       override.has_value()) {
     return *override;
   }
@@ -955,6 +992,60 @@ void UnitInteractionRuntime::RefreshFactionDependentState(
   if (refresh_linked_visible_units) {
     RefreshVisibleFactionLinkedToUnit(owner_);
   }
+  RefreshNpcInteractionStatus(session, "faction-update");
+}
+
+void UnitInteractionRuntime::RefreshNpcInteractionStatus(
+    WorldSession &session, const char *source) const {
+  const auto *const active_player = session.objects().GetActivePlayer();
+  if (active_player == nullptr) {
+    // Active-player establishment performs the initial visible-set refresh.
+    return;
+  }
+
+  const auto guid = owner_.GetGuid();
+  if (GetReaction(*active_player) < ReactionType::kNeutral) {
+    session.quests().EraseQuestGiverStatus(guid);
+    owner_.ClearOverlayModelImmediate();
+    return;
+  }
+
+  const auto npc_flags = owner_.State().GetNpcFlags();
+  const bool questgiver = (npc_flags & UNIT_NPC_FLAG_QUESTGIVER) != 0u;
+  const bool flightmaster = (npc_flags & UNIT_NPC_FLAG_FLIGHTMASTER) != 0u;
+  if (!flightmaster && owner_.GetOverlayModelIndexOverride() != 0u) {
+    owner_.SetOverlayModelIndexOverride(0u);
+  }
+  if (!questgiver) {
+    session.quests().EraseQuestGiverStatus(guid);
+    owner_.SetOverlayDisplayType(OverlayDisplayType::kNone);
+  }
+  if (!questgiver && !flightmaster) {
+    owner_.ClearOverlayModelImmediate();
+    return;
+  }
+
+  const auto log_status_query = [&](const bool sent, const char *opcode) {
+    const auto level = sent ? openwow::diagnostics::LogLevel::kDebug
+                            : openwow::diagnostics::LogLevel::kWarn;
+    if (openwow::diagnostics::IsLogEnabled(level)) {
+      openwow::diagnostics::Log(
+          level, "NPC interaction status stage=query source=" + std::string(source) +
+                     " guid=" + guid.ToString() +
+                     " entry=" + std::to_string(owner_.GetEntry()) +
+                     " flags=" + std::to_string(npc_flags) + " opcode=" + opcode +
+                     (sent ? " result=sent" : " reason=send-failed"));
+    }
+  };
+  if (questgiver) {
+    log_status_query(
+        session.Send(net::wotlk::PacketSender::BuildQuestgiverStatusQuery(guid.GetRawValue())),
+        "CMSG_QUESTGIVER_STATUS_QUERY");
+  }
+  if (flightmaster) {
+    log_status_query(session.interaction().SendTaxiNodeStatusQuery(guid.GetRawValue()),
+                     "CMSG_TAXINODE_STATUS_QUERY");
+  }
 }
 
 void UnitInteractionRuntime::RefreshLinkedVisibleUnitFactionState() const {
@@ -1039,10 +1130,8 @@ void UnitInteractionRuntime::ApplyActivePlayerDeathSideEffects(
 }
 
 void UnitInteractionRuntime::OnNPCInteractionFlagsChanged(
-    WorldSession &session, const std::uint32_t new_flags) {
-  const std::uint32_t old_flags = cached_npc_interaction_flags_;
+    WorldSession &session, const std::uint32_t old_flags, const std::uint32_t new_flags) {
   const std::uint32_t changed   = old_flags ^ new_flags;
-  cached_npc_interaction_flags_  = new_flags;
 
   if (changed == 0) {
     return;
@@ -1052,12 +1141,13 @@ void UnitInteractionRuntime::OnNPCInteractionFlagsChanged(
 
   if ((changed & 0x1) != 0 && (new_flags & 0x1) == 0) {
 
-    if (session.gossip().interaction_guid().GetRawValue() == my_guid) {
+    if (session.gossip().gossip_guid().GetRawValue() == my_guid) {
       ui::game::CloseGossipInteraction(session);
     }
   }
 
   if ((changed & 0x2) != 0) {
+    RefreshNpcInteractionStatus(session, "questgiver-flags-update");
     if ((new_flags & 0x2) == 0) {
       {
         const auto &qf_state = session.quests().quest_frame_interaction_state();
@@ -1073,17 +1163,18 @@ void UnitInteractionRuntime::OnNPCInteractionFlagsChanged(
   }
 
   if ((changed & 0x2000) != 0) {
+    RefreshNpcInteractionStatus(session, "flightmaster-flags-update");
     if ((new_flags & 0x2000) == 0) {
       if (GetTaxiMapFrameNpcGuid(session.taxi()) == my_guid) {
-        TaxiMapFrame_Close(session.taxi());
+        TaxiMapFrame_Close(session);
       }
     }
   }
 
   if ((changed & 0x10) != 0 && (new_flags & 0x10) == 0) {
-    if (TrainerSystem::Get().GetTrainerGuid() == my_guid) {
-      TrainerSystem::Get().CloseTrainer();
-    }
+    ui::game::CloseTrainerInteraction(
+        session, owner_.GetGuid(),
+        ui::game::NpcInteractionClosureCause::UnitUnavailable);
   }
 
   if ((changed & 0x20000) != 0 && (new_flags & 0x20000) == 0) {

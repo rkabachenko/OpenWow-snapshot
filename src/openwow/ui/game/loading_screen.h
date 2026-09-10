@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -87,14 +88,16 @@ class GameLoadingScreen {
   bool Initialize();
 
   void Shutdown();
+  void ReleaseRendererDeviceResources();
+  bool RestoreRendererDeviceResources();
 
   void PrepareMap(std::uint32_t map_id);
   void ReleaseMap();
 
   void SetFileLoader(
-      std::function<std::vector<std::uint8_t>(const std::string&)> loader) {
-    file_loader_ = std::move(loader);
-  }
+      std::function<std::vector<std::uint8_t>(const std::string&)> loader);
+
+  void SetFontPath(std::string path);
 
   void SetArchivePathProbe(
       std::function<bool(const std::string&)> probe) {
@@ -117,6 +120,7 @@ class GameLoadingScreen {
   std::unique_ptr<GpuState> gpu_;
 
   bool initialized_{false};
+  bool renderer_device_resources_ready_{false};
 
   void DrawQuad(std::uint8_t view_id, float x, float y, float w, float h,
                 std::uint32_t abgr);
@@ -160,11 +164,14 @@ class GameLoadingScreen {
                                      float progress);
   bool TryLoadBackgroundTexturePath(std::string_view texture_path,
                                     bool use_wide_aspect);
+  bool InitializeTextRenderer();
 
   float content_aspect_ratio_{detail::kStandardLoadingScreenAspectRatio};
   std::function<std::vector<std::uint8_t>(const std::string&)> file_loader_;
   std::function<bool(const std::string&)> archive_path_probe_;
+  std::string font_path_{"Fonts\\FRIZQT__.TTF"};
   const void* dbc_loader_{nullptr};
+  std::optional<std::uint32_t> prepared_map_id_;
 
 };
 

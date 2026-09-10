@@ -67,7 +67,6 @@ void CGUnit_C::OnUnitFlags2Changed(WorldSession &session,
   if (changed & 0x200000) {
     OnVirtualItemDisplayChanged(0);
     OnVirtualItemDisplayChanged(1);
-    ui::game::ScriptEventDispatch::Get().FireUnitFlags(GetGuid().GetRawValue());
   }
 
   if (changed & 0x180) {
@@ -84,14 +83,6 @@ void CGUnit_C::OnUnitFlags2Changed(WorldSession &session,
       ui::game::ScriptEventDispatch::Get().FireEvent(
           attack_active ? ui::game::events::PET_ATTACK_START : ui::game::events::PET_ATTACK_STOP);
     }
-  }
-
-  if (changed & 0x4000000) {
-    ui::game::ScriptEventDispatch::Get().FireUnitFlags(GetGuid().GetRawValue());
-  }
-
-  if (changed & 0x8000000) {
-    ui::game::ScriptEventDispatch::Get().FireUnitFlags(GetGuid().GetRawValue());
   }
 
   if ((changed & 0x2000000) && (new_flags & 0x2000000)) {
@@ -140,11 +131,8 @@ int CGUnit_C::OnPowerValueChanged(ObjectManager &objects, WorldSession &session,
     return 1;
   }
 
-  auto &dispatch = ui::game::ScriptEventDispatch::Get();
-  dispatch.FireUnitPowerSpecific(guid, static_cast<std::uint8_t>(
-                                           unit->State().GetPowerType()));
-
   if (unit->IsActivePlayer()) {
+    auto &dispatch = ui::game::ScriptEventDispatch::Get();
     if (ui::game::detail::RefreshAllActionSlotValidation(session)) {
       dispatch.FireActionbarUpdateUsable();
     }
@@ -162,11 +150,8 @@ int CGUnit_C::OnMaxPowerChanged(ObjectManager &objects, WorldSession &session,
     return 1;
   }
 
-  auto &dispatch = ui::game::ScriptEventDispatch::Get();
-  dispatch.FireUnitMaxPowerSpecific(
-      guid, static_cast<std::uint8_t>(unit->State().GetPowerType()));
-
   if (unit->IsActivePlayer()) {
+    auto &dispatch = ui::game::ScriptEventDispatch::Get();
     if (ui::game::detail::RefreshAllActionSlotValidation(session)) {
       dispatch.FireActionbarUpdateUsable();
     }
@@ -181,8 +166,6 @@ int CGUnit_C::OnPowerTypeChanged(ObjectManager &objects, WorldSession &session,
   if (unit == nullptr) {
     return 1;
   }
-
-  ui::game::ScriptEventDispatch::Get().FireUnitDisplayPower(guid);
 
   if (unit->IsActivePlayer()) {
     auto &dispatch = ui::game::ScriptEventDispatch::Get();
@@ -211,12 +194,13 @@ int CGUnit_C::OnShapeshiftFormChanged(const std::uint64_t guid) {
 }
 
 int OnNpcFlagsChanged(ObjectManager &objects, WorldSession &session,
-                      const std::uint64_t guid, int, int,
+                      const std::uint64_t guid, int, int old_value,
                       const std::uint32_t *new_value) {
   if (new_value != nullptr) {
     if (auto *const unit = objects.GetMutableUnit(ObjectGuid(guid));
         unit != nullptr) {
-      unit->Interaction().OnNPCInteractionFlagsChanged(session, *new_value);
+      unit->Interaction().OnNPCInteractionFlagsChanged(
+          session, static_cast<std::uint32_t>(old_value), *new_value);
     }
   }
   return 1;
@@ -458,15 +442,12 @@ void RegisterUnitDescriptorCallbacks(WorldSession& session) {
   record(registry.RegisterTypeSectionCallback(
       TypeID::kUnit, 0xC0, 4,
       [&session](const DescriptorFieldChangeView& v) {
-        const auto guid_raw = v.guid.GetRawValue();
         auto* const objects = v.object.object_manager();
         auto* unit = objects != nullptr ? objects->GetMutableUnit(v.guid)
                                         : nullptr;
         if (unit != nullptr) {
           unit->OnLevelChanged(session);
         }
-        auto& dispatch = openwow::ui::game::ScriptEventDispatch::Get();
-        dispatch.FireUnitLevel(guid_raw);
       }));
 
   {

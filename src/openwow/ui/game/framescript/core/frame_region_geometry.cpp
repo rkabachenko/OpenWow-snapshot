@@ -2,6 +2,7 @@
 
 #include "openwow/render/resources/fonts/text_layout.h"
 #include "openwow/ui/font_string_layout.h"
+#include "openwow/ui/game/framescript/core/frame_font_runtime.h"
 #include "openwow/ui/game/framescript/core/frame_script_object_runtime.h"
 #include "openwow/ui/game/lua_frame_mutation_policy.h"
 #include "openwow/ui/game/framescript/core/lua_script_object_access.h"
@@ -299,39 +300,22 @@ static LuaRegionKind ReadLuaRegionKind(lua_State *L, const int index,
   lua_pop(L, 1);
   return kind;
 }
-std::optional<openwow::render::text::TextLayout>
-MeasureLuaFontStringMetrics(lua_State *L, int font_string_index);
-
-static constexpr const char kRootFrameName[] = "UIParent";
-
 lua_Number ReadStoredFrameScaleField(lua_State* L, int frame_index) {
   const auto scale = ReadLuaTableNumberField(L, frame_index, "__ow_scale");
   return scale.has_value() ? static_cast<lua_Number>(*scale) : 1.0;
 }
 
-static bool IsRootScriptFrame(lua_State* L, int frame_index) {
-  if (lua_istable(L, frame_index) == 0) {
-    return false;
-  }
-  const char* const key = GetFrameRuntimeKeyOrName(L, frame_index);
-  return key != nullptr && std::strcmp(key, kRootFrameName) == 0;
-}
-
 lua_Number ReadFrameScaleFieldOrDefault(lua_State* L, int frame_index) {
-  const lua_Number stored = ReadStoredFrameScaleField(L, frame_index);
-  if (!IsRootScriptFrame(L, frame_index)) {
-    return stored;
-  }
-
+  const auto stored = static_cast<float>(ReadStoredFrameScaleField(L, frame_index));
+  const char* const key = GetFrameRuntimeKeyOrName(L, frame_index);
   const auto* manager = runtime::WorldUiRuntimeContext::FromLua(L);
-  return manager != nullptr ? stored * manager->root_scale() : stored;
+  return openwow::ui::framexml::ResolveLocalFrameScale(
+      key != nullptr ? key : "", stored,
+      manager != nullptr ? manager->root_scale() : 1.0F);
 }
 
 lua_Number ComputeFrameEffectiveScale(lua_State* L, int frame_index) {
   lua_Number effective = 1.0;
-  if (const auto* manager = runtime::WorldUiRuntimeContext::FromLua(L); manager != nullptr) {
-    effective = manager->root_scale();
-  }
 
   lua_pushvalue(L, lua_absindex(L, frame_index));
   constexpr int kMaxDepth = 64;
@@ -340,7 +324,7 @@ lua_Number ComputeFrameEffectiveScale(lua_State* L, int frame_index) {
       break;
     }
 
-    effective *= ReadStoredFrameScaleField(L, -1);
+    effective *= ReadFrameScaleFieldOrDefault(L, -1);
 
     runtime::GetInternedLuaField(L, -1, "__ow_parent");
     lua_remove(L, -2);
@@ -423,8 +407,11 @@ static LuaRegionSizeValues ResolveLuaFontStringEffectiveSize(
   return resolved;
 }
 
-LuaRegionSizeValues ResolveLuaRegionSizeValues(lua_State *L, int self_index,
-                                                      const bool use_explicit) {
+enum class LuaRegionSizeQuery : std::uint8_t { Width, Height, Size };
+
+static LuaRegionSizeValues ResolveLuaRegionSizeValuesForQuery(
+    lua_State *L, int self_index, const bool use_explicit,
+    const LuaRegionSizeQuery query) {
   self_index = lua_absindex(L, self_index);
   const int keys_base_top = lua_gettop(L);
   const region_field::Keys keys = region_field::PushKeys(L);
@@ -438,47 +425,51 @@ LuaRegionSizeValues ResolveLuaRegionSizeValues(lua_State *L, int self_index,
                                                                    keys)
                     .value_or(0.0f),
   };
-  if (use_explicit) {
-    return size;
-  }
-
   const LuaRegionKind kind = ReadLuaRegionKind(L, self_index, keys);
   if (kind == LuaRegionKind::FontString) {
-    return ResolveLuaFontStringEffectiveSize(L, self_index, size);
+    size = ResolveLuaFontStringEffectiveSize(L, self_index, size);
+  } else if (kind == LuaRegionKind::Texture) {
+    size = ResolveLuaTextureEffectiveSize(L, self_index, size);
   }
 
-  if (size.width != 0.0f && size.height != 0.0f) {
+  const bool needs_resolved_rect =
+      !use_explicit &&
+      ((query == LuaRegionSizeQuery::Width && size.width == 0.0f) ||
+       (query == LuaRegionSizeQuery::Height && size.height == 0.0f) ||
+       (query == LuaRegionSizeQuery::Size &&
+        (size.width == 0.0f || size.height == 0.0f)));
+  if (!needs_resolved_rect) {
     return size;
   }
 
   ScriptFrameUiRect rect{};
   if (!TryGetScriptFrameRect(L, self_index, &rect)) {
-
-    if (kind == LuaRegionKind::Texture) {
-      return ResolveLuaTextureEffectiveSize(L, self_index, size);
-    }
     return size;
   }
 
-  if (size.width == 0.0f) {
+  if (query == LuaRegionSizeQuery::Width) {
     size.width = static_cast<float>(rect.width);
-  }
-  if (size.height == 0.0f) {
+  } else if (query == LuaRegionSizeQuery::Height) {
+    size.height = static_cast<float>(rect.height);
+  } else {
+    size.width = static_cast<float>(rect.width);
     size.height = static_cast<float>(rect.height);
   }
-
-  if ((size.width == 0.0f || size.height == 0.0f) &&
-      kind == LuaRegionKind::Texture) {
-    size = ResolveLuaTextureEffectiveSize(L, self_index, size);
-  }
   return size;
+}
+
+LuaRegionSizeValues ResolveLuaRegionSizeValues(lua_State *L, int self_index,
+                                               const bool use_explicit) {
+  return ResolveLuaRegionSizeValuesForQuery(
+      L, self_index, use_explicit, LuaRegionSizeQuery::Size);
 }
 
 int LuaRegion_GetWidth(lua_State *L) {
   const int self_index = ValidateFrameScriptSelf(L);
   const LuaRegionSizeValues size =
-      ResolveLuaRegionSizeValues(L, self_index,
-                                 ScriptReadBoolArgOrDefault(L, 2, false));
+      ResolveLuaRegionSizeValuesForQuery(
+          L, self_index, ScriptReadBoolArgOrDefault(L, 2, false),
+          LuaRegionSizeQuery::Width);
   lua_pushnumber(L, size.width);
   return 1;
 }
@@ -486,8 +477,9 @@ int LuaRegion_GetWidth(lua_State *L) {
 int LuaRegion_GetHeight(lua_State *L) {
   const int self_index = ValidateFrameScriptSelf(L);
   const LuaRegionSizeValues size =
-      ResolveLuaRegionSizeValues(L, self_index,
-                                 ScriptReadBoolArgOrDefault(L, 2, false));
+      ResolveLuaRegionSizeValuesForQuery(
+          L, self_index, ScriptReadBoolArgOrDefault(L, 2, false),
+          LuaRegionSizeQuery::Height);
   lua_pushnumber(L, size.height);
   return 1;
 }
@@ -495,8 +487,9 @@ int LuaRegion_GetHeight(lua_State *L) {
 int LuaRegion_GetSize(lua_State *L) {
   const int self_index = ValidateFrameScriptSelf(L);
   const LuaRegionSizeValues size =
-      ResolveLuaRegionSizeValues(L, self_index,
-                                 ScriptReadBoolArgOrDefault(L, 2, false));
+      ResolveLuaRegionSizeValuesForQuery(
+          L, self_index, ScriptReadBoolArgOrDefault(L, 2, false),
+          LuaRegionSizeQuery::Size);
   lua_pushnumber(L, size.width);
   lua_pushnumber(L, size.height);
   return 2;

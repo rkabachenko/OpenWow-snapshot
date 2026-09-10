@@ -1,5 +1,7 @@
 #include "openwow/render/m2/m2_skinned_mesh.h"
 
+#include "openwow/render/scene/shadow_data.h"
+
 #include "openwow/render/m2/m2_public_types.h"
 #include "openwow/render/m2/m2_shaders.h"
 #include "openwow/render/m2/m2_skin_geometry.h"
@@ -296,6 +298,8 @@ void M2SkinnedMesh::UploadPackedBatchUniforms(
   fragment_params[kM2FragmentParamMaterialFlags] = uniforms.material_flags;
   fragment_params[kM2FragmentParamFogParams] = uniforms.fog_params;
   fragment_params[kM2FragmentParamFogColor] = uniforms.fog_color;
+  fragment_params[kM2FragmentParamWorldShadowReceiver] =
+      uniforms.world_shadow_receiver;
   draw.setUniform(shader.u_fragment_params, fragment_params.data(),
                   kM2FragmentParamCount);
 }
@@ -349,6 +353,8 @@ M2ResultStatus M2SkinnedMesh::SubmitSkinnedBatch(
   }
 
   UploadPackedBatchUniforms(draw, uniforms, selection.reads_lighting_uniforms);
+  BindActiveWorldModelShadowState(
+      uniforms.world_shadow_receiver[0] > 0.5f, draw.raw());
 
   if (uniforms.combiner_mode[2] > 0.5f) {
     draw.setTexture(0, shader.s_tex0, texture0, sampler_flags0);
@@ -400,6 +406,8 @@ M2ResultStatus M2SkinnedMesh::SubmitInstancedBatch(
   UploadBonePalette(draw, palette_shader, bone_matrices,
                     SubmeshBoneIndexBound(submesh_index));
   UploadPackedBatchUniforms(draw, uniforms, selection.reads_lighting_uniforms);
+  BindActiveWorldModelShadowState(
+      uniforms.world_shadow_receiver[0] > 0.5f, draw.raw());
 
   if (uniforms.combiner_mode[2] > 0.5f) {
     draw.setTexture(0, shader.s_tex0, texture0, sampler_flags0);

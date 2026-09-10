@@ -49,7 +49,8 @@ class AuthSession {
 
   void Connect(const std::string& host, uint16_t port);
 
-  void Authenticate(const std::string& username, const std::string& password);
+  void Authenticate(const std::string& username, const std::string& password,
+                    const std::string& locale);
 
   void RequestRealmList();
 
@@ -88,6 +89,7 @@ class AuthSession {
   TcpClient tcp_;
 
   std::string username_;
+  std::string locale_;
   std::string last_host_;
 
   std::uint16_t last_port_{0};

@@ -1,10 +1,11 @@
 #pragma once
 
+#include "openwow/render/api/math/render_math_types.h"
+
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <span>
-#include <string>
-#include <vector>
 
 namespace bgfx {
 struct Encoder;
@@ -12,132 +13,73 @@ struct Encoder;
 
 namespace openwow::render {
 
-enum class ShadowQuality : std::uint8_t {
-    Off    = 0,
-    Low    = 1,
-    Medium = 2,
-    High   = 3,
-    Ultra  = 4,
-};
+inline constexpr std::size_t kWorldShadowProductCount = 4u;
 
-enum class ShadowType : std::uint8_t {
-    Blob      = 0,
-    ShadowMap = 1,
-};
-
-struct ShadowCasterEntry {
-    std::uint32_t entityId = 0;
-    float         worldX   = 0.0f;
-    float         worldY   = 0.0f;
-    float         worldZ   = 0.0f;
-    float         radius   = 1.0f;
-    float         height   = 2.0f;
-    bool          isValid  = true;
+enum class WorldShadowProduct : std::uint8_t {
+  Center = 0,
+  Near = 1,
+  Mid = 2,
+  Far = 3,
 };
 
 class ShadowRenderData {
-public:
-    ShadowRenderData();
-    ~ShadowRenderData();
+ public:
+  ShadowRenderData();
+  ~ShadowRenderData();
 
-    ShadowRenderData(const ShadowRenderData&) = delete;
-    ShadowRenderData& operator=(const ShadowRenderData&) = delete;
+  ShadowRenderData(const ShadowRenderData&) = delete;
+  ShadowRenderData& operator=(const ShadowRenderData&) = delete;
 
-    void          SetQuality(ShadowQuality q);
-    [[nodiscard]] ShadowQuality GetQuality() const;
+  void Configure(std::uint8_t quality, std::uint16_t resolution);
+  [[nodiscard]] std::uint8_t quality() const noexcept { return quality_; }
+  [[nodiscard]] std::uint16_t resolution() const noexcept {
+    return resolution_;
+  }
+  [[nodiscard]] std::size_t active_product_count() const noexcept;
 
-    void          SetType(ShadowType t);
-    [[nodiscard]] ShadowType GetType() const;
+  [[nodiscard]] bool CreateResources();
+  void DestroyResources();
+  [[nodiscard]] bool resources_valid() const noexcept;
 
-    void          SetShadowMapResolution(std::uint32_t res);
-    [[nodiscard]] std::uint32_t GetShadowMapResolution() const;
+  void SetLightDirection(const RenderVec3& surface_to_light) noexcept;
+  [[nodiscard]] bool PrepareProduct(std::size_t product_index,
+                                    const RenderVec3& target);
+  void BeginShadowDepthPass(std::size_t product_index,
+                            std::uint8_t view_id) const;
 
-    void          SetShadowDistance(float dist);
-    [[nodiscard]] float GetShadowDistance() const;
+  [[nodiscard]] const float* light_view(std::size_t product_index) const;
+  [[nodiscard]] const float* light_projection(std::size_t product_index) const;
+  [[nodiscard]] RenderVec3 product_target(std::size_t product_index) const;
+  [[nodiscard]] float product_half_extent(std::size_t product_index) const;
 
-    void          SetShadowBias(float bias);
-    [[nodiscard]] float GetShadowBias() const;
+  void SetPublishedProductCount(std::size_t count) noexcept;
+  [[nodiscard]] std::size_t published_product_count() const noexcept {
+    return published_product_count_;
+  }
 
-    void          SetSplitLambda(float lambda);
-    [[nodiscard]] float GetSplitLambda() const;
+  void BindTerrainShadowState(bgfx::Encoder* encoder = nullptr) const;
+  void BindModelShadowState(bool enabled,
+                            bgfx::Encoder* encoder = nullptr) const;
 
-    bool CreateShadowMap();
+ private:
+  struct BackendResources;
 
-    void DestroyShadowMap();
+  void BindReceiverState(std::size_t first_product, bool enabled,
+                         bgfx::Encoder* encoder) const;
 
-    [[nodiscard]] bool IsShadowMapValid() const;
-
-    [[nodiscard]] const float* GetLightViewProj() const { return light_view_proj_; }
-    [[nodiscard]] const float *GetLightView() const {
-      return light_view_;
-    }
-
-    [[nodiscard]] const float *GetLightProj() const {
-      return light_proj_;
-    }
-
-    void BindShadowState(bgfx::Encoder* encoder = nullptr) const;
-
-    void AddCaster(ShadowCasterEntry entry);
-    void RemoveCaster(std::uint32_t entityId);
-    void SetCasters(std::span<const ShadowCasterEntry> casters);
-    void ClearCasters() noexcept;
-
-    [[nodiscard]] std::vector<ShadowCasterEntry> GetCasters() const;
-    [[nodiscard]] std::uint32_t GetCasterCount() const;
-
-    [[nodiscard]] std::vector<ShadowCasterEntry> GetCastersInRange(float x, float y, float z,
-                                                                   float range) const;
-
-    void SetLightDirection(float x, float y, float z);
-
-    struct LightDir { float x, y, z; };
-    [[nodiscard]] LightDir GetLightDirection() const;
-
-    bool PrepareShadowPass(const float* camera_mtx,
-                           const float* proj_mtx,
-                           float cam_near,
-                           float cam_far);
-
-    void BeginShadowDepthPass(std::uint8_t view_id);
-
-    void          SetEnabled(bool enabled);
-    [[nodiscard]] bool IsEnabled() const;
-
-    [[nodiscard]] static std::string GetQualityName(ShadowQuality q);
-
-    void Reset();
-
-private:
-    struct BackendResources;
-
-    void BuildLightMatrices(const float* camera_mtx,
-                            const float* proj_mtx,
-                            float cam_near,
-                            float cam_far,
-                            float out_light_view[16],
-                            float out_light_proj[16]);
-
-    std::vector<ShadowCasterEntry> casters_;
-
-    ShadowQuality quality_   = ShadowQuality::Medium;
-    ShadowType    type_      = ShadowType::Blob;
-    std::uint32_t resolution_ = 1024;
-    float         distance_  = 40.0f;
-    float         bias_      = 0.005f;
-    float         split_lambda_ = 0.5f;
-
-    float lightX_    = 0.0f;
-    float lightY_    = -1.0f;
-    float lightZ_    = 0.0f;
-
-    std::unique_ptr<BackendResources> backend_;
-    float light_view_[16]{};
-    float light_proj_[16]{};
-    float light_view_proj_[16]{};
-
-    bool enabled_       = true;
-    bool shadow_map_valid_ = false;
+  std::unique_ptr<BackendResources> backend_;
+  std::array<RenderMatrix4x4, kWorldShadowProductCount> light_views_{};
+  std::array<RenderMatrix4x4, kWorldShadowProductCount> light_projections_{};
+  std::array<RenderMatrix4x4, kWorldShadowProductCount> receiver_matrices_{};
+  std::array<RenderVec3, kWorldShadowProductCount> product_targets_{};
+  RenderVec3 surface_to_light_{0.0f, -1.0f, 0.0f};
+  std::uint8_t quality_{0u};
+  std::uint16_t resolution_{1024u};
+  std::size_t published_product_count_{0u};
 };
+
+void SetActiveWorldShadowRenderData(const ShadowRenderData* data) noexcept;
+void BindActiveWorldModelShadowState(bool enabled,
+                                     bgfx::Encoder* encoder = nullptr) noexcept;
 
 }

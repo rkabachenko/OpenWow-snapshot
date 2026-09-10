@@ -10,6 +10,7 @@
 #include "openwow/game/object_manager.h"
 #include "openwow/game/quest_poi.h"
 #include "openwow/game/update_fields.h"
+#include "openwow/foundation/diagnostics/logging.h"
 #include "openwow/ui/game/framescript/core/frame_input_state.h"
 #include "openwow/ui/game/framescript/core/frame_method_registry.h"
 #include "openwow/ui/game/framescript/core/frame_runtime_identity.h"
@@ -27,6 +28,8 @@
 #include "openwow/world/camera/world_camera.h"
 
 #include <array>
+#include <limits>
+#include <string>
 
 namespace openwow::ui::game::detail {
 
@@ -641,12 +644,21 @@ int LuaSetMapByID(lua_State* L) {
   const auto signed_area_id =
       openwow::ui::TruncateLuaNumberToI32(lua_tonumber(L, 1));
   if (signed_area_id < 0) {
+    openwow::diagnostics::Log(
+        openwow::diagnostics::LogLevel::kWarn,
+        "World map selection failed: operation=SetMapByID worldMapAreaID=" +
+            std::to_string(signed_area_id) + " reason=negative ID");
     return 0;
   }
 
   auto& wm = GetMapUiManager(L)->world_map();
   if (!wm.SetMapByWorldMapAreaId(
           static_cast<std::uint32_t>(signed_area_id))) {
+    openwow::diagnostics::Log(
+        openwow::diagnostics::LogLevel::kWarn,
+        "World map selection failed: operation=SetMapByID worldMapAreaID=" +
+            std::to_string(signed_area_id) +
+            " reason=missing from active WorldMapArea.dbc");
     return 0;
   }
   lua_pushboolean(L, 1);
@@ -1023,7 +1035,80 @@ int LuaApi_QuestPOIUpdateTexture(lua_State *L) {
 }
 
 int LuaApi_QuestPOIUpdateIcons(lua_State *L) {
-  return LuaApi_QuestPOIUpdateTexture(L);
+  const auto *session = GetWorldSession(L);
+  const auto *player = session != nullptr ? session->objects().GetLocalPlayerTyped() : nullptr;
+  const auto *world_map = WorldMapStateOrNull(L);
+  if (player == nullptr || world_map == nullptr) {
+    return 0;
+  }
+  const auto selection = world_map->GetQuestPoiSelectionContext();
+  if (!selection.can_update) {
+    return 0;
+  }
+
+  auto &poi_data = openwow::game::QuestPOIData::Get();
+  std::unordered_map<std::uint32_t, openwow::game::QuestPOIWorldMapIconLayout> layouts;
+  const auto player_position = player->GetPosition();
+  for (std::size_t slot = 1; slot <= openwow::game::QuestPOIData::kMaxQuerySlots; ++slot) {
+    const auto quest_id = poi_data.GetQuestIdByQuerySlot(slot);
+    if (quest_id == 0) {
+      continue;
+    }
+
+    const auto objective_mask = poi_data.GetWorldMapObjectiveMask(quest_id);
+    std::uint32_t best_priority = 10;
+    float best_distance = std::numeric_limits<float>::max();
+    for (const auto &poi : poi_data.GetPOIsForQuest(quest_id)) {
+      if (!QuestPoiPassesObjectiveMask(poi, objective_mask) ||
+          !IsQuestPoiVisibleOnCurrentSelection(*world_map, selection, poi)) {
+        continue;
+      }
+
+      const auto center = openwow::game::QuestPOIData::GetCentroid(poi);
+      const float dx = player_position.x - center.x;
+      const float dy = player_position.y - center.y;
+      const float distance = dx * dx + dy * dy;
+      if (poi.priority > best_priority ||
+          (poi.priority == best_priority && distance >= best_distance)) {
+        continue;
+      }
+
+      best_priority = poi.priority;
+      best_distance = distance;
+      layouts[quest_id] = {
+          .objectiveIndex = poi.objectiveIndex,
+          .mapId = poi.mapId,
+          .worldX = static_cast<std::int32_t>(center.x),
+          .worldY = static_cast<std::int32_t>(center.y),
+      };
+    }
+
+    if (openwow::diagnostics::IsLogEnabled(openwow::diagnostics::LogLevel::kDebug)) {
+      const auto previous = poi_data.GetWorldMapIconLayout(quest_id);
+      const auto current = layouts.find(quest_id);
+      const bool selected = current != layouts.end();
+      const bool changed = previous.has_value() != selected ||
+          (previous.has_value() && selected &&
+           (previous->objectiveIndex != current->second.objectiveIndex ||
+            previous->mapId != current->second.mapId ||
+            previous->worldX != current->second.worldX ||
+            previous->worldY != current->second.worldY));
+      if (changed) {
+        openwow::diagnostics::Log(
+            openwow::diagnostics::LogLevel::kDebug,
+            "Quest POI stage=icon-commit source=QuestPOIUpdateIcons quest=" +
+                std::to_string(quest_id) + " mask=" + std::to_string(objective_mask) +
+                (selected ? " objective=" + std::to_string(current->second.objectiveIndex) +
+                                " map=" + std::to_string(current->second.mapId) +
+                                " x=" + std::to_string(current->second.worldX) +
+                                " y=" + std::to_string(current->second.worldY)
+                          : " result=no-eligible-poi"));
+      }
+    }
+  }
+
+  poi_data.ReplaceWorldMapIconLayouts(std::move(layouts));
+  return 0;
 }
 
 int LuaApi_SetPOIIconOverlapDistance(lua_State *L) {

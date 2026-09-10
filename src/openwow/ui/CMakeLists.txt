@@ -152,6 +152,7 @@ openwow_add_component(openwow_ui_runtime
   game/api/game_lua_api_aura.cpp
   game/api/game_lua_api_pet.cpp
   game/api/game_lua_api_instance.cpp
+  game/api/openwow_encounter_journal_lua.cpp
   ../game/commerce/mail/adapters/lua/mail_attachment_presentation.cpp
   ../game/commerce/mail/adapters/lua/mail_inbox_text_presentation.cpp
   ../game/commerce/mail/adapters/lua/mail_lua_compose.cpp

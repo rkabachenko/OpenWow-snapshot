@@ -9,6 +9,7 @@
 
 #include "openwow/render/resources/textures/texture_lease.h"
 #include "openwow/ui/game/minimap_arrows.h"
+#include "openwow/ui/game/minimap_marker_presentation.h"
 #include "openwow/ui/game/minimap_surface_submission.h"
 
 namespace openwow::render {
@@ -47,6 +48,7 @@ struct MinimapIcon {
   MinimapIconTextureKind texture_kind{MinimapIconTextureKind::kSolidColor};
   uint32_t atlas_icon_index{0};
   std::string texture_path;
+  std::string tooltip;
 };
 
 struct MinimapBackgroundVertex {
@@ -94,6 +96,7 @@ class Minimap {
   void SetRotatingArrowTexturePath(MinimapRotatingArrowKind kind,
                                    const std::string& texture_path);
   void SetIndoorMinimapActive(bool active);
+  void SetWmoMinimapActive(bool active);
 
   void SetPlayerArrowTexturePath(const std::string& texture_path);
   void SetPlayerArrowSize(float width, float height);
@@ -120,6 +123,8 @@ class Minimap {
                             float& screen_y) const;
   void ProjectWorldToScreenUnrotated(float world_x, float world_y,
                                      float& screen_x, float& screen_y) const;
+  void AppendMarkerPresentation(
+      std::vector<MinimapMarkerPresentation>& markers) const;
 
   void Shutdown();
 
@@ -152,7 +157,8 @@ class Minimap {
   void RenderSubmittedBatches(uint8_t view_id);
   bool SubmitQuad(uint8_t view_id, std::uint16_t texture_index,
                   const std::array<MinimapBackgroundVertex, 4>& vertices,
-                  std::uint32_t color, std::uint64_t state) const;
+                  std::uint32_t color, std::uint64_t state,
+                  bool alpha_key = false) const;
   bool SubmitQuads(
       uint8_t view_id, std::uint16_t texture_index,
       const std::vector<std::array<MinimapBackgroundVertex, 4>>& quads,
@@ -185,6 +191,7 @@ class Minimap {
   std::vector<MinimapRotatingArrow> rotating_arrows_;
   std::size_t last_render_terrain_submission_count_{0u};
   bool indoor_minimap_active_{false};
+  bool wmo_minimap_active_{false};
   std::string mask_texture_path_{"Textures\\MinimapMask"};
   std::string static_poi_arrow_texture_{
       "Interface\\Minimap\\Rotating-MinimapArrow"};

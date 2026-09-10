@@ -1,4 +1,5 @@
 #include "openwow/ui/game/runtime/frame_traversal_index.h"
+#include "openwow/foundation/diagnostics/performance_logging.h"
 
 #include "openwow/ui/framexml/ui_frame.h"
 #include "openwow/ui/game/game_ui_scale.h"
@@ -152,7 +153,7 @@ struct FrameTraversalIndex::Impl {
   HierarchyMetadata ComputeHierarchy(const FrameHandle handle,
                                      const UiFrame& frame) const {
     HierarchyMetadata metadata;
-    metadata.effective_scale = root_scale;
+    metadata.effective_scale = 1.0F;
 
     const bool detached_region =
         (frame.runtime_kind == UiFrame::RuntimeKind::Texture ||
@@ -164,7 +165,8 @@ struct FrameTraversalIndex::Impl {
     constexpr int kMaxDepth = 64;
     for (int depth = 0; depth < kMaxDepth && current != nullptr; ++depth) {
       metadata.effective_depth += static_cast<double>(current->depth);
-      metadata.effective_scale *= current->scale;
+      metadata.effective_scale *= openwow::ui::framexml::ResolveLocalFrameScale(
+          current->name, current->scale, root_scale);
       metadata.effective_visible = metadata.effective_visible &&
                                    current->visible &&
                                    current->runtime_draw_layer_enabled;
@@ -203,11 +205,12 @@ struct FrameTraversalIndex::Impl {
     }
     const auto effective_scale_of = [&](const FrameHandle owner_handle,
                                         const UiFrame& owner) {
-      float scale = root_scale;
+      float scale = 1.0F;
       const UiFrame* node = &owner;
       FrameHandle node_handle = owner_handle;
       for (int depth = 0; depth < kMaxDepth && node != nullptr; ++depth) {
-        scale *= node->scale;
+        scale *= openwow::ui::framexml::ResolveLocalFrameScale(
+            node->name, node->scale, root_scale);
         if (node->parent.empty()) break;
         node_handle = frames.ParentHandleOf(node_handle);
         node = frames.FindFrame(node_handle);
@@ -541,6 +544,7 @@ void FrameTraversalIndex::Rebuild(const float root_scale,
   impl_->root_scale = root_scale;
   impl_->viewport_height = viewport_height;
   if (!impl_->order_dirty) return;
+  const openwow::diagnostics::PerformanceTimer performance;
 
   if (impl_->CanPatchIncrementally()) {
 
@@ -601,6 +605,16 @@ void FrameTraversalIndex::Rebuild(const float root_scale,
   impl_->hit_test_dirty = true;
 
   impl_->cached_rects_generation = impl_->layout.RectsGeneration();
+  if (performance.enabled() && performance.ElapsedMs() >= 5.0) {
+    static openwow::diagnostics::PerformanceLogSite site;
+    openwow::diagnostics::LogPerformanceDuration(
+        site, "ui.traversal_rebuild", performance,
+        "entries=" + std::to_string(entries.size()) +
+            " visible=" + std::to_string(impl_->render_snapshot.size()) +
+            " full_total=" + std::to_string(impl_->metrics.full_rebuilds) +
+            " incremental_total=" + std::to_string(impl_->metrics.incremental_patches),
+        5.0);
+  }
 }
 
 void FrameTraversalIndex::RefreshRectCache() {

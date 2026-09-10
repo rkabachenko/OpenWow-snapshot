@@ -4,6 +4,7 @@
 
 namespace openwow::data::dbc {
 struct CreatureSoundDataEntry;
+struct NPCSoundsEntry;
 }
 
 namespace openwow::game {
@@ -33,6 +34,14 @@ public:
   [[nodiscard]] const data::dbc::CreatureSoundDataEntry *
   ResolveMount(const CGUnit_C &unit) const;
 
+  [[nodiscard]] const data::dbc::NPCSoundsEntry *
+  ResolveNpcSounds(const CGUnit_C &unit, const char *source) const;
+
+  [[nodiscard]] bool IsNpcVoicePlaying(const CGUnit_C &unit) const;
+  int PlayNpcVoice(const CGUnit_C &unit, const data::dbc::NPCSoundsEntry &sounds,
+                   std::uint32_t sound_kit_id, const char *source,
+                   std::int32_t variation_index = -1) const;
+
   void PlayCreatureSound(CGUnit_C &unit, std::uint32_t creature_sound_type,
                          bool force_play);
 
@@ -47,6 +56,7 @@ public:
 
 private:
   std::uint32_t active_sound_data_id_{0};
+  mutable std::uint32_t npc_voice_handle_{0};
   mutable std::uint32_t priority_sound_handle_{0};
   mutable std::uint32_t priority_sound_state_{0};
   mutable std::uint32_t ambient_loop_sound_handle_{0};

@@ -335,6 +335,20 @@ void MergeFromTemplate(openwow::ui::framexml::UiFrame* dst,
     merged.insert(merged.end(), dst->parent_keys.begin(), dst->parent_keys.end());
     dst->parent_keys = std::move(merged);
   }
+  if (dst->parent_arrays.empty()) {
+    dst->parent_arrays = templ.parent_arrays;
+  } else if (!templ.parent_arrays.empty()) {
+    auto merged = templ.parent_arrays;
+    merged.insert(merged.end(), dst->parent_arrays.begin(), dst->parent_arrays.end());
+    dst->parent_arrays = std::move(merged);
+  }
+  if (dst->mixins.empty()) {
+    dst->mixins = templ.mixins;
+  } else if (!templ.mixins.empty()) {
+    auto merged = templ.mixins;
+    merged.insert(merged.end(), dst->mixins.begin(), dst->mixins.end());
+    dst->mixins = std::move(merged);
+  }
 
   if (dst->font_style.empty() && !templ.font_style.empty()) dst->font_style = templ.font_style;
   if (dst->justify_h.empty() && !templ.justify_h.empty()) dst->justify_h = templ.justify_h;

@@ -1,6 +1,5 @@
 #pragma once
 
-#include "openwow/game/object_guid.h"
 #include "openwow/render/m2/m2_public_types.h"
 
 #include <bgfx/bgfx.h>
@@ -39,13 +38,12 @@ class PortraitRenderer final {
 
   void Initialize();
   void Shutdown();
-  void InvalidatePlayer(game::ObjectGuid guid);
   void InvalidateAll();
 
   [[nodiscard]] PortraitAcquireResult Acquire(
-      game::ObjectGuid guid, std::uint32_t display_id,
-      std::uint32_t model_instance_id, std::uint8_t& next_view_id,
-      std::uint16_t view_id_limit);
+      std::shared_ptr<const void> request_owner,
+      std::uint32_t display_id, std::uint32_t model_instance_id,
+      std::uint8_t& next_view_id, std::uint16_t view_id_limit);
 
  private:
   struct Impl;

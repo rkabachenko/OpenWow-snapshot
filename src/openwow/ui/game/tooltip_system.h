@@ -10,6 +10,7 @@
 #include <vector>
 namespace openwow::game {
 class CGGameObject_C;
+class ObjectGuid;
 class EquipmentSets;
 class ItemDefinitions;
 class ObjectManager;
@@ -154,6 +155,7 @@ class TooltipSystem {
   void SetSecondarySpellId(std::uint32_t spellId);
 
   bool SetUnit(const std::string& unitToken, bool hideStatus = false);
+  void SetWorldObject(openwow::game::ObjectGuid guid);
   void SetWorldGameObject(const openwow::game::CGGameObject_C& game_object);
   void HandlePendingWorldGameObjectRefresh(std::uint32_t generation,
                                            bool success);
@@ -169,13 +171,18 @@ class TooltipSystem {
   int GetNumLines() const;
   [[nodiscard]] std::uint64_t GetClearGeneration() const;
   [[nodiscard]] std::uint64_t GetPresentationRevision() const;
+  [[nodiscard]] std::size_t GetCommittedLineCount() const;
+  [[nodiscard]] std::size_t GetCommittedTextureCount() const;
   [[nodiscard]] std::uint64_t GetLayoutRevision() const;
 
   void SetMinimumWidth(float w, bool force = false);
   [[nodiscard]] float GetMinimumWidth() const;
   [[nodiscard]] bool IsForceMinWidth() const;
+  [[nodiscard]] float GetCommittedMinimumWidth() const;
+  [[nodiscard]] bool IsCommittedForceMinWidth() const;
   void SetPadding(float p);
   [[nodiscard]] float GetPadding() const;
+  [[nodiscard]] float GetCommittedPadding() const;
   void ClearTextures();
 
   void AddTexture(const std::string& filename, const float* tex_coords,
@@ -207,7 +214,7 @@ class TooltipSystem {
 
   [[nodiscard]] int GetPendingSpellAsyncCount() const;
   void SetPendingSpellAsyncCount(int count);
-  [[nodiscard]] std::optional<std::uint64_t> GetWorldGameObjectGuid() const;
+  [[nodiscard]] std::optional<std::uint64_t> GetWorldObjectGuid() const;
   [[nodiscard]] bool HasStatusBar() const;
   [[nodiscard]] float GetStatusBarMin() const;
   [[nodiscard]] float GetStatusBarMax() const;
@@ -284,7 +291,7 @@ class TooltipSystem {
   std::uint8_t achievement_completed_ = 0;
   std::array<std::uint32_t, 8> achievement_criteria_data_{};
   std::array<std::uint32_t, 4> achievement_criteria_bitmask_{};
-  std::optional<std::uint64_t> world_game_object_guid_;
+  std::optional<std::uint64_t> world_object_guid_;
   bool world_game_object_rebuild_requested_ = false;
   bool has_status_bar_ = false;
   float status_bar_min_ = 0.0f;
@@ -303,7 +310,13 @@ class TooltipSystem {
   float min_width_ = 0.0f;
   bool force_min_width_ = false;
   float padding_ = 0.0f;
-
+  // Authored rows remain observable immediately, while Show snapshots the
+  // subset that contributes to the currently published frame extent.
+  std::size_t committed_line_count_ = 0u;
+  std::size_t committed_texture_count_ = 0u;
+  float committed_min_width_ = 0.0f;
+  bool committed_force_min_width_ = false;
+  float committed_padding_ = 0.0f;
   std::uint64_t layout_revision_{0u};
   bool fade_active_ = false;
   float fade_timer_ = 0.0f;

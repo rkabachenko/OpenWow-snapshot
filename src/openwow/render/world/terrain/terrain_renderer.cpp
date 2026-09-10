@@ -2,6 +2,7 @@
 #include "openwow/render/backend/bgfx/bgfx_texture_lease.h"
 
 #include "openwow/data/texture_cache.h"
+#include "openwow/core/platform_runtime_policy.h"
 #include "openwow/foundation/diagnostics/logging.h"
 #include "openwow/render/resources/shaders/shader_registry.h"
 #include "openwow/render/resources/textures/texture_manager.h"
@@ -32,6 +33,25 @@ namespace {
 constexpr std::size_t kAlphaPixelBytes = 4u;
 
 constexpr float kDiffuseRepeatsPerChunk = 8.0f;
+constexpr std::uint8_t kFirstShadowMapStage = 5u;
+constexpr std::uint32_t kShadowSamplerFlags =
+    BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP |
+    BGFX_SAMPLER_COMPARE_LEQUAL;
+
+constexpr RenderMatrix4x4 kIdentityShadowMatrix = {
+    1.0f, 0.0f, 0.0f, 0.0f,
+    0.0f, 1.0f, 0.0f, 0.0f,
+    0.0f, 0.0f, 1.0f, 0.0f,
+    0.0f, 0.0f, 0.0f, 1.0f,
+};
+constexpr std::array<RenderMatrix4x4, kWorldShadowProductCount>
+    kIdentityShadowMatrices{kIdentityShadowMatrix, kIdentityShadowMatrix,
+                            kIdentityShadowMatrix, kIdentityShadowMatrix};
+constexpr std::array<RenderVec4, 3u> kDisabledShadowParameters{{
+    {0.0f, 0.0f, 0.0f, 0.0f},
+    {0.0f, 0.0f, 0.0f, 0.0f},
+    {1.0f, 1.0f, 1.0f, 0.0f},
+}};
 
 using PreparedUploadsByRow = std::unordered_map<std::uint32_t, const PreparedTextureUpload *>;
 
@@ -147,11 +167,25 @@ bool TerrainRenderer::Initialize() {
   s_terrain_tex_[3] = bgfx::createUniform("s_terrainTex3", bgfx::UniformType::Sampler);
   s_terrain_layers_ = bgfx::createUniform("s_terrainLayers", bgfx::UniformType::Sampler);
   s_terrain_alpha_ = bgfx::createUniform("s_terrainAlpha", bgfx::UniformType::Sampler);
+  constexpr std::array<const char *, kWorldShadowProductCount> shadow_sampler_names{
+      "s_worldShadow0", "s_worldShadow1", "s_worldShadow2", "s_worldShadow3"};
+  for (std::size_t index = 0u; index < s_shadow_maps_.size(); ++index) {
+    s_shadow_maps_[index] =
+        bgfx::createUniform(shadow_sampler_names[index], bgfx::UniformType::Sampler);
+  }
 
   u_vs_params_ = bgfx::createUniform("u_terrainVsParams", bgfx::UniformType::Vec4,
                                      static_cast<std::uint16_t>(terrain_vs_param::kCount));
   u_fs_params_ = bgfx::createUniform("u_terrainFsParams", bgfx::UniformType::Vec4,
                                      static_cast<std::uint16_t>(terrain_fs_param::kCount));
+  u_shadow_matrices_ = bgfx::createUniform(
+      "u_worldShadowMtx", bgfx::UniformType::Mat4,
+      static_cast<std::uint16_t>(kWorldShadowProductCount));
+  u_shadow_parameters_ =
+      bgfx::createUniform("u_worldShadowParams", bgfx::UniformType::Vec4, 3u);
+  fallback_shadow_depth_ = bgfx::createTexture2D(
+      1u, 1u, false, 1u, bgfx::TextureFormat::D16,
+      BGFX_TEXTURE_RT | kShadowSamplerFlags);
 
   if (bgfx::isValid(splat_array_program_) && bgfx::isValid(s_terrain_layers_)) {
     static_cast<void>(slice_arrays_.Initialize());
@@ -228,8 +262,12 @@ void TerrainRenderer::UploadPreparedAdt(const PreparedTerrainTile &prepared,
   if (!initialized_) {
     return;
   }
-  for (const auto &upload : materials.uploads) {
-    static_cast<void>(texture_manager_.CommitPreparedTexture(upload));
+  constexpr auto runtime_policy =
+      openwow::core::GetPlatformRuntimePolicy();
+  if (!runtime_policy.constrained_mobile_runtime) {
+    for (const auto &upload : materials.uploads) {
+      static_cast<void>(texture_manager_.CommitPreparedTexture(upload));
+    }
   }
   if (!initialized_ || prepared.vertices.empty()) {
     return;
@@ -284,19 +322,48 @@ void TerrainRenderer::UploadPreparedAdt(const PreparedTerrainTile &prepared,
         ChooseChunkLayerBucket(source, chunk.layer_count, prepared_by_row, slice_arrays_);
     for (int layer = 0; layer < chunk.layer_count; ++layer) {
       if (!source.texture_paths[layer].empty()) {
-        chunk.layer_texture_leases[layer] =
-            texture_manager_.AcquireCachedTexture(source.texture_paths[layer]);
-        chunk.layer_tex[layer] = BgfxTextureLeaseAccess::Get(chunk.layer_texture_leases[layer]);
-
-        if (chunk.layer_texture_leases[layer].valid()) {
-          const std::uint32_t row =
-              openwow::data::HashTextureCachePath(source.texture_paths[layer]);
-          const auto upload = prepared_by_row.find(row);
+        const std::uint32_t row =
+            openwow::data::HashTextureCachePath(source.texture_paths[layer]);
+        const auto upload = prepared_by_row.find(row);
+        if (runtime_policy.constrained_mobile_runtime) {
           chunk.layer_slice_leases[layer] = slice_arrays_.Acquire(
               row, upload != prepared_by_row.end() ? upload->second : nullptr,
               chunk_bucket.has_value() ? &*chunk_bucket : nullptr);
+        } else {
+          chunk.layer_texture_leases[layer] =
+              texture_manager_.AcquireCachedTexture(source.texture_paths[layer]);
+          chunk.layer_tex[layer] =
+              BgfxTextureLeaseAccess::Get(chunk.layer_texture_leases[layer]);
+
+          if (chunk.layer_texture_leases[layer].valid()) {
+            chunk.layer_slice_leases[layer] = slice_arrays_.Acquire(
+                row, upload != prepared_by_row.end() ? upload->second : nullptr,
+                chunk_bucket.has_value() ? &*chunk_bucket : nullptr);
+          }
         }
       }
+    }
+    ResolveChunkLayerSlices(chunk, chunk_layer_slices[chunk_index]);
+    if (runtime_policy.constrained_mobile_runtime &&
+        !bgfx::isValid(chunk.layer_array_tex)) {
+      for (int layer = 0; layer < chunk.layer_count; ++layer) {
+        if (source.texture_paths[layer].empty()) {
+          continue;
+        }
+        const std::uint32_t row =
+            openwow::data::HashTextureCachePath(source.texture_paths[layer]);
+        const auto upload = prepared_by_row.find(row);
+        if (upload != prepared_by_row.end() && upload->second != nullptr) {
+          static_cast<void>(
+              texture_manager_.CommitPreparedTexture(*upload->second));
+        }
+        chunk.layer_texture_leases[layer] =
+            texture_manager_.AcquireCachedTexture(source.texture_paths[layer]);
+        chunk.layer_tex[layer] =
+            BgfxTextureLeaseAccess::Get(chunk.layer_texture_leases[layer]);
+      }
+    }
+    for (int layer = 0; layer < chunk.layer_count; ++layer) {
       if (!bgfx::isValid(chunk.layer_tex[layer])) {
         chunk.layer_tex[layer] = texture_manager_.GetCheckerTexture();
       }
@@ -304,7 +371,6 @@ void TerrainRenderer::UploadPreparedAdt(const PreparedTerrainTile &prepared,
     for (int layer = chunk.layer_count; layer < kMaxTerrainLayers; ++layer) {
       chunk.layer_tex[layer] = texture_manager_.GetWhiteTexture();
     }
-    ResolveChunkLayerSlices(chunk, chunk_layer_slices[chunk_index]);
     chunk.valid = true;
   }
 
@@ -419,13 +485,18 @@ void TerrainRenderer::UploadPreparedAdt(const PreparedTerrainTile &prepared,
     }
   }
 
+  const std::uint16_t alpha_atlas_dimension =
+      prepared.alpha_atlas_dimension;
   const std::size_t expected_alpha_bytes =
-      static_cast<std::size_t>(kAlphaAtlasSize) * kAlphaAtlasSize * kAlphaPixelBytes;
-  if (prepared.has_alpha_layers && prepared.alpha_atlas_rgba.size() >= expected_alpha_bytes) {
+      static_cast<std::size_t>(alpha_atlas_dimension) *
+      alpha_atlas_dimension * kAlphaPixelBytes;
+  if (prepared.has_alpha_layers && alpha_atlas_dimension != 0u &&
+      prepared.alpha_atlas_rgba.size() == expected_alpha_bytes) {
     const bgfx::Memory *alpha_memory = bgfx::copy(prepared.alpha_atlas_rgba.data(),
                                                   static_cast<std::uint32_t>(expected_alpha_bytes));
     tile.alpha_atlas = bgfx::createTexture2D(
-        kAlphaAtlasSize, kAlphaAtlasSize, false, 1, bgfx::TextureFormat::RGBA8,
+        alpha_atlas_dimension, alpha_atlas_dimension, false, 1,
+        bgfx::TextureFormat::RGBA8,
         BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP, alpha_memory);
     if (!bgfx::isValid(tile.alpha_atlas)) {
       openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kWarn,
@@ -437,6 +508,15 @@ void TerrainRenderer::UploadPreparedAdt(const PreparedTerrainTile &prepared,
       }
     }
   } else if (prepared.has_alpha_layers) {
+    openwow::diagnostics::Log(
+        openwow::diagnostics::LogLevel::kWarn,
+        "TerrainRenderer: invalid prepared alpha atlas for (" +
+            std::to_string(tile_x) + "," + std::to_string(tile_y) +
+            "): dimension=" + std::to_string(alpha_atlas_dimension) +
+            " expected_bytes=" + std::to_string(expected_alpha_bytes) +
+            " actual_bytes=" +
+            std::to_string(prepared.alpha_atlas_rgba.size()) +
+            "; using fallback terrain material");
     for (auto &chunk : tile.chunks) {
       chunk.layer_count = 0;
     }
@@ -452,9 +532,15 @@ bool TerrainRenderer::PipelineResourcesAreValid() const noexcept {
     texture_samplers_valid = texture_samplers_valid && bgfx::isValid(sampler);
   }
 
+  for (const auto sampler : s_shadow_maps_) {
+    texture_samplers_valid = texture_samplers_valid && bgfx::isValid(sampler);
+  }
+
   return bgfx::isValid(program_) && bgfx::isValid(splat_program_) && texture_samplers_valid &&
-         bgfx::isValid(s_terrain_alpha_) && bgfx::isValid(u_vs_params_) &&
-         bgfx::isValid(u_fs_params_);
+         bgfx::isValid(s_terrain_alpha_) &&
+         bgfx::isValid(u_vs_params_) && bgfx::isValid(u_fs_params_) &&
+         bgfx::isValid(u_shadow_matrices_) && bgfx::isValid(u_shadow_parameters_) &&
+         bgfx::isValid(fallback_shadow_depth_);
 }
 
 void TerrainRenderer::DestroyPipelineResources() {
@@ -479,8 +565,17 @@ void TerrainRenderer::DestroyPipelineResources() {
   }
   destroy_uniform(s_terrain_layers_);
   destroy_uniform(s_terrain_alpha_);
+  for (auto &sampler : s_shadow_maps_) {
+    destroy_uniform(sampler);
+  }
   destroy_uniform(u_vs_params_);
   destroy_uniform(u_fs_params_);
+  destroy_uniform(u_shadow_matrices_);
+  destroy_uniform(u_shadow_parameters_);
+  if (bgfx::isValid(fallback_shadow_depth_)) {
+    bgfx::destroy(fallback_shadow_depth_);
+  }
+  fallback_shadow_depth_ = BGFX_INVALID_HANDLE;
 }
 
 const world::Frustum *TerrainRenderer::ResolveChunkCullFrustum() const {
@@ -506,11 +601,13 @@ void TerrainRenderer::Render(uint8_t view_id, const WorldEnvironmentSnapshot &en
                          BGFX_STATE_DEPTH_TEST_LESS | BGFX_STATE_CULL_CW | BGFX_STATE_MSAA;
 
   const std::array<float, 4> shadow_mod = openwow::world::CWorld_GetTerrainShadowModColor();
+  const bool precomputed_shadows_active =
+      precomputed_shadows_enabled_ &&
+      openwow::world::CWorld_HasRenderFlag(
+          openwow::world::WorldRenderFlag::kTerrainShadows);
   const RenderVec4 terrain_shadow_mod{
       shadow_mod[0], shadow_mod[1], shadow_mod[2],
-      openwow::world::CWorld_HasRenderFlag(openwow::world::WorldRenderFlag::kTerrainShadows)
-          ? 1.0f
-          : 0.0f};
+      precomputed_shadows_active ? 1.0f : 0.0f};
 
   const bool has_splat = bgfx::isValid(splat_program_);
 
@@ -612,6 +709,19 @@ void TerrainRenderer::Render(uint8_t view_id, const WorldEnvironmentSnapshot &en
     draw.setUniform(u_fs_params_, fs_params.data(),
                     static_cast<std::uint16_t>(terrain_fs_param::kCount));
 
+    // Terrain programs always declare the comparison sampler. Metal requires
+    // every declared sampler to be bound even when the disabled branch does
+    // not sample it, so establish a complete inactive state before allowing a
+    // live shadow map to override it below.
+    for (std::size_t index = 0u; index < s_shadow_maps_.size(); ++index) {
+      draw.setTexture(static_cast<std::uint8_t>(kFirstShadowMapStage + index),
+                      s_shadow_maps_[index], fallback_shadow_depth_,
+                      kShadowSamplerFlags);
+    }
+    draw.setUniform(u_shadow_matrices_, kIdentityShadowMatrices.data(),
+                    static_cast<std::uint16_t>(kWorldShadowProductCount));
+    draw.setUniform(u_shadow_parameters_, kDisabledShadowParameters.data(), 3u);
+
     constexpr std::uint32_t sampler_flags = DiffuseSamplerFlags();
     if (key.program == TerrainProgramKind::kSplat) {
       for (std::size_t layer = 0; layer < key.texture_indices.size(); ++layer) {
@@ -629,7 +739,7 @@ void TerrainRenderer::Render(uint8_t view_id, const WorldEnvironmentSnapshot &en
     }
 
     if (shadow_data_ != nullptr) {
-      shadow_data_->BindShadowState(encoder);
+      shadow_data_->BindTerrainShadowState(encoder);
     }
     const bgfx::ProgramHandle program =
         key.program == TerrainProgramKind::kSplatArray ? splat_array_program_

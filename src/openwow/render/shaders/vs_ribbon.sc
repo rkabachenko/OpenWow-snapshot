@@ -6,9 +6,9 @@ $output v_texcoord0, v_color0, v_viewDist
 
 void main()
 {
-    gl_Position = mul(u_modelViewProj, vec4(a_position, 1.0));
+    vec4 viewPosition = mul(u_modelView, vec4(a_position, 1.0));
+    gl_Position = mul(u_proj, viewPosition);
     v_texcoord0 = a_texcoord0;
     v_color0    = a_color0;
-    v_viewDist = openwowWorldFogDepth(
-        mul(u_modelView, vec4(a_position, 1.0)).xyz);
+    v_viewDist = openwowWorldFogDepth(viewPosition.xyz);
 }

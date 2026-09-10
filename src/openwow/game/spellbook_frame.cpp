@@ -289,7 +289,6 @@ void FinishCompanionNameQuery(WorldSession& session,
         creature != nullptr) {
       ui::game::DisplaySystemMessage(62, creature->name.c_str());
       FinalizeCompanionCatalogIfReady(session);
-      FireCompanionCatalogMutationEvent(true);
       return;
     }
   }
@@ -302,6 +301,9 @@ void RouteLearnedCompanion(WorldSession& session,
                            const bool show_learn_message) {
   if (!IsCompanionCatalog(catalog)) {
     return;
+  }
+  if (show_learn_message) {
+    FireCompanionCatalogMutationEvent(true);
   }
 
   const auto* const dbc_loader = session.GetDbcLoader();
@@ -343,7 +345,6 @@ void RouteLearnedCompanion(WorldSession& session,
   if (show_learn_message) {
     ui::game::DisplaySystemMessage(62, creature->name.c_str());
     FinalizeCompanionCatalogIfReady(session);
-    FireCompanionCatalogMutationEvent(true);
   }
 }
 

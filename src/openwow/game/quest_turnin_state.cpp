@@ -19,7 +19,8 @@ std::int32_t DecodeQuestMoneyRequirement(const std::uint32_t raw_reward_money) {
   return static_cast<std::int32_t>(0u - raw_reward_money);
 }
 
-bool IsQuestTurnInReady(const WorldSession &session, const std::uint32_t quest_id) {
+bool IsQuestTurnInReady(const WorldSession &session, const std::uint32_t quest_id,
+                       const bool require_objectives) {
   if (quest_id == 0) {
     return false;
   }
@@ -47,17 +48,18 @@ bool IsQuestTurnInReady(const WorldSession &session, const std::uint32_t quest_i
     return false;
   }
 
-  if (quest_log_entry->status == QuestStatus::kComplete ||
-      quest_log_entry->status == QuestStatus::kRewarded || (player_slot->state & 0x10000u) != 0) {
-    return true;
-  }
-
   if (quest_log_entry->status == QuestStatus::kFailed || (player_slot->state & 0x02u) != 0) {
     return false;
   }
 
   const auto *quest_template = session.quests().GetTemplate(quest_id);
   if (quest_template == nullptr) {
+    return false;
+  }
+
+  const bool requires_event = HasFlag(quest_template->flags, QuestFlags::kPartyAccept) ||
+                              HasFlag(quest_template->flags, QuestFlags::kExploration);
+  if (requires_event && (player_slot->state & 0x01u) == 0) {
     return false;
   }
 
@@ -89,7 +91,7 @@ bool IsQuestTurnInReady(const WorldSession &session, const std::uint32_t quest_i
     }
 
     has_explicit_requirements = true;
-    if (quest_log_entry->kill_counts[objective_index] < objective.required_count) {
+    if (player_slot->counts[objective_index] < objective.required_count) {
       return false;
     }
   }
@@ -106,30 +108,14 @@ bool IsQuestTurnInReady(const WorldSession &session, const std::uint32_t quest_i
     }
   }
 
-  if (has_explicit_requirements) {
-    return true;
-  }
-
-  if (HasFlag(quest_template->flags, QuestFlags::kPartyAccept) ||
-      HasFlag(quest_template->flags, QuestFlags::kExploration) ||
-      quest_template->required_reputation_faction != 0 ||
-      quest_template->required_reputation_faction_max != 0 || required_money > 0) {
+  if (player_slot->counts[0] < quest_template->required_player_kills) {
     return false;
   }
 
-  for (const auto &objective : quest_template->npc_or_go_objectives) {
-    if (objective.creature_or_go == 0) {
-      continue;
-    }
-
-    if (quest_template->src_item_id == 0 ||
-        objective.creature_or_go != static_cast<std::int32_t>(quest_template->src_item_id) ||
-        objective.required_count > 1) {
-      return false;
-    }
-  }
-
-  return true;
+  return !require_objectives || has_explicit_requirements || requires_event ||
+         quest_template->required_reputation_faction != 0 ||
+         quest_template->required_reputation_faction_max != 0 ||
+         quest_template->reward_money != 0 || quest_template->required_player_kills != 0;
 }
 
 }

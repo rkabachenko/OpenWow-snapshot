@@ -147,57 +147,73 @@ void WorldSession::HandleShowTaxiNodes(const net::wotlk::WorldPacket &pkt) {
     return;
   }
 
-  const auto previous_taxi = taxi_;
-  const auto previous_taxi_guid = previous_taxi.GetFlightMasterGuid();
+  auto incoming_taxi = taxi_;
+  const auto previous_taxi_guid = taxi_.GetFlightMasterGuid();
   auto &taxi_system = TaxiSystem::Get();
   const bool taxi_map_was_open = taxi_system.IsTaxiMapOpen();
 
-  auto result = taxi_.HandleShowTaxiNodes(pkt.payload.data(), pkt.payload.size());
+  auto result = incoming_taxi.HandleShowTaxiNodes(pkt.payload.data(), pkt.payload.size());
   switch (result) {
-  case TaxiShowResult::kOpenMap:
+  case TaxiShowResult::kOpenMap: {
     if (taxi_map_was_open && previous_taxi_guid != 0 &&
-        previous_taxi_guid == taxi_.GetFlightMasterGuid()) {
-      taxi_ = previous_taxi;
+        previous_taxi_guid == incoming_taxi.GetFlightMasterGuid()) {
       break;
     }
 
     if (taxi_map_was_open && previous_taxi_guid != 0 &&
-        previous_taxi_guid != taxi_.GetFlightMasterGuid()) {
-      taxi_system.CloseTaxiMap();
-      ui::game::ScriptEventDispatch::Get().FireTaxiMapClosed();
+        previous_taxi_guid != incoming_taxi.GetFlightMasterGuid()) {
+      TaxiMapFrame_Close(*this);
     }
 
+    taxi_ = std::move(incoming_taxi);
     if (const auto *dbc = GetDbcLoader()) {
       if (const auto state = BuildTaxiMapOpenRuntimeSlice(*dbc, *this);
           state.has_value()) {
-        taxi_system.OpenTaxiMap(taxi_.GetCurrentNode());
-        taxi_system.CacheDisplaySlice(*state);
         auto interaction_guid = taxi_.GetFlightMasterGuid();
         ui::game::SetNpcInteractionTarget(ObjectGuid(interaction_guid));
+        taxi_system.OpenTaxiMap(taxi_.GetCurrentNode());
+        taxi_system.CacheDisplaySlice(*state);
+        openwow::diagnostics::Log(
+            openwow::diagnostics::LogLevel::kInfo,
+            "interaction publish SMSG_SHOWTAXINODES guid=" +
+                std::to_string(interaction_guid) + " currentNode=" +
+                std::to_string(taxi_.GetCurrentNode()) + " nodes=" +
+                std::to_string(state->nodes.size()) +
+                " stage=TAXIMAP_OPENED");
         ui::game::ScriptEventDispatch::Get().FireTaxiMapOpened();
         TutorialSystem::Instance().TriggerTutorial(0x22u);
         break;
       }
     }
+    const auto failed_guid = taxi_.GetFlightMasterGuid();
+    const auto failed_current_node = taxi_.GetCurrentNode();
+    const auto failed_reachable_count = taxi_.GetReachableNodeCount();
     taxi_system.ResetRouteDisplayState();
     taxi_system.CloseTaxiMap();
     taxi_.CloseTaxiMap();
+    openwow::diagnostics::Log(
+        openwow::diagnostics::LogLevel::kWarn,
+        "taxi map publication failed guid=" +
+            std::to_string(failed_guid) +
+            " currentNode=" + std::to_string(failed_current_node) +
+            " reachable=" + std::to_string(failed_reachable_count) +
+            " stage=runtime-slice");
     break;
+  }
   case TaxiShowResult::kErrorNoPath:
     ui::game::DisplaySystemMessage(196);
 
     ui::game::CloseGossipInteraction(*this);
 
-    taxi_ = previous_taxi;
     break;
   case TaxiShowResult::kConsoleDump:
-    LogRetailTaxiNodeConsoleDump(taxi_.last_display(), GetDbcLoader());
-
-    taxi_ = previous_taxi;
+    LogRetailTaxiNodeConsoleDump(incoming_taxi.last_display(), GetDbcLoader());
     break;
   case TaxiShowResult::kParseError:
-
-    taxi_ = previous_taxi;
+    openwow::diagnostics::Log(
+        openwow::diagnostics::LogLevel::kWarn,
+        "interaction reject malformed SMSG_SHOWTAXINODES bytes=" +
+            std::to_string(pkt.payload.size()) + " stage=taxi-snapshot");
     break;
   }
 }
@@ -205,19 +221,37 @@ void WorldSession::HandleShowTaxiNodes(const net::wotlk::WorldPacket &pkt) {
 void WorldSession::HandleActivateTaxiReply(const net::wotlk::WorldPacket &pkt) {
 
   if (objects().GetLocalPlayerTyped() == nullptr) {
+    openwow::diagnostics::Log(
+        openwow::diagnostics::LogLevel::kWarn,
+        "taxi activation reply ignored opcode=SMSG_ACTIVATETAXIREPLY "
+        "stage=taxi-reply reason=missing-player bytes=" +
+            std::to_string(pkt.payload.size()));
     return;
   }
 
-  if (!taxi_.HandleActivateTaxiReply(pkt.payload.data(), pkt.payload.size()))
+  if (!taxi_.HandleActivateTaxiReply(pkt.payload.data(), pkt.payload.size())) {
+    openwow::diagnostics::Log(
+        openwow::diagnostics::LogLevel::kWarn,
+        "interaction reject malformed SMSG_ACTIVATETAXIREPLY bytes=" +
+            std::to_string(pkt.payload.size()) + " stage=taxi-reply");
     return;
+  }
 
   const auto reply = static_cast<std::uint32_t>(taxi_.last_reply());
+  openwow::diagnostics::Log(
+      reply < kTaxiReplySystemMessagesCount
+          ? openwow::diagnostics::LogLevel::kInfo
+          : openwow::diagnostics::LogLevel::kWarn,
+      "taxi activation reply opcode=SMSG_ACTIVATETAXIREPLY stage=taxi-reply guid=" +
+          std::to_string(taxi_.GetFlightMasterGuid()) +
+          " code=" + std::to_string(reply) +
+          " result=" + TaxiHandler::TaxiReplyToString(taxi_.last_reply()));
 
   if (reply >= kTaxiReplySystemMessagesCount)
     return;
 
   if (reply == 0) {
-    TaxiMapFrame_Close(taxi_);
+    TaxiMapFrame_Close(*this);
   } else {
     ui::game::DisplaySystemMessage(kTaxiReplySystemMessages[reply]);
   }
@@ -232,16 +266,26 @@ void WorldSession::HandleNewTaxiPath(const net::wotlk::WorldPacket &pkt) {
 }
 
 void WorldSession::HandleTaxiNodeStatus(const net::wotlk::WorldPacket &pkt) {
-  taxi_.HandleTaxiNodeStatus(pkt.payload.data(), pkt.payload.size());
+  if (!taxi_.HandleTaxiNodeStatus(pkt.payload.data(), pkt.payload.size())) {
+    openwow::diagnostics::Log(
+        openwow::diagnostics::LogLevel::kWarn,
+        "interaction reject malformed SMSG_TAXINODE_STATUS bytes=" +
+            std::to_string(pkt.payload.size()) + " stage=taxi-node-status");
+    return;
+  }
 
   const auto &status = taxi_.last_status();
-  if (status.npc_guid == 0) return;
-
   auto *unit = objects().GetMutableUnit(ObjectGuid(status.npc_guid));
-  if (!unit) return;
-
   constexpr std::uint32_t kNpcFlagFlightmaster = 0x00002000;
-  if ((unit->State().GetNpcFlags() & kNpcFlagFlightmaster) == 0) return;
+  if (unit == nullptr || (unit->State().GetNpcFlags() & kNpcFlagFlightmaster) == 0) {
+    openwow::diagnostics::Log(
+        openwow::diagnostics::LogLevel::kWarn,
+        "Taxi node status stage=resolve source=SMSG_TAXINODE_STATUS guid=" +
+            std::to_string(status.npc_guid) +
+            " status=" + std::to_string(status.status) +
+            " reason=" + (unit == nullptr ? "unit-unavailable" : "flightmaster-role-missing"));
+    return;
+  }
 
   unit->SetOverlayModelIndexOverride(status.status == 0 ? kOverlayModelIndexTaxiEnable : 0);
   unit->UpdateOverlayModel();

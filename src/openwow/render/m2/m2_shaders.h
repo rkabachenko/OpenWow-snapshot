@@ -180,8 +180,9 @@ enum M2FragmentParamSlot : std::uint16_t {
   kM2FragmentParamMaterialFlags = 2,
   kM2FragmentParamFogParams = 3,
   kM2FragmentParamFogColor = 4,
+  kM2FragmentParamWorldShadowReceiver = 5,
 };
-inline constexpr std::uint16_t kM2FragmentParamCount = 5u;
+inline constexpr std::uint16_t kM2FragmentParamCount = 6u;
 
 struct M2ShaderHandles {
   std::array<M2BonePaletteShader, kM2BonePaletteCapacities.size()>

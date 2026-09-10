@@ -140,9 +140,34 @@ enum class MovementWmoCollisionCompleteness : std::uint8_t {
 
 struct AreaEnvironmentContext {
   std::uint32_t area_id{0u};
+  std::int32_t wmo_group_id{-1};
   bool outdoors{true};
   bool has_wmo_context{false};
   float depth{0.0f};
+};
+
+enum class WmoMinimapSourceStatus : std::uint8_t {
+  kOutdoor,
+  kPending,
+  kReady,
+  kFailed,
+};
+
+struct WmoMinimapTileRecord {
+  std::uint32_t group_index{0u};
+  std::uint32_t tile_x{0u};
+  std::uint32_t tile_y{0u};
+  Bounds local_bounds{};
+};
+
+struct WmoMinimapSource {
+  WmoMinimapSourceStatus status{WmoMinimapSourceStatus::kOutdoor};
+  std::string root_path;
+  std::uint64_t placement_stable_id{0u};
+  std::uint32_t active_group_index{0u};
+  Matrix4 model_matrix{kIdentityMatrix};
+  std::vector<WmoMinimapTileRecord> tiles;
+  std::string detail;
 };
 
 struct WmoAreaSoundTerms {
@@ -265,9 +290,7 @@ public:
 
   void UpdateStreamingPosition(float x, float y);
 
-  void SetViewDistance(int32_t tiles) {
-    view_distance_ = tiles;
-  }
+  void SetViewDistance(int32_t tiles);
 
   void SetTimeOfDay(float normalized_time);
 
@@ -352,6 +375,7 @@ public:
   [[nodiscard]] bool IsCriticalSpawnSurfaceReady() const;
 
   [[nodiscard]] bool IsWorldEntryStreamingComplete() const;
+  [[nodiscard]] std::string DescribeStreamingProgress() const;
 
   void SetWorldEntryStreamingMode(const bool enabled) noexcept {
     world_entry_streaming_mode_ = enabled;
@@ -388,6 +412,12 @@ public:
   [[nodiscard]] std::uint32_t ResolveTerrainGroundTypeAtPosition(float x, float y) const;
   [[nodiscard]] AreaEnvironmentContext ResolveAreaEnvironmentContextAtPosition(
       float x, float y, float z) const;
+  [[nodiscard]] AreaEnvironmentContext ResolveZoneUiAreaContextAtPosition(
+      float x, float y, float z) const;
+  [[nodiscard]] bool UsesWmoMinimapSourceAtPosition(
+      float x, float y, float z) const;
+  [[nodiscard]] WmoMinimapSource PrepareWmoMinimapSource(
+      float x, float y, float z, float visible_radius);
 
   [[nodiscard]] MoverWmoSoundContext ResolveWmoSoundContextAtPosition(
       float x, float y, float z) const;
@@ -467,6 +497,7 @@ private:
     bool resolved{false};
 
     bool group_resident{false};
+    std::int32_t wmo_group_id{-1};
     std::uint32_t group_flags{0u};
     const data::dbc::WMOAreaTableEntry *group{nullptr};
     const data::dbc::WMOAreaTableEntry *root{nullptr};
@@ -474,6 +505,8 @@ private:
 
   [[nodiscard]] ResolvedWmoAreaRows ResolveWmoAreaRowsForGroup(
       const WmoAreaGroupRef &ref) const;
+  [[nodiscard]] static bool UsesWmoMinimapSource(
+      const ResolvedWmoAreaRows &rows) noexcept;
 
   struct CameraWmoFogResolution {
     FogState state;
@@ -512,6 +545,10 @@ private:
                              const WmoInstance& instance,
                              const world::Frustum& frustum, float camera_x,
                              float camera_y, float camera_z);
+  void QueueLowDetailWmoGroups(const std::string& wmo_path,
+                               const WmoInstance& instance,
+                               const world::Frustum& frustum, float camera_x,
+                               float camera_y, float camera_z);
 
   void PumpWorldStaging(std::size_t tile_budget, std::size_t wmo_budget);
   void DrainWorldStagingMailbox();
@@ -613,9 +650,10 @@ private:
   bool has_camera_streaming_focus_ = false;
   TileCoord streaming_tile_{0, 0};
   int32_t view_distance_ = 2;
+  int32_t unload_distance_ = 2;
   float time_of_day_ = 0.5f;
-  WeatherKind active_weather_type_{WeatherKind::kNone};
-  float active_weather_density_{0.0f};
+  WeatherState weather_{};
+  std::uint32_t weather_clock_{};
   std::optional<data::dbc::WeatherEntry> active_weather_row_;
   LifecycleState lifecycle_state_{LifecycleState::kStopped};
   bool initialization_succeeded_{false};
@@ -713,7 +751,12 @@ private:
   std::size_t stream_progress_completed_{0};
   BlockingLoadProgressCallback active_stream_progress_callback_;
 
-  static constexpr std::size_t kTilePublicationBudgetPerFrame = 2u;
+  static constexpr std::size_t kTilePublicationBudgetPerFrame =
+#if defined(OPENWOW_PLATFORM_IOS)
+      1u;
+#else
+      2u;
+#endif
   static constexpr std::size_t kWmoPublicationBudgetPerFrame = 8u;
   static constexpr std::uint64_t kWmoPublicationByteBudgetPerFrame =
       8u * 1024u * 1024u;

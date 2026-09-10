@@ -74,7 +74,8 @@ struct TextureManagerStreamingStats {
 
 class TextureManager final : public api::RendererDeviceLifecycleObserver {
  public:
-  static constexpr std::size_t kMaxAsyncRequests = 256u;
+  static constexpr std::size_t kMaxAsyncRequests =
+      PlatformTextureRuntimePolicy().max_async_requests;
 
   TextureManager();
   ~TextureManager();
@@ -275,11 +276,8 @@ class TextureManager final : public api::RendererDeviceLifecycleObserver {
       OPENWOW_TEXTURE_GUARDED_BY(cache_mutex_){};
   std::size_t async_handoff_count_ OPENWOW_TEXTURE_GUARDED_BY(cache_mutex_){0};
 
-  static constexpr std::uint64_t kDefaultCacheMemoryBudgetBytes =
-      256ull * 1024ull * 1024ull;
-
   std::uint64_t memory_budget_ OPENWOW_TEXTURE_GUARDED_BY(cache_mutex_){
-      kDefaultCacheMemoryBudgetBytes};
+      PlatformTextureRuntimePolicy().cache_memory_budget_bytes};
   std::uint64_t memory_usage_ OPENWOW_TEXTURE_GUARDED_BY(cache_mutex_){0};
 };
 

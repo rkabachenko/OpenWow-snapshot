@@ -142,7 +142,7 @@ void CGUnit_C::CleanupUnitResources() {
   vehicle_.Cleanup(*this);
   SpellVisuals().Cleanup();
 
-  Mount().ReleaseOverlayM2Instance(*this);
+  Mount().ClearOverlayM2InstanceBinding();
 
   CEffect_C::DetachAllFromOwner(GetGuid());
   Movement().Cleanup();

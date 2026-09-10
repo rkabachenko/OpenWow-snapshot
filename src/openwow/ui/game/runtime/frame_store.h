@@ -37,6 +37,7 @@ class FrameStore final {
     std::function<void(std::string_view, int)> before_binding_release;
     std::function<void(std::string_view)> after_identity_release;
     std::function<void()> hierarchy_invalidated;
+    std::function<void(std::string_view)> layout_key_invalidated;
     std::function<void()> layout_graph_invalidated;
     std::function<void()> paint_order_invalidated;
 

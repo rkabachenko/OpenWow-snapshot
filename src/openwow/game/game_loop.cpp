@@ -11,6 +11,8 @@
 #include "openwow/audio/playback/sound_settings.h"
 #include "openwow/core/client_misc.h"
 #include "openwow/core/init_subsystems.h"
+#include "openwow/core/locale_system.h"
+#include "openwow/core/platform_runtime_policy.h"
 #include "openwow/data/async_file_read.h"
 #include "openwow/data/formats/dbc/dbc_enums.h"
 #include "openwow/data/formats/dbc/dbc_loader.h"
@@ -18,6 +20,7 @@
 #include "openwow/data/streaming_init.h"
 #include "openwow/debug/inspection/render_debug.h"
 #include "openwow/foundation/diagnostics/logging.h"
+#include "openwow/foundation/diagnostics/performance_logging.h"
 #include "openwow/foundation/math/vec3_cross.h"
 #include "openwow/foundation/math/vec3_negate.h"
 #include "openwow/foundation/text/ascii.h"
@@ -43,6 +46,7 @@
 #include "openwow/game/c_input_control.h"
 #include "openwow/game/chat_cache.h"
 #include "openwow/game/chat_display.h"
+#include "openwow/game/client_config.h"
 #include "openwow/game/collision_polygon.h"
 #include "openwow/game/combat/death/adapters/ui/area_spirit_healer_controller.h"
 #include "openwow/game/combat_log_messages.h"
@@ -107,6 +111,7 @@
 #include "openwow/net/client_services_packet_sender.h"
 #include "openwow/net/wotlk/addon_handshake.h"
 #include "openwow/net/wotlk/protocol/packet_sender.h"
+#include "openwow/platform/process/os_platform.h"
 #include "openwow/render/api/renderer_context.h"
 #include "openwow/render/backend/bgfx/renderer_context_services.h"
 #include "openwow/render/diagnostics/debug_draw_renderer.h"
@@ -145,6 +150,7 @@
 #include "openwow/ui/game/script_event_dispatch.h"
 #include "openwow/ui/game/secure_execution.h"
 #include "openwow/ui/game/tooltip_system.h"
+#include "openwow/ui/game/tooltip_object_bridge.h"
 #include "openwow/ui/game/ui_load_status_log.h"
 #include "openwow/ui/lua_call_helpers.h"
 #include "openwow/ui/runtime/security/protected_action_gate.h"
@@ -223,8 +229,13 @@ bool CanPerformInventoryMutation() {
 
 constexpr float kWorldCameraNearClip = openwow::world::kWorldCameraNearClipDistance;
 constexpr float kWorldCameraFallbackFarClip = 350.0f;
+constexpr float kWorldStreamingDistanceMinimum = 183.333328f;
+constexpr float kWorldStreamingDistanceLowMaximum = 791.666687f;
+constexpr float kWorldStreamingDistanceHighMaximum = 1583.333374f;
+constexpr std::uint64_t kWorldStreamingHighMemoryThreshold = 1ull << 30u;
 constexpr std::uint8_t kStandStateSit = 1;
-constexpr std::uint8_t kWorldSceneOpaqueViewCount = 5;
+constexpr std::uint8_t kWorldShadowViewCount = 4;
+constexpr std::uint8_t kWorldSceneOpaqueViewCount = 9;
 
 constexpr std::uint8_t kWorldSceneAlphaViewCount = 4;
 constexpr std::uint8_t kWorldWaterViewCount = 1;
@@ -240,10 +251,40 @@ float ResolveWorldCameraFarClip() {
                                                                     : kWorldCameraFallbackFarClip;
 }
 
+float ResolveWorldHorizonFarClipScale() {
+  const auto &cvars = openwow::ui::game::CVarSystem::Instance();
+  const float scale = cvars.Exists("horizonFarclipScale")
+                          ? cvars.GetCVarFloat("horizonFarclipScale")
+                          : 4.0f;
+  return std::isfinite(scale) && scale >= 3.0f && scale <= 6.0f ? scale
+                                                                : 6.0f;
+}
+
+float ResolveWorldStreamingDistance(const float far_clip,
+                                    const std::uint32_t map_id) {
+  const bool uses_legacy_map_policy =
+      map_id < 530u || map_id == 543u || map_id == 575u;
+  bool use_high_maximum = false;
+  if (uses_legacy_map_policy) {
+    const auto &cvars = openwow::ui::game::CVarSystem::Instance();
+    use_high_maximum = cvars.Exists("farClipOverride") &&
+                       cvars.GetCVarFloat("farClipOverride") >= 1.0f;
+  } else {
+    use_high_maximum =
+        openwow::platform::OS_GetPhysicalMemory() >
+        kWorldStreamingHighMemoryThreshold;
+  }
+  return std::clamp(
+      far_clip, kWorldStreamingDistanceMinimum,
+      use_high_maximum ? kWorldStreamingDistanceHighMaximum
+                       : kWorldStreamingDistanceLowMaximum);
+}
+
 constexpr std::uint8_t kWorldUiOffscreenViewCount = 128;
 constexpr std::uint8_t kWorldUiOverlayViewCount = 8;
 constexpr std::uint8_t kWorldUiViewCount = kWorldUiOffscreenViewCount + kWorldUiOverlayViewCount;
-constexpr std::uint8_t kFallbackPostProcessView = 1 + 1 + 1 + kWorldSceneOpaqueViewCount +
+constexpr std::uint8_t kFallbackPostProcessView =
+    kWorldShadowViewCount + 1 + 1 + kWorldSceneOpaqueViewCount +
                                                   kWorldSceneAlphaViewCount + kWorldWaterViewCount +
                                                   kWorldParticleViewCount;
 constexpr std::uint8_t kFallbackWorldUiBaseView =
@@ -313,6 +354,8 @@ render::PostProcessSettings ReadPostProcessSettings() {
   const auto enabled = [&cvars](const char *name) {
     return !cvars.Exists(name) || cvars.GetCVarBool(name);
   };
+  constexpr auto runtime_policy =
+      openwow::core::GetPlatformRuntimePolicy();
   return {
       .enabled = enabled("ffx"),
       .glow_enabled = enabled("ffxGlow"),
@@ -320,6 +363,8 @@ render::PostProcessSettings ReadPostProcessSettings() {
       .rectangle_textures = enabled("ffxRectangle"),
       .multisample =
           static_cast<std::uint8_t>(std::clamp(cvars.GetCVarInt("gxMultisample"), 1, 16)),
+      .render_scale = cvars.GetCVarFloat("renderScale"),
+      .lazy_effect_framebuffers = runtime_policy.constrained_mobile_runtime,
   };
 }
 
@@ -452,7 +497,8 @@ void BuildWorldFrameGraph(openwow::render::api::FrameGraph &graph, std::uint16_t
 
   const rapi::RenderExtent extent{width, height};
   graph.Reset();
-  graph.AddPass(rapi::FrameGraphPassId::ShadowDepth, extent);
+  graph.AddPass(rapi::FrameGraphPassId::ShadowDepth, extent,
+                kWorldShadowViewCount);
   graph.AddPass(rapi::FrameGraphPassId::Reflection, extent);
   graph.AddPass(rapi::FrameGraphPassId::Refraction, extent);
   graph.AddPass(rapi::FrameGraphPassId::SceneOpaque, extent, kWorldSceneOpaqueViewCount);
@@ -532,7 +578,9 @@ WorldSceneRenderViews
 ResolveWorldSceneRenderViews(const openwow::render::api::RendererContext *renderer_context) {
   namespace rapi = openwow::render::api;
   const std::uint8_t scene_opaque =
-      ResolveFrameGraphView(renderer_context, rapi::FrameGraphPassId::SceneOpaque, 3);
+      ResolveFrameGraphView(
+          renderer_context, rapi::FrameGraphPassId::SceneOpaque,
+          static_cast<std::uint8_t>(kWorldShadowViewCount + 2u));
   const std::uint8_t scene_alpha =
       ResolveFrameGraphView(renderer_context, rapi::FrameGraphPassId::SceneAlpha,
                             static_cast<std::uint8_t>(scene_opaque + kWorldSceneOpaqueViewCount));
@@ -548,15 +596,31 @@ ResolveWorldSceneRenderViews(const openwow::render::api::RendererContext *render
                   ResolveFrameGraphView(renderer_context, rapi::FrameGraphPassId::ShadowDepth, 0),
               .sky = ResolveFrameGraphView(renderer_context, rapi::FrameGraphPassId::SceneOpaque, 0,
                                            scene_opaque),
-              .scene = ResolveFrameGraphView(renderer_context, rapi::FrameGraphPassId::SceneOpaque,
-                                             1, OffsetViewId(scene_opaque, 1)),
-              .wmo = ResolveFrameGraphView(renderer_context, rapi::FrameGraphPassId::SceneOpaque, 2,
-                                           OffsetViewId(scene_opaque, 2)),
+              .low_detail = ResolveFrameGraphView(
+                  renderer_context, rapi::FrameGraphPassId::SceneOpaque, 1,
+                  OffsetViewId(scene_opaque, 1)),
+              .foreground_depth_reset = ResolveFrameGraphView(
+                  renderer_context, rapi::FrameGraphPassId::SceneOpaque, 2,
+                  OffsetViewId(scene_opaque, 2)),
+              .scene = ResolveFrameGraphView(
+                  renderer_context, rapi::FrameGraphPassId::SceneOpaque, 3,
+                  OffsetViewId(scene_opaque, 3)),
+              .wmo = ResolveFrameGraphView(renderer_context, rapi::FrameGraphPassId::SceneOpaque, 4,
+                                           OffsetViewId(scene_opaque, 4)),
+              .doodads = ResolveFrameGraphView(
+                  renderer_context, rapi::FrameGraphPassId::SceneOpaque, 6,
+                  OffsetViewId(scene_opaque, 6)),
+              .detail_doodads = ResolveFrameGraphView(
+                  renderer_context, rapi::FrameGraphPassId::SceneOpaque, 8,
+                  OffsetViewId(scene_opaque, 8)),
               .alpha = scene_alpha,
               .reflection =
-                  ResolveFrameGraphView(renderer_context, rapi::FrameGraphPassId::Reflection, 1),
+                  ResolveFrameGraphView(renderer_context, rapi::FrameGraphPassId::Reflection,
+                                        kWorldShadowViewCount),
               .refraction =
-                  ResolveFrameGraphView(renderer_context, rapi::FrameGraphPassId::Refraction, 2),
+                  ResolveFrameGraphView(
+                      renderer_context, rapi::FrameGraphPassId::Refraction,
+                      static_cast<std::uint8_t>(kWorldShadowViewCount + 1u)),
               .water = ResolveFrameGraphView(
                   renderer_context, rapi::FrameGraphPassId::Water, 0,
                   static_cast<std::uint8_t>(scene_alpha + kWorldSceneAlphaViewCount)),
@@ -564,9 +628,9 @@ ResolveWorldSceneRenderViews(const openwow::render::api::RendererContext *render
                                                0, particle_base),
           },
       .blob_shadows = ResolveFrameGraphView(renderer_context, rapi::FrameGraphPassId::SceneOpaque,
-                                            3, OffsetViewId(scene_opaque, 3)),
-      .objects = ResolveFrameGraphView(renderer_context, rapi::FrameGraphPassId::SceneOpaque, 4,
-                                       OffsetViewId(scene_opaque, 4)),
+                                            5, OffsetViewId(scene_opaque, 5)),
+      .objects = ResolveFrameGraphView(renderer_context, rapi::FrameGraphPassId::SceneOpaque, 7,
+                                       OffsetViewId(scene_opaque, 7)),
       .mounts = ResolveFrameGraphView(renderer_context, rapi::FrameGraphPassId::SceneAlpha, 1,
                                       OffsetViewId(scene_alpha, 1)),
       .particles = ResolveFrameGraphView(renderer_context, rapi::FrameGraphPassId::Particles, 1,
@@ -604,12 +668,18 @@ float ResolvePlayerAnimationProgress(const CGPlayer_C &player, void *context) {
   return loop->world_scene().object_renderer().GetAnimationProgress(player.GetGuid());
 }
 
-std::array<std::uint8_t, 13>
+std::array<std::uint8_t, 17>
 BuildWorldSceneFramebufferViewList(const WorldSceneRenderViews &views) {
   return {
-      views.world.sky,   views.world.scene,   views.world.wmo,        views.world.alpha,
-      views.world.water, views.world.weather, views.blob_shadows,     views.objects,
-      views.mounts,      views.particles,     views.selection_circle, views.water_particulates,
+      views.world.sky,        views.world.low_detail,
+      views.world.foreground_depth_reset,
+      views.world.scene,      views.world.wmo,
+      views.blob_shadows,     views.world.doodads,
+      views.objects,          views.world.detail_doodads,
+      views.world.alpha,      views.world.water,
+      views.world.weather,    views.mounts,
+      views.particles,        views.selection_circle,
+      views.water_particulates,
 
       views.unit_names,
   };
@@ -1517,12 +1587,13 @@ GameLoop::GameLoop(openwow::ui::display::ProductionDisplaySettingsRuntime *runti
       floating_text_(render_resources_->floating_text), cursor_manager_(texture_manager_),
       cinematic_player_(m2_system_, sound_runtime_), post_process_(render_resources_->post_process),
       debug_draw_renderer_(render_resources_->debug_draw_renderer),
-      minimap_(texture_manager_, game_ui_.minimap_state(), game_ui_.minimap_content(),
-               world_environment_),
+      minimap_(texture_manager_, game_ui_.minimap_state(), game_ui_.minimap_content()),
       zone_ui_state_(game_ui_.minimap_state(), game_ui_.world_map()),
       world_ui_lifecycle_(CreateWorldUiLifecycleOperations(), world_ui_session_commands_,
                           world_ui_entry_settings_) {
   m2_system_.BindTextureManager(&texture_manager_);
+  minimap_.BindWorldMap(&world_scene_.world_map());
+  game_ui_.world_map().BindWorldMap(&world_scene_.world_map());
   CommentatorState::Get().BindCollision(&world_scene_.collision());
   CurrencySystem::Get().BindItemDefinitions(item_definitions_);
   BattlefieldInfo::Get().BindWorldMapSystem(&game_ui_.world_map());
@@ -1588,6 +1659,7 @@ void GameLoop::OnRendererDeviceWillReset() {
   minimap_.ReleaseRendererDeviceResources();
   debug_draw_renderer_.Shutdown();
   floating_text_.ReleaseRendererDeviceResources();
+  loading_screen_.ReleaseRendererDeviceResources();
   post_process_.ReleaseRendererDeviceResources();
 }
 
@@ -1599,9 +1671,11 @@ void GameLoop::OnRendererDeviceReady(const openwow::render::api::DeviceGeneratio
 
   const bool post_process_ready = post_process_.RestoreRendererDeviceResources();
   const bool floating_text_ready = floating_text_.RestoreRendererDeviceResources();
+  const bool loading_screen_ready = loading_screen_.RestoreRendererDeviceResources();
   const bool minimap_ready = minimap_.RestoreRendererDeviceResources();
   const bool debug_draw_ready = debug_draw_renderer_.Initialize();
-  if (!post_process_ready || !floating_text_ready || !minimap_ready || !debug_draw_ready) {
+  if (!post_process_ready || !floating_text_ready || !loading_screen_ready ||
+      !minimap_ready || !debug_draw_ready) {
     openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kError,
                               "GameLoop: renderer-device resource restore failed");
   }
@@ -2101,6 +2175,9 @@ void GameLoop::SetDbcLoader(const openwow::data::dbc::DbcLoader *dbc) {
 
 bool GameLoop::StartWorldUiRuntime(const openwow::ui::game::WorldUiGeneration generation,
                                    std::function<void(float)> progress_callback) {
+  static openwow::diagnostics::PerformanceLogSite performance_site;
+  const openwow::diagnostics::ScopedPerformanceLog performance(
+      performance_site, "world.ui_start", current_map_name_, 0.0);
   (void)generation;
   if (!vfs_ || !world_session()) {
     return false;
@@ -2139,6 +2216,35 @@ bool GameLoop::StartWorldUiRuntime(const openwow::ui::game::WorldUiGeneration ge
 
     if (!game_ui_.LoadDefaultUI(std::move(progress_callback), &framexml_log)) {
       return false;
+    }
+
+#if defined(OPENWOW_PLATFORM_IOS)
+    const bool load_mobile_hud = true;
+#elif defined(__APPLE__)
+    const bool load_mobile_hud =
+        openwow::ui::game::CVarSystem::Instance().GetCVarBool("mobileHudPreview");
+#else
+    const bool load_mobile_hud = false;
+#endif
+    if (load_mobile_hud) {
+      if (!game_ui_.LoadToc(
+              "/Interface/OpenWoW/MobileUI/OpenWoWMobileUI.toc",
+              &framexml_log)) {
+        openwow::diagnostics::Log(
+            openwow::diagnostics::LogLevel::kError,
+            "World UI initialization failed while loading "
+            "/Interface/OpenWoW/MobileUI/OpenWoWMobileUI.toc");
+        return false;
+      }
+#if defined(OPENWOW_PLATFORM_IOS)
+      openwow::diagnostics::Log(
+          openwow::diagnostics::LogLevel::kInfo,
+          "iOS internal mobile interaction layer loaded");
+#else
+      openwow::diagnostics::Log(
+          openwow::diagnostics::LogLevel::kInfo,
+          "macOS mobile HUD preview loaded (mobileHudPreview=1)");
+#endif
     }
 
     (void)PumpWorldEntryProtocolControlPackets();
@@ -2295,6 +2401,31 @@ void GameLoop::PrepareWorldUiForPlayerLogout(const openwow::ui::game::WorldUiSto
   }
 }
 
+bool GameLoop::PersistRuntimeConfiguration() {
+  if (!IsInWorld() || !game_ui_.is_initialized()) {
+    return true;
+  }
+  auto &account_data = AccountData::Get();
+  if (!account_data.HasBoundPersistenceIdentity()) {
+    openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kError,
+        "Runtime configuration: stage=background-save source=application-lifecycle "
+        "reason=active-world-persistence-identity-unavailable");
+    return false;
+  }
+
+  // Suspension does not run logout. Snapshot both CVar scopes through their
+  // normal account-data owner; local persistence must not wait for a socket.
+  SyncRuntimeConfigAccountData(&world_scene_.camera());
+  const bool saved = account_data.FlushBoundPersistence();
+  openwow::diagnostics::Log(
+      saved ? openwow::diagnostics::LogLevel::kInfo : openwow::diagnostics::LogLevel::kError,
+      saved ? "Runtime configuration: stage=background-save source=application-lifecycle "
+              "scopes=account,character result=committed"
+            : "Runtime configuration: stage=background-save source=application-lifecycle "
+              "scopes=account,character reason=local-commit-failed");
+  return saved;
+}
+
 void GameLoop::PersistWorldUiState(const openwow::ui::game::WorldUiStopReason reason) {
   QuestLog::Get().SaveTrackedQuestsToCVar();
   if (game_ui_.is_initialized()) {
@@ -2448,6 +2579,12 @@ bool GameLoop::Initialize(int screen_width, int screen_height) {
 
   world_frame_.Initialize(static_cast<std::uint32_t>(screen_width_),
                           static_cast<std::uint32_t>(screen_height_));
+  world_frame_.SetNameplateHitTestCallback(
+      [this](const int x, const int y, const ObjectGuid current_target) {
+        if (!game_ui_.is_initialized()) return ObjectGuid{};
+        return ObjectGuid{game_ui_.nameplate_frames().HitTestCommitted(
+            static_cast<float>(x), static_cast<float>(y), current_target.GetRawValue())};
+      });
   world_frame_.SetTargetSelectionCallback([this](const ObjectGuid guid) {
     if (guid) {
       targeting_.SetTarget(guid.GetRawValue());
@@ -2567,7 +2704,8 @@ void GameLoop::Tick(float dt) {
   if (!initialized_)
     return;
 
-  static_cast<void>(texture_manager_.PumpPreparedUploads(8u));
+  static_cast<void>(texture_manager_.PumpPreparedUploads(
+      openwow::core::GetPlatformRuntimePolicy().texture_uploads_per_frame));
 
   if (const auto *session = world_session(); session != nullptr) {
     VoiceChat_ScheduledUpdate(*session, sound_runtime_.sound_engine(),
@@ -2862,7 +3000,8 @@ bool GameLoop::HasLocalPlayerForWorldUi() const {
 }
 
 bool GameLoop::PrepareLocalPlayerForWorldUi() {
-  return game_ui_.is_initialized() && event_bridge_.SynchronizePlayerUnitToken();
+  return game_ui_.is_initialized() &&
+         event_bridge_.PublishInitialPlayerUnitState();
 }
 
 void GameLoop::RunPreEnterLocalPlayerWorldUiSetup() {
@@ -2958,6 +3097,11 @@ void GameLoop::PrepareWorldUiForReload() {
 }
 
 void GameLoop::PrepareWorldEntryRuntime() {
+  world_entry_performance_timer_ = openwow::diagnostics::PerformanceTimer{};
+  next_world_entry_performance_ms_ = 0.0;
+  static openwow::diagnostics::PerformanceLogSite performance_site;
+  const openwow::diagnostics::ScopedPerformanceLog performance(
+      performance_site, "world.prepare_map", current_map_name_, 0.0);
   openwow::vfs::SetDataPreloadRequestedState(2);
   const std::uint32_t now_ms =
       client_time_fn_ ? client_time_fn_() : openwow::core::GameClock::GetTickCount32();
@@ -2984,6 +3128,9 @@ void GameLoop::PrepareWorldEntryRuntime() {
 }
 
 void GameLoop::FinalizeWorldEntryRuntime() {
+  static openwow::diagnostics::PerformanceLogSite performance_site;
+  const openwow::diagnostics::ScopedPerformanceLog performance(
+      performance_site, "world.finalize_entry", current_map_name_, 0.0);
 
   Player_C_ResetAreaStateCache();
   Player_C_ResetAreaTickCounter();
@@ -3334,7 +3481,10 @@ void GameLoop::FinalizeWorldEntryRuntime() {
                             << " ghost=" << timer_ctx.is_ghost
                             << " timer=" << timer_ctx.has_release_timer
                             << " no_window=" << timer_ctx.no_release_window
-                            << " oob=" << timer_ctx.is_out_of_bounds;
+                            << " oob=" << timer_ctx.is_out_of_bounds
+                            << " release_seconds="
+                            << death_manager_.GetReleaseTimeRemainingSeconds(
+                                   core::GameClock::GetTickCount32());
                 openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kInfo,
                                           death_state.str());
 
@@ -3396,11 +3546,7 @@ void GameLoop::FinalizeWorldEntryRuntime() {
     });
   }
 
-  if (world_session() != nullptr &&
-      world_scene_.world_map().IsWorldEntryStreamingComplete() &&
-      world_scene_.IsDoodadWorldEntryLoadDrained()) {
-    (void)world_session()->TrySendPendingWorldportAck();
-  }
+  TryAcknowledgeReadyWorldTransfer();
 
   UpdateLoadingTrackedPlayerState();
   ArmTransportWorldEntryHoldForRidingPlayer();
@@ -3628,6 +3774,7 @@ void GameLoop::UpdateWorldFrameMouseover(float dt) {
   auto &world_frame = world_frame_;
   const auto [cursor_x, cursor_y] = openwow::input::InputManager::Get().GetMousePosition();
   world_frame.SetCursorPosition(cursor_x, cursor_y);
+  world_frame.UpdateNameplateHover(targeting_.target_guid());
   if (!world_session()) {
     world_frame.Update(dt);
     return;
@@ -3648,12 +3795,13 @@ void GameLoop::UpdateWorldFrameMouseover(float dt) {
 
   const auto unit_token = game_ui_.input_router().ResolveModifiedMouseoverUnitToken();
   if (!unit_token.has_value()) {
-
+    world_frame.SetExplicitMouseoverGuid({});
     return;
   }
 
   const auto parsed_unit = openwow::game::ParseUnitId(*unit_token);
   if (parsed_unit.kind == openwow::game::UnitIdKind::kUnknown) {
+    world_frame.SetExplicitMouseoverGuid({});
     return;
   }
 
@@ -3768,10 +3916,42 @@ void DispatchWorldClick(openwow::game::WorldSession &session,
   namespace click = openwow::game::targeting;
   const int click_x = static_cast<int>(screen_x);
   const int click_y = static_cast<int>(screen_y);
-  const auto pick = world_frame.Pick(click_x, click_y);
+  const auto pick = world_frame.PickForInteraction(
+      click_x, click_y, session.objects().GetTargetGuid());
+  if (button == click::WorldClickButton::kSecondary ||
+      openwow::diagnostics::IsPerformanceLoggingEnabled()) {
+    using HitType = openwow::render::PickResult::HitType;
+    const char* hit_kind = "none";
+    if (pick.hit) {
+      switch (pick.type) {
+        case HitType::kUnit: hit_kind = "unit"; break;
+        case HitType::kGameObject: hit_kind = "gameobject"; break;
+        case HitType::kCorpse: hit_kind = "corpse"; break;
+        case HitType::kTerrain: hit_kind = "terrain"; break;
+        case HitType::kItem: hit_kind = "item"; break;
+        case HitType::kNone: break;
+      }
+    }
+    openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kInfo,
+        std::string("World click: button=") +
+        (button == click::WorldClickButton::kSecondary ? "secondary" : "primary") +
+        " surface=" + (pick.from_nameplate ? "nameplate" : "world-geometry") +
+        " x=" + std::to_string(click_x) +
+        " y=" + std::to_string(click_y) + " hit=" + hit_kind +
+        " picked_guid=" + std::to_string(pick.guid.GetRawValue()) +
+        " selected_guid=" + std::to_string(session.objects().GetTargetGuid().GetRawValue()));
+  }
 
   if (pick.hit && pick.type != openwow::render::PickResult::HitType::kTerrain &&
       pick.type != openwow::render::PickResult::HitType::kNone && !pick.guid.IsEmpty()) {
+    if (session.objects().Get(pick.guid) == nullptr) {
+      openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kWarn,
+          std::string("World click rejected: phase=object-dispatch source=") +
+          (pick.from_nameplate ? "nameplate" : "world-geometry") +
+          " guid=" + std::to_string(pick.guid.GetRawValue()) +
+          " reason=picked-object-no-longer-live");
+      return;
+    }
     click::ui::HandleWorldObjectClick(
         session, click::WorldObjectClick{.object = pick.guid, .button = button});
     return;
@@ -3811,6 +3991,7 @@ void GameLoop::OnLeftClickWorld(float screen_x, float screen_y) {
     return;
   }
 
+  SyncWorldFrameCursorContext();
   DispatchWorldClick(*world_session(), world_frame_, screen_x, screen_y,
                      targeting::WorldClickButton::kPrimary);
 }
@@ -3824,6 +4005,7 @@ void GameLoop::OnRightClickWorld(float screen_x, float screen_y) {
     return;
   }
 
+  SyncWorldFrameCursorContext();
   DispatchWorldClick(*world_session(), world_frame_, screen_x, screen_y,
                      targeting::WorldClickButton::kSecondary);
 }
@@ -3849,6 +4031,13 @@ void GameLoop::SetBlockingLoadingEventPump(std::function<void()> pump) {
 }
 
 void GameLoop::ApplyFileLoaderBindings() {
+  openwow::core::LocaleSystem locale;
+  locale.SetLocaleFromString(ClientConfig::Get().GetLocale());
+  const auto font_path = openwow::platform::BuildFontPath(
+      openwow::core::LocaleSystem::GetFontForLocale(locale.GetLocale()));
+  loading_screen_.SetFontPath(font_path);
+  floating_text_.SetFontPath(font_path);
+  floating_text_.SetFileLoader(file_loader_);
   world_scene_.world_map().SetFileLoader(file_loader_);
   world_scene_.SetObjectRendererFileLoader(file_loader_);
   world_scene_.SetPrefixFileLoader(prefix_file_loader_);
@@ -4302,8 +4491,6 @@ void GameLoop::TickInWorld(float dt) {
     world_frame_.BindObjectPresentation(&world_scene_.object_presentation());
   }
 
-  world_frame_.UpdateNameplateHover(targeting_.target_guid());
-
   UpdateWorldFrameMouseover(dt);
 
   if (world_session()) {
@@ -4317,19 +4504,16 @@ void GameLoop::TickInWorld(float dt) {
         !game_ui_.is_initialized() ||
         game_ui_.input_router().mouseover_frame_name().empty() ||
         game_ui_.input_router().mouseover_is_world_frame();
-    if (cursor_over_world_frame) {
-      auto &tooltip = openwow::ui::game::TooltipSystem::Get();
-      if (const auto *game_object = world_session()->objects().GetGameObject(mouseover_guid);
-          game_object != nullptr) {
-        tooltip.SetWorldGameObject(*game_object);
-      } else if (tooltip.GetWorldGameObjectGuid().has_value()) {
-        tooltip.Hide();
-      }
+    if (game_ui_.is_initialized()) {
+      openwow::ui::game::frame_api::UpdateWorldMouseoverTooltip(
+          game_ui_.lua_state(),
+          cursor_over_world_frame ? mouseover_guid : openwow::game::ObjectGuid{});
     }
 
     if (new_mouseover != prev_mouseover_guid_) {
       prev_mouseover_guid_ = new_mouseover;
-      if (game_ui_.is_initialized()) {
+      if (game_ui_.is_initialized() &&
+          world_session()->objects().GetUnit(mouseover_guid) != nullptr) {
         game_ui_.frame_events().dispatcher().FireEvent(
             openwow::ui::game::events::UPDATE_MOUSEOVER_UNIT);
       }
@@ -4483,6 +4667,7 @@ void GameLoop::TickInWorld(float dt) {
             layout.viewport_height(), layout.root_scale()));
       }
     }
+    minimap_.PrepareMarkerPresentation();
     if (stock_frame_xml_loaded) {
       minimap_.RenderToTexture(ui_offscreen_view);
       game_ui_.SetMinimapSurfaceSubmitter(minimap_.surface_submitter());
@@ -4550,6 +4735,9 @@ void GameLoop::HideLoadingScreen() {
 }
 
 void GameLoop::RefreshLoadingWorldEntryState(float dt) {
+  static openwow::diagnostics::PerformanceLogSite performance_site;
+  const openwow::diagnostics::ScopedPerformanceLog performance(
+      performance_site, "world.loading_update", current_map_name_);
   UpdateNetwork();
 
   EventScheduler::Get().Update(dt);
@@ -4595,6 +4783,7 @@ void GameLoop::RefreshLoadingWorldEntryState(float dt) {
   world_scene_.Update(dt, loading_camera.position[0], loading_camera.position[1],
                       loading_camera.position[2], world_cvars.GetCVarFloat("environmentDetail"),
                       ReadWeatherParticleDensity(), ReadUseWeatherShaders());
+  TryAcknowledgeReadyWorldTransfer();
   if (world_session()) {
     world_scene_.SynchronizeObjectModelBindings(world_session()->objects(), *world_session());
     RefreshExactUnitBoundsFromRenderer(world_session()->objects());
@@ -4606,6 +4795,19 @@ void GameLoop::RefreshLoadingWorldEntryState(float dt) {
           area_record->ambient_multiplier, dt);
     }
   }
+}
+
+void GameLoop::TryAcknowledgeReadyWorldTransfer() {
+  if (world_session() == nullptr ||
+      !world_scene_.world_map().IsWorldEntryStreamingComplete() ||
+      !world_scene_.IsTerrainWorldEntryLoadDrained() ||
+      !world_scene_.IsDoodadWorldEntryLoadDrained()) {
+    return;
+  }
+
+  // Map loading is asynchronous in OpenWoW, so the post-load worldport ACK
+  // boundary may become ready only after FinalizeWorldEntryRuntime returns.
+  (void)world_session()->TrySendPendingWorldportAck();
 }
 
 void GameLoop::UpdateLoadingTrackedPlayerState() {
@@ -4650,6 +4852,7 @@ LoadingScreenWorldEntryGateState GameLoop::BuildLoadingScreenWorldEntryGateState
 
   state.critical_visible_world_surface_ready =
       world_scene_.world_map().IsWorldEntryStreamingComplete() &&
+      world_scene_.IsTerrainWorldEntryLoadDrained() &&
       world_scene_.IsDoodadWorldEntryLoadDrained();
 
   const auto transport_guid = active_player->GetTransportGUID();
@@ -4687,21 +4890,59 @@ bool GameLoop::ShouldKeepLoadingScreenVisibleForWorldEntry() const {
 }
 
 bool GameLoop::TryCompleteLoadingScreenWorldEntry() {
-  if (!world_ui_lifecycle_.TryActivateLocalPlayer()) {
+  const bool ui_active = world_ui_lifecycle_.TryActivateLocalPlayer();
+  const auto log_wait = [this, ui_active](const LoadingScreenWorldEntryGateState* gate) {
+    if (!world_entry_performance_timer_.enabled() ||
+        !openwow::diagnostics::IsPerformanceLoggingEnabled()) return;
+    const double elapsed_ms = world_entry_performance_timer_.ElapsedMs();
+    if (elapsed_ms < next_world_entry_performance_ms_) return;
+    next_world_entry_performance_ms_ = elapsed_ms + 1000.0;
+    const auto textures = texture_manager_.StreamingStats();
+    std::ostringstream detail;
+    detail << "map=" << current_map_id_ << " elapsed_ms=" << elapsed_ms
+           << " ui_active=" << ui_active
+           << " texture_pending=" << textures.pending
+           << " texture_prepared=" << textures.prepared
+           << " texture_failed=" << textures.failed;
+    if (gate != nullptr) {
+      detail << " player_present=" << gate->has_active_player
+             << " player_assets=" << gate->active_player_render_assets_ready
+             << " world_surface=" << gate->critical_visible_world_surface_ready
+             << " map_streaming=" << world_scene_.world_map().IsWorldEntryStreamingComplete()
+             << " terrain_uploads=" << world_scene_.IsTerrainWorldEntryLoadDrained()
+             << " doodad_uploads=" << world_scene_.IsDoodadWorldEntryLoadDrained()
+             << " transport_required=" << gate->requires_transport_assets
+             << " transport_present=" << gate->has_transport_object
+             << " transport_assets=" << gate->transport_assets_ready
+             << ' ' << world_scene_.world_map().DescribeStreamingProgress();
+    }
+    openwow::diagnostics::LogPerformanceEvent("world.wait", detail.str());
+  };
+  if (!ui_active) {
+    log_wait(nullptr);
     return false;
   }
 
-  if (ShouldKeepLoadingScreenVisibleForWorldEntry()) {
+  const auto gate = BuildLoadingScreenWorldEntryGateState();
+  if (openwow::game::ShouldKeepLoadingScreenVisibleForWorldEntry(gate)) {
+    log_wait(&gate);
     return false;
   }
 
   world_scene_.world_map().SetWorldEntryStreamingMode(false);
   HideLoadingScreen();
   state_ = SceneState::kInWorld;
+  static openwow::diagnostics::PerformanceLogSite performance_site;
+  openwow::diagnostics::LogPerformanceDuration(
+      performance_site, "world.loading_screen_dismissed",
+      world_entry_performance_timer_, current_map_name_, 0.0);
   return true;
 }
 
 void GameLoop::UpdateNetwork() {
+  static openwow::diagnostics::PerformanceLogSite performance_site;
+  const openwow::diagnostics::ScopedPerformanceLog performance(
+      performance_site, "world.network_dispatch");
   if (!world_session())
     return;
 
@@ -5351,6 +5592,9 @@ void GameLoop::HandlePerFrameWorldMaintenance(const std::uint32_t current_tick_m
 }
 
 void GameLoop::RenderWorld(float dt) {
+  static openwow::diagnostics::PerformanceLogSite performance_site;
+  const openwow::diagnostics::ScopedPerformanceLog performance(
+      performance_site, "world.render_prepare_submit", current_map_name_);
   const auto view_width = static_cast<std::uint16_t>(std::max(1, screen_width_));
   const auto view_height = static_cast<std::uint16_t>(std::max(1, screen_height_));
 
@@ -5359,10 +5603,14 @@ void GameLoop::RenderWorld(float dt) {
   }
   const WorldSceneRenderViews render_views = ResolveWorldSceneRenderViews(renderer_context_);
   const auto &pose = world_scene_.camera().frame_pose();
+  const float camera_far_clip = ResolveWorldCameraFarClip();
   const WorldSceneRenderCamera render_camera{
       .position = pose.position,
       .forward = pose.forward,
-      .far_clip = ResolveWorldCameraFarClip(),
+      .far_clip = camera_far_clip,
+      .streaming_distance = ResolveWorldStreamingDistance(
+          camera_far_clip, world_scene_.world_map().map_id()),
+      .horizon_far_clip_scale = ResolveWorldHorizonFarClipScale(),
   };
   const auto &cvars = openwow::ui::game::CVarSystem::Instance();
   world::ShadowPresentationSettings shadow_settings =

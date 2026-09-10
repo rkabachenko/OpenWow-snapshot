@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -43,6 +44,12 @@ std::string BuildVfsPath(const std::string &root, const RetailDbcDescriptor &des
   return path;
 }
 
+std::string DescribeVfsSource(const openwow::vfs::VirtualFileSystem &vfs,
+                              const std::string &path) {
+  const auto source = vfs.Resolve(path);
+  return source.has_value() ? source->string() : std::string("<missing>");
+}
+
 template <typename T>
 bool LoadRetailStrictDbcStore(DbcStore<T> &store, const openwow::vfs::VirtualFileSystem &vfs,
                               const std::string &path,
@@ -54,9 +61,16 @@ bool LoadRetailStrictDbcStore(DbcStore<T> &store, const openwow::vfs::VirtualFil
   const char *const retail_path = schema.retail_path.data();
   auto bytes = vfs.ReadFileBytes(path);
   if (!bytes.has_value()) {
+    openwow::diagnostics::Log(
+        openwow::diagnostics::LogLevel::kError,
+        "DBC: client table read failed path=" + path +
+            " source=" + DescribeVfsSource(vfs, path));
     openwow::core::SErrFatalError_VArgs(kDbcVersionMismatchError, "Unable to open %s",
                                         retail_path);
   }
+  openwow::diagnostics::Log(
+      openwow::diagnostics::LogLevel::kDebug,
+      "DBC source: path=" + path + " source=" + DescribeVfsSource(vfs, path));
 
   std::size_t cursor = 0;
   std::uint32_t signature = 0;
@@ -148,7 +162,11 @@ int DbcLoader::LoadAll(const openwow::vfs::VirtualFileSystem &vfs,
   vfs_ = &vfs;
   int loaded = 0;
 
-  Log(LogLevel::kInfo, "DBC: Loading all client data files from '" + dbc_root_path + "' ...");
+  const auto active_locale = openwow::data::loading::CurrentDbcLocale();
+  Log(LogLevel::kInfo,
+      "DBC: Loading all client data files from '" + dbc_root_path +
+          "' localized_slot=" +
+          std::to_string(static_cast<std::uint32_t>(active_locale)));
 
   const auto load = [&](auto &store, const RetailDbcDescriptor &descriptor) {
     if (LoadOne(store, vfs, BuildVfsPath(dbc_root_path, descriptor), descriptor)) {
@@ -161,6 +179,22 @@ int DbcLoader::LoadAll(const openwow::vfs::VirtualFileSystem &vfs,
        RetailDbcDescriptor{path, fields, size});
   OPENWOW_RETAIL_DBC_CATALOG(OPENWOW_LOAD_DBC)
 #undef OPENWOW_LOAD_DBC
+
+  for (const std::string_view filename : {
+           "Faction.dbc",
+           "SkillLine.dbc",
+           "Spell.dbc",
+       }) {
+    const auto &descriptor = FindRetailDbcDescriptor(filename);
+    const auto path = BuildVfsPath(dbc_root_path, descriptor);
+    const auto source = vfs.Resolve(path);
+    Log(source.has_value() ? LogLevel::kInfo : LogLevel::kError,
+        "DBC localized source: path=" + path +
+            " localized_slot=" +
+            std::to_string(static_cast<std::uint32_t>(active_locale)) +
+            " source=" +
+            (source.has_value() ? source->string() : std::string("<missing>")));
+  }
 
   Log(LogLevel::kInfo,
       "DBC: Finished. " + std::to_string(loaded) + " loaded, 0 failed.");

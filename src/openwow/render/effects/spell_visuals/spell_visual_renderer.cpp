@@ -1531,13 +1531,21 @@ void SpellVisualRenderer::Update(float dt) {
         ++it;
         continue;
       }
+
+      if (inst.uses_authored_lifetime &&
+          inst.animation_completion_pending) {
+        FadeOutModelInstance(inst);
+        ++it;
+        continue;
+      }
     }
 
     if (inst.parent_guid != 0 && inst.attached) {
       UpdateModelInstancePosition(inst);
     }
 
-    if (inst.duration > 0.0f && inst.elapsed >= inst.duration) {
+    if (!inst.uses_authored_lifetime && inst.duration > 0.0f &&
+        inst.elapsed >= inst.duration) {
       if (!inst.fading) {
         FadeOutModelInstance(inst);
       }
@@ -1832,8 +1840,8 @@ m2::M2ResultStatus SpellVisualRenderer::BindDefaultModelSequence(
     return m2::M2ResultStatus::kReady;
   }
 
-  return m2_system_->SetAnimationSequenceSample(
-      instance_id, animations.animations.front().sequence_index, 0u, 1.0f);
+  return m2_system_->SetAnimation(
+      instance_id, animations.animations.front().animation_id, 1.0f);
 }
 
 void SpellVisualRenderer::DestroyM2Instance(std::uint32_t& instance_id) {
@@ -1850,8 +1858,12 @@ void SpellVisualRenderer::DestroyM2Instance(std::uint32_t& instance_id) {
   }
   const auto clear_status =
       m2_system_->ClearTriggeredEventCallback(instance_id);
+  const auto clear_completion_status =
+      m2_system_->ClearAnimationCompletionCallback(instance_id);
   const auto destroy_status = m2_system_->DestroyInstance(instance_id);
-  const auto status = m2::MergeM2ResultStatus(clear_status, destroy_status);
+  const auto status = m2::MergeM2ResultStatus(
+      m2::MergeM2ResultStatus(clear_status, clear_completion_status),
+      destroy_status);
   if (status != m2::M2ResultStatus::kReady) {
     diagnostics::Log(diagnostics::LogLevel::kWarn,
               std::string("SpellVisualRenderer: M2 instance destroy ") +
@@ -1888,6 +1900,31 @@ bool SpellVisualRenderer::BindM2EventCallback(
                             instance.m2_events_require_owner_resolution,
                         .event = event});
       });
+  return status == m2::M2ResultStatus::kReady;
+}
+
+bool SpellVisualRenderer::BindAnimationCompletionCallback(
+    const std::uint32_t instance_id) {
+  if (m2_system_ == nullptr || instance_id == 0u) {
+    return false;
+  }
+  const auto status = m2_system_->SetAnimationCompletionCallback(
+      instance_id, [this, instance_id](const std::uint32_t) {
+        const auto found = model_instances_.find(instance_id);
+        if (found == model_instances_.end() || !found->second.active ||
+            found->second.instance_id != instance_id ||
+            !found->second.uses_authored_lifetime) {
+          return;
+        }
+        found->second.animation_completion_pending = true;
+      });
+  if (status != m2::M2ResultStatus::kReady) {
+    diagnostics::Log(
+        diagnostics::LogLevel::kWarn,
+        std::string("SpellVisualRenderer: animation completion callback ") +
+            m2::M2ResultStatusName(status) +
+            " instance_id=" + std::to_string(instance_id));
+  }
   return status == m2::M2ResultStatus::kReady;
 }
 
@@ -2289,6 +2326,13 @@ void SpellVisualRenderer::SpawnPresentationModels(
     instance.attached = !effect.world_space && effect.attachment_id >= 0;
     instance.visible = !instance.attached;
     instance.duration = duration;
+    if (duration > 0.0f) {
+      const auto first_animation_duration =
+          m2_system_->QueryFirstAnimationDuration(loaded.model_id);
+      instance.uses_authored_lifetime =
+          first_animation_duration.status == m2::M2ResultStatus::kReady &&
+          first_animation_duration.duration_ms > 0u;
+    }
     std::copy(effect.offset.begin(), effect.offset.end(), instance.offset);
     std::copy(effect.rotation.begin(), effect.rotation.end(),
               instance.rotation);
@@ -2312,6 +2356,11 @@ void SpellVisualRenderer::SpawnPresentationModels(
           DestroyM2Instance(failed->second.instance_id);
           model_instances_.erase(failed);
         }
+      } else if (auto bound = model_instances_.find(loaded.instance_id);
+                 bound != model_instances_.end() &&
+                 bound->second.uses_authored_lifetime &&
+                 !BindAnimationCompletionCallback(loaded.instance_id)) {
+        bound->second.uses_authored_lifetime = false;
       }
     }
   }

@@ -5,8 +5,13 @@
 #include "openwow/ui/display/settings/display_settings_service.h"
 #include "openwow/ui/game/cvar_system.h"
 #include "openwow/ui/game/framescript/core/frame_base_methods.h"
+#include "openwow/ui/game/framescript/core/frame_runtime_identity.h"
+#include "openwow/foundation/diagnostics/performance_logging.h"
+#include "openwow/ui/game/runtime/retained_layout.h"
+#include "openwow/ui/game/runtime/world_ui_runtime_context.h"
 #include "openwow/ui/ui_aspect_scales.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdio>
 #include <cstdint>
@@ -139,8 +144,31 @@ class ProductionFrameScalePort final
 
   void Apply(lua_State* lua, const int frame_index,
              const float scale) override {
+    float fitted_scale = scale;
+    if (const auto* runtime = openwow::ui::game::runtime::WorldUiRuntimeContext::FromLua(lua)) {
+      const auto& layout = runtime->retained_layout();
+      const auto insets = layout.viewport_insets();
+      const float height = layout.viewport_height();
+      if (height > 0.0F && layout.viewport_width() > 0.0F) {
+        // Fullscreen templates use a 1024x768 guide. Fit its controls inside
+        // the same safe bounds that anchor the UI, without changing HUD scale.
+        const float safe_height = height - insets.top - insets.bottom;
+        const float safe_width = layout.viewport_width() - insets.left - insets.right;
+        fitted_scale = std::min({scale, safe_height / height,
+                                safe_width * 0.75F / height});
+        const char* key = openwow::ui::game::frame_api::GetFrameRuntimeKeyOrName(
+            lua, frame_index);
+        openwow::diagnostics::LogPerformanceEvent("ui.fullscreen_scale",
+            "phase=request frame=" + std::string(key != nullptr ? key : "<unnamed>") +
+                " viewport=" + std::to_string(layout.viewport_width()) + "x" +
+                std::to_string(height) + " safe=" + std::to_string(safe_width) + "x" +
+                std::to_string(safe_height) + " hud_scale=" +
+                std::to_string(layout.root_scale()) + " frame_scale=" +
+                std::to_string(fitted_scale));
+      }
+    }
     openwow::ui::game::frame_api::StoreLuaFrameScaleAndInvalidate(
-        lua, frame_index, scale);
+        lua, frame_index, fitted_scale);
   }
 };
 

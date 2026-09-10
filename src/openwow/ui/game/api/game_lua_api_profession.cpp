@@ -362,16 +362,15 @@ int LuaGetSkillLineInfo(lua_State* L) {
   }
 
   const auto skill = player->GetSkill(*skill_slot);
-  auto displayed_rank = static_cast<std::uint32_t>(skill.value);
-  if (displayed_rank != 0) {
-    displayed_rank += static_cast<std::uint16_t>(skill.step_modifier);
-  }
-  displayed_rank += ResolveWeaponSkillDisplayBonus(*player, *dbc, visible_entry->skill_id);
+  const auto skill_display_bonus =
+      ResolveWeaponSkillDisplayBonus(*player, *dbc, visible_entry->skill_id);
+  const auto adjusted_displayed_rank =
+      static_cast<std::int64_t>(skill.EffectiveValue()) + skill_display_bonus;
+  auto displayed_rank = adjusted_displayed_rank > 0
+                            ? static_cast<std::uint32_t>(adjusted_displayed_rank)
+                            : 0u;
 
-  auto displayed_max_rank = static_cast<std::uint32_t>(skill.max_value);
-  if (displayed_max_rank != 0) {
-    displayed_max_rank += static_cast<std::uint16_t>(skill.step_modifier);
-  }
+  auto displayed_max_rank = skill.EffectiveMaxValue();
   if ((race_class_info->flags & 0x400u) != 0) {
     displayed_max_rank = 1;
     displayed_rank = std::min(displayed_rank, 1u);

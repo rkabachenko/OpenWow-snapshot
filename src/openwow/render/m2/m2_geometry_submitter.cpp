@@ -491,7 +491,12 @@ M2RenderInstanceResult M2GeometrySubmitter::Submit(
                 .reason = M2ResultReason::kUnsupportedBlendMode,
                 .detail = setup_failure, .submitted_draw_count = submitted_draw_count};
       }
-      const std::uint64_t state = setup.state;
+      std::uint64_t state = setup.state;
+      if (pass_scope == M2RenderPassScope::kShadowCaster) {
+        state = BGFX_STATE_WRITE_Z | BGFX_STATE_DEPTH_TEST_LESS |
+                (state & BGFX_STATE_CULL_MASK);
+        setup.uniforms.world_shadow_receiver = {};
+      }
       bgfx::TextureHandle tex0 = BGFX_INVALID_HANDLE;
       bgfx::TextureHandle tex1 = BGFX_INVALID_HANDLE;
       std::size_t tex0_index = model.textures.size();

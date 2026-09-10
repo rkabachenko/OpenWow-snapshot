@@ -719,6 +719,9 @@ void CreateTextureTable(lua_State *L, int parent_idx) {
   }, 0);
   lua_setfield(L, tx, "Hide");
 
+  lua_pushcfunction(L, LuaRegion_SetShown);
+  lua_setfield(L, tx, "SetShown");
+
   lua_pushcclosure(L, [](lua_State *Ls) -> int {
     if (!lua_istable(Ls, 1)) {
       lua_pushnil(Ls);

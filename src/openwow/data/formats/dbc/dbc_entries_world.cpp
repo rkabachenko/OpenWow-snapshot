@@ -53,8 +53,8 @@ OPENWOW_DBC_SCHEMA(GroundEffectTextureEntry,
       e.doodad_id[i] = f.GetUInt32(row, 1 + i);
       e.doodad_weight[i] = f.GetInt32(row, 5 + i);
     }
-    e.sound = f.GetUInt32(row, 9);
-    e.density = f.GetUInt32(row, 10);
+    e.density = f.GetUInt32(row, 9);
+    e.sound = f.GetUInt32(row, 10);
 )
 
 OPENWOW_DBC_SCHEMA(GroundEffectDoodadEntry,
@@ -392,10 +392,10 @@ OPENWOW_DBC_SCHEMA(WeatherEntry,
   DBC_U32(id, 0)
   DBC_U32(ambience_id, 1)
   DBC_U32(effect_type, 2)
-  DBC_F32(effect_color_r, 3)
-  DBC_F32(effect_color_g, 4)
-  DBC_F32(effect_color_b, 5)
-  DBC_U32(transition_sky_box, 6)
+  DBC_F32(transition_value, 3)
+  DBC_F32(effect_color_r, 4)
+  DBC_F32(effect_color_g, 5)
+  DBC_F32(effect_color_b, 6)
   DBC_STRING(effect_texture, 7)
 )
 

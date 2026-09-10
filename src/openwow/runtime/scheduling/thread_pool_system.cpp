@@ -104,6 +104,7 @@ uint32_t ThreadPoolSystem::Submit(const std::string& name, TaskPriority priority
         lock.unlock();
 
         bool ok = true;
+        const openwow::diagnostics::PerformanceTimer run_timer;
         try { task.callable(); }
         catch (...) {
             openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kError,
@@ -111,6 +112,9 @@ uint32_t ThreadPoolSystem::Submit(const std::string& name, TaskPriority priority
             ok = false;
         }
 
+        static openwow::diagnostics::PerformanceLogSite performance_site;
+        openwow::diagnostics::LogPerformanceDuration(
+            performance_site, "worker.sync_task", run_timer, task.name);
         lock.lock();
         m_runningCount.fetch_sub(1);
         m_tasks[id].status = ok ? TaskStatus::Completed : TaskStatus::Failed;
@@ -167,6 +171,11 @@ void ThreadPoolSystem::WorkerLoop() {
             m_runningCount.fetch_add(1);
         }
 
+        static openwow::diagnostics::PerformanceLogSite queue_site{
+            .retain_severe = false};
+        openwow::diagnostics::LogPerformanceDuration(
+            queue_site, "worker.queue_wait", task.queued_timer, task.name, 100.0);
+        const openwow::diagnostics::PerformanceTimer run_timer;
         bool ok = true;
         try { task.callable(); }
         catch (...) {
@@ -175,6 +184,9 @@ void ThreadPoolSystem::WorkerLoop() {
             ok = false;
         }
 
+        static openwow::diagnostics::PerformanceLogSite performance_site;
+        openwow::diagnostics::LogPerformanceDuration(
+            performance_site, "worker.task", run_timer, task.name);
         {
             std::lock_guard lock(m_mutex);
             m_runningCount.fetch_sub(1);

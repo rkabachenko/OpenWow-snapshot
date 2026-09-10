@@ -1,8 +1,10 @@
 
 #include "storm_thread.h"
 #include "storm_memory.h"
+#include "storm_error.h"
 #include "storm_tls.h"
 #include "storm_utils.h"
+#include "openwow/foundation/diagnostics/logging.h"
 #include "openwow/runtime/scheduling/frame_scheduler.h"
 
 #include <cerrno>
@@ -21,13 +23,15 @@
 #  include <windows.h>
 #else
 #  include <pthread.h>
-#  include <spawn.h>
 #  include <sys/syscall.h>
-#  include <sys/wait.h>
 #  include <unistd.h>
+#  if !defined(OPENWOW_PLATFORM_IOS)
+#    include <spawn.h>
+#    include <sys/wait.h>
+#  endif
 #endif
 
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(OPENWOW_PLATFORM_IOS)
 extern char** environ;
 #endif
 
@@ -258,6 +262,8 @@ namespace {
 
 #ifdef _WIN32
 using StormProcessWaitHandle = HANDLE;
+#elif defined(OPENWOW_PLATFORM_IOS)
+using StormProcessWaitHandle = int;
 #else
 using StormProcessWaitHandle = pid_t;
 #endif
@@ -275,6 +281,9 @@ bool PollProcessWaitReady(StormProcessWaitHandle handle) {
     }
 
     return ::WaitForSingleObjectEx(handle, 0, FALSE) == WAIT_OBJECT_0;
+#elif defined(OPENWOW_PLATFORM_IOS)
+    static_cast<void>(handle);
+    return false;
 #else
     if (handle <= 0) {
         return false;
@@ -492,6 +501,19 @@ int SThread_SpawnProcess(const char* application_name,
                          const char* command_line,
                          std::uintptr_t wait_callback,
                          std::intptr_t callback_arg) {
+#if defined(OPENWOW_PLATFORM_IOS)
+    (void)command_line;
+    (void)wait_callback;
+    (void)callback_arg;
+    diagnostics::Log(
+        diagnostics::LogLevel::kError,
+        std::string("Process launch is unavailable on iOS; requested application: ") +
+            ((application_name != nullptr && application_name[0] != '\0')
+                 ? application_name
+                 : "<unspecified>"));
+    SErrSetLastError(50);
+    return 0;
+#else
     if ((!application_name || !*application_name) &&
         (!command_line || !*command_line)) {
         return 0;
@@ -614,6 +636,7 @@ int SThread_SpawnProcess(const char* application_name,
     }
 
     return 1;
+#endif
 #endif
 }
 

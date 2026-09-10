@@ -1,5 +1,7 @@
 #include "openwow/ui/screens/login_screen.h"
 
+#include "openwow/game/client_config.h"
+
 namespace openwow::ui::screens {
 
 void LoginScreen::SetRememberPassword(bool enabled) {
@@ -29,7 +31,8 @@ const std::string& LoginScreen::password() const {
 openwow::net::wotlk::AuthResult LoginScreen::AttemptLogin(const std::string& host,
                                                           std::uint16_t port,
                                                           std::uint32_t timeout_ms) const {
-  openwow::net::wotlk::AuthProtocol auth;
+  openwow::net::wotlk::AuthProtocol auth{
+      openwow::game::ClientConfig::Get().GetLocale()};
   return auth.Login(host, port, username_, password_, timeout_ms);
 }
 

@@ -22,6 +22,8 @@ WowMouseButtonStateSink g_wow_mouse_button_state_sink = nullptr;
 void* g_wow_mouse_button_state_context = nullptr;
 
 constexpr std::uint32_t MouseButtonToFlag(const MouseButton button) {
+    if (button == MouseButton::Right) return 4u;
+    if (button == MouseButton::Middle) return 2u;
     const auto idx = static_cast<std::uint32_t>(button);
     if (idx >= kMouseButtonMax) return 0;
     return 1u << idx;
@@ -29,6 +31,8 @@ constexpr std::uint32_t MouseButtonToFlag(const MouseButton button) {
 
 std::optional<MouseButton> MouseButtonFromFlag(const std::uint32_t button_flag) {
     if (button_flag == 0u) return std::nullopt;
+    if (button_flag == 4u) return MouseButton::Right;
+    if (button_flag == 2u) return MouseButton::Middle;
     const auto idx = static_cast<std::size_t>(std::countr_zero(button_flag));
     if (idx >= kMouseButtonMax) return std::nullopt;
     return static_cast<MouseButton>(idx);
@@ -232,11 +236,13 @@ void InputManager::OnMouseMove(int32_t x, int32_t y) {
 }
 
 void InputManager::OnMouseButton(MouseButton btn, bool pressed) {
-    const auto idx = static_cast<size_t>(btn);
-    if (idx >= mouse_.buttons.size()) return;
+    OnMouseButtonFlag(MouseButtonToFlag(btn), pressed);
+}
+
+void InputManager::OnMouseButtonFlag(uint32_t button_flag, bool pressed) {
+    if (button_flag == 0u) return;
     std::lock_guard<std::mutex> lock(mutex_);
-    mouse_.buttons[idx] = pressed;
-    const auto button_flag = MouseButtonToFlag(btn);
+    ApplyMouseButtonFlag(mouse_, button_flag, pressed);
     if (pressed) {
         mouse_button_flags_ |= button_flag;
     } else {
@@ -560,6 +566,14 @@ bool InputManager::IsAltDown() const {
 std::uint32_t InputManager::GetLastMessageTimestamp() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return last_message_timestamp_ms_;
+}
+
+void InputManager::ProcessTouchInput() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!input_enabled_) return;
+    // Touch has its own routing and capture, but scripted camera commands
+    // consume the same game-clock timestamp as keyboard and mouse commands.
+    last_message_timestamp_ms_ = GetCurrentMessageTimestamp();
 }
 
 uint32_t InputManager::RegisterKeyCallback(uint32_t keyCode,

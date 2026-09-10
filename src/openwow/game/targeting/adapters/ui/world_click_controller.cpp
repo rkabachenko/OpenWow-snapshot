@@ -247,6 +247,8 @@ void HandleEmptyWorldClick(WorldSession &session,
   const bool can_auto_walk =
       cursor_was_clear && direction_length_squared != 0.0f &&
       moving_unit != nullptr &&
+      ::openwow::ui::game::CVarSystem::Instance().GetCVarBool(
+          "autoInteract") &&
       CanEffectiveMoverAutoWalk(session, *moving_unit);
   bool cleared_cursor = false;
 

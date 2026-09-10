@@ -19,7 +19,9 @@
 #  include <windows.h>
 #elif defined(__APPLE__)
 #  include <CoreFoundation/CoreFoundation.h>
-#  include <IOKit/IOKitLib.h>
+#  if !defined(OPENWOW_PLATFORM_IOS)
+#    include <IOKit/IOKitLib.h>
+#  endif
 #  include <mach-o/dyld.h>
 #  include <sys/sysctl.h>
 #  include <sys/types.h>
@@ -108,7 +110,7 @@ bool TryReadLinuxDisplayAdapterIdentity(const std::filesystem::path& device_path
 }
 #endif
 
-#if defined(__APPLE__)
+#if defined(__APPLE__) && !defined(OPENWOW_PLATFORM_IOS)
 class ScopedIoObject final {
 public:
     ScopedIoObject() = default;
@@ -438,6 +440,8 @@ bool TryParseWindowsDisplayDevicePciIdentity(std::string_view device_id,
 PlatformOS PlatformLayer::GetOS() {
 #if defined(_WIN32)
     return PlatformOS::Windows;
+#elif defined(OPENWOW_PLATFORM_IOS)
+    return PlatformOS::iOS;
 #elif defined(__APPLE__)
     return PlatformOS::MacOS;
 #elif defined(__linux__)
@@ -466,6 +470,7 @@ std::string PlatformLayer::GetOSName() {
         case PlatformOS::Windows: return "Windows";
         case PlatformOS::MacOS:   return "macOS";
         case PlatformOS::Linux:   return "Linux";
+        case PlatformOS::iOS:     return "iOS";
         default:                  return "Unknown";
     }
 }
@@ -483,8 +488,8 @@ std::string PlatformLayer::GetArchName() {
 std::string PlatformLayer::GetUserDataPath() {
 #if defined(_WIN32)
     const char* appdata = std::getenv("APPDATA");
-    if (appdata) return std::string(appdata) + "\\WTF";
-    return "WTF";
+    if (appdata) return std::string(appdata) + "\\OpenWoW";
+    return "OpenWoW";
 #elif defined(__APPLE__)
     const char* home = std::getenv("HOME");
     if (home) return std::string(home) + "/Library/Application Support/OpenWoW";
@@ -532,6 +537,8 @@ bool PlatformLayer::IsDebuggerAttached() {
         }
     }
     return false;
+#elif defined(OPENWOW_PLATFORM_IOS)
+    return false;
 #elif defined(__APPLE__)
 
     int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid() };
@@ -562,6 +569,12 @@ static std::string QueryCPUName() {
             }
         }
     }
+    return "Unknown";
+#elif defined(OPENWOW_PLATFORM_IOS)
+    char buf[256]{};
+    size_t len = sizeof(buf);
+    if (sysctlbyname("hw.machine", buf, &len, nullptr, 0) == 0)
+        return std::string(buf);
     return "Unknown";
 #elif defined(__APPLE__)
     char buf[256]{};
@@ -685,6 +698,9 @@ bool PlatformLayer::TryGetPrimaryDisplayAdapterIdentity(
         }
     }
 
+    return false;
+#elif defined(OPENWOW_PLATFORM_IOS)
+    (void)out;
     return false;
 #elif defined(__APPLE__)
     return TryReadMacDisplayAdapterIdentity(out);

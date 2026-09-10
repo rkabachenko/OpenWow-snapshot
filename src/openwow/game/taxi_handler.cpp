@@ -1,36 +1,9 @@
 
 #include "openwow/game/taxi_handler.h"
 
-#include <cstring>
-
 namespace openwow::game {
 
 namespace {
-
-class RetailTaxiPacketReader {
- public:
-  RetailTaxiPacketReader(const std::uint8_t* data, const std::size_t size)
-      : data_(data), size_(size) {}
-
-  void ReadU32(std::uint32_t& value) { Read(value); }
-  void ReadU64(std::uint64_t& value) { Read(value); }
-
- private:
-  template <typename T>
-  void Read(T& value) {
-    if (overrun_ || size_ - position_ < sizeof(value)) {
-      overrun_ = true;
-      return;
-    }
-    std::memcpy(&value, data_ + position_, sizeof(value));
-    position_ += sizeof(value);
-  }
-
-  const std::uint8_t* data_ = nullptr;
-  std::size_t size_ = 0;
-  std::size_t position_ = 0;
-  bool overrun_ = false;
-};
 
 [[nodiscard]] std::uint32_t CountSetTaxiNodes(
     const TaxiNodeDisplay& display) {
@@ -49,22 +22,27 @@ class RetailTaxiPacketReader {
 
 TaxiShowResult TaxiHandler::HandleShowTaxiNodes(const std::uint8_t* data,
                                                   std::size_t len) {
-  RetailTaxiPacketReader reader(data, len);
+  PacketReader reader(data, len);
   TaxiNodeDisplay display{};
-  reader.ReadU32(display.window_info);
+  if (!reader.ReadU32(display.window_info)) {
+    return TaxiShowResult::kParseError;
+  }
 
   if (display.window_info != 0) {
-    reader.ReadU64(display.npc_guid);
-    reader.ReadU32(display.current_node);
+    if (!reader.ReadU64(display.npc_guid) ||
+        !reader.ReadU32(display.current_node)) {
+      return TaxiShowResult::kParseError;
+    }
   }
 
   for (std::size_t word = 0; word < kTaxiMaskSize; word += 2) {
     std::uint64_t mask_pair = 0;
-    reader.ReadU64(mask_pair);
+    if (!reader.ReadU64(mask_pair)) {
+      return TaxiShowResult::kParseError;
+    }
     display.mask[word] = static_cast<std::uint32_t>(mask_pair);
     display.mask[word + 1] = static_cast<std::uint32_t>(mask_pair >> 32);
   }
-
   display_ = display;
   reachable_count_ = CountSetTaxiNodes(display_);
 
@@ -84,13 +62,10 @@ TaxiShowResult TaxiHandler::HandleShowTaxiNodes(const std::uint8_t* data,
 
 bool TaxiHandler::HandleActivateTaxiReply(const std::uint8_t* data,
                                             std::size_t len) {
-
+  PacketReader reader(data, len);
   std::uint32_t reply = 0;
-  if (data != nullptr && len >= sizeof(reply)) {
-    reply = static_cast<std::uint32_t>(data[0]) |
-            (static_cast<std::uint32_t>(data[1]) << 8) |
-            (static_cast<std::uint32_t>(data[2]) << 16) |
-            (static_cast<std::uint32_t>(data[3]) << 24);
+  if (!reader.ReadU32(reply)) {
+    return false;
   }
   reply_ = static_cast<TaxiReply>(reply);
 
@@ -111,8 +86,11 @@ bool TaxiHandler::HandleNewTaxiPath(const std::uint8_t* ,
 bool TaxiHandler::HandleTaxiNodeStatus(const std::uint8_t* data,
                                          std::size_t len) {
   PacketReader r(data, len);
-  if (!r.ReadU64(status_.npc_guid)) return false;
-  if (!r.ReadU8(status_.status)) return false;
+  TaxiNodeStatus status;
+  if (!r.ReadU64(status.npc_guid) || !r.ReadU8(status.status)) {
+    return false;
+  }
+  status_ = status;
   return true;
 }
 

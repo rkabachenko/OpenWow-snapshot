@@ -1639,11 +1639,12 @@ void ChatFrame_DisplayMessage(const ObjectManager& objects, const char *message,
     case static_cast<int>(ChatMsg::kRaidBossWhisper):
     case static_cast<int>(ChatMsg::kAchievement):
     case static_cast<int>(ChatMsg::kGuildAchievement):
-      if (ExpandServerTextTokens(objects, g_chat_display_dbc,
-                                 ObjectGuid(target_guid), message,
-                                 expanded_message)) {
-        message = expanded_message.c_str();
-      }
+      (void)ExpandServerTextTokens(objects, g_chat_display_dbc,
+                                  ObjectGuid(target_guid), message,
+                                  expanded_message);
+      // Keep successfully expanded spans when another token is unresolved;
+      // the shared parser preserves that token and records its context.
+      message = expanded_message.c_str();
       break;
     default:
       break;

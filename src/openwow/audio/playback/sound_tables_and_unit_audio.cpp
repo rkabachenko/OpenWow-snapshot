@@ -180,21 +180,15 @@ int AdvanceAmbientIdleSoundSelection(
 
 void SoundRuntime::PlayAmbientIdleSound(std::uint64_t unit_guid) {
   auto& sound = *this;
-  const auto *dbc = detail::GetDbcLoaderForAudio();
-  if (dbc == nullptr) {
-    return;
-  }
 
   const auto *unit = sound.GetUnitForSound(unit_guid);
   if (unit == nullptr) {
     return;
   }
 
-  if (ambient_idle_handle_valid_ &&
-      IsSoundHandlePlaying(ambient_idle_handle_id_)) {
+  if (unit->Sound().IsNpcVoicePlaying(*unit)) {
     return;
   }
-  ambient_idle_handle_valid_ = false;
 
   if (CannotPlayAmbientIdleSoundForAnimationState(*unit)) {
     return;
@@ -215,12 +209,7 @@ void SoundRuntime::PlayAmbientIdleSound(std::uint64_t unit_guid) {
   }
   ambient_idle_last_guid_ = unit_guid;
 
-  const auto *display =
-      dbc->creature_display_info().LookupEntry(unit->Presentation().CurrentDisplayId());
-  if (display == nullptr || display->sound_id == 0) {
-    return;
-  }
-  const auto *npc_sounds = dbc->npc_sounds().LookupEntry(display->sound_id);
+  const auto *npc_sounds = unit->Sound().ResolveNpcSounds(*unit, "selection");
   if (npc_sounds == nullptr) {
     return;
   }
@@ -235,21 +224,10 @@ void SoundRuntime::PlayAmbientIdleSound(std::uint64_t unit_guid) {
     return;
   }
 
-  const auto position = unit->GetPosition();
-  const float sound_position[3] = {position.x, position.y, position.z};
-
-  SoundKitPlaybackOptions options{};
-  if (variation_index >= 0) {
-    options.forced_file_index = variation_index;
-  }
-
-  std::uint32_t handle_id = 0;
-  PlaySoundKit(sound_kit_id, sound_position, &handle_id, options);
-
-  if (IsSoundHandlePlaying(handle_id)) {
+  const auto result = unit->Sound().PlayNpcVoice(
+      *unit, *npc_sounds, sound_kit_id, "selection", variation_index);
+  if (result == 0 && unit->Sound().IsNpcVoicePlaying(*unit)) {
     ambient_idle_selection_counter_ = new_counter;
-    ambient_idle_handle_id_ = handle_id;
-    ambient_idle_handle_valid_ = true;
   }
 }
 

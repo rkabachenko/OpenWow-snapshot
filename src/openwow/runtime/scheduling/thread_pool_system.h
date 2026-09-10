@@ -1,5 +1,7 @@
 #pragma once
 
+#include "openwow/foundation/diagnostics/performance_logging.h"
+
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -77,6 +79,7 @@ public:
 
 private:
     struct InternalTask {
+        openwow::diagnostics::PerformanceTimer queued_timer;
         uint32_t                taskId   = 0;
         std::string             name;
         TaskPriority            priority = TaskPriority::Normal;

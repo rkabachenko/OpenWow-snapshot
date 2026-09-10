@@ -35,17 +35,12 @@ struct SkillQueueCostContext {
 
 [[nodiscard]] std::uint32_t SkillBaseRankForQueue(
     const CGPlayer_C::SkillInfo& skill) {
-  const auto step_modifier =
-      skill.value != 0 ? static_cast<std::uint16_t>(skill.step_modifier) : 0u;
-  return static_cast<std::uint32_t>(skill.value) + step_modifier;
+  return skill.EffectiveValue();
 }
 
 [[nodiscard]] std::uint32_t SkillMaxRankForQueue(
     const CGPlayer_C::SkillInfo& skill) {
-
-  const auto step_modifier =
-      skill.max_value != 0 ? static_cast<std::uint16_t>(skill.step_modifier) : 0u;
-  return static_cast<std::uint32_t>(skill.max_value) + step_modifier;
+  return skill.EffectiveMaxValue();
 }
 
 [[nodiscard]] std::optional<SkillQueueCostContext> BuildSkillQueueCostContext(

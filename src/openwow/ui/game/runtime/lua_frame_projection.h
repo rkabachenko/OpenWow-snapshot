@@ -56,6 +56,10 @@ struct TextureRenderState {
   bool tile_y{false};
 
   bool clamp_v_wrap{false};
+  float solid_color_r{1.0f};
+  float solid_color_g{1.0f};
+  float solid_color_b{1.0f};
+  float solid_color_a{1.0f};
   float color_r{1.0f};
   float color_g{1.0f};
   float color_b{1.0f};
@@ -64,6 +68,7 @@ struct TextureRenderState {
       openwow::render::ui::BlendMode::kAlpha};
   bool desaturated{false};
   bool dynamic_texture_is_render_target{false};
+  bool replace_dynamic_texture_alpha_with_portrait_mask{false};
 };
 
 [[nodiscard]] openwow::ui::framexml::UiFrame::RuntimeKind ClassifyFrameRuntimeKind(

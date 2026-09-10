@@ -1,5 +1,6 @@
 
 #include "openwow/render/effects/postprocess/post_process.h"
+#include "openwow/core/platform_runtime_policy.h"
 #include "openwow/render/resources/textures/texture_surface_copy.h"
 #include "openwow/render/resources/shaders/shader_registry.h"
 #include "openwow/foundation/diagnostics/logging.h"
@@ -58,6 +59,20 @@ std::uint8_t NormalizeMultisample(const std::uint8_t samples) noexcept {
   default:
     return 1;
   }
+}
+
+float NormalizeRenderScale(const float scale) noexcept {
+  if (!std::isfinite(scale)) {
+    return 1.0f;
+  }
+  return std::clamp(scale, openwow::core::kWorldRenderScaleMin,
+                    openwow::core::kWorldRenderScaleMax);
+}
+
+std::uint32_t ResolveScaledDimension(const std::uint32_t native_dimension,
+                                     const float scale) noexcept {
+  return std::max(1u, static_cast<std::uint32_t>(
+                          std::lround(static_cast<float>(native_dimension) * scale)));
 }
 
 std::uint64_t MultisampleTextureFlags(const std::uint8_t samples) noexcept {
@@ -184,7 +199,9 @@ void PostProcess::Init(uint32_t width, uint32_t height, const PostProcessSetting
   death_requested_enabled_ = false;
   death_cvar_enabled_ = settings.enabled && settings.death_enabled;
   rectangle_textures_ = settings.rectangle_textures;
+  lazy_effect_framebuffers_ = settings.lazy_effect_framebuffers;
   multisample_ = NormalizeMultisample(settings.multisample);
+  render_scale_ = NormalizeRenderScale(settings.render_scale);
   state_.ffx_enabled = settings.enabled;
   state_.glow_enabled = settings.enabled && settings.glow_enabled;
   requested_death_intensity_ = 0.0f;
@@ -196,6 +213,7 @@ void PostProcess::Init(uint32_t width, uint32_t height, const PostProcessSetting
   openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kInfo,
                      "PostProcess: initialized " + std::to_string(width_) +
                      "x" + std::to_string(height_) +
+                     " scale=" + std::to_string(render_scale_) +
                      (gpu_ready_ ? " (GPU ready)" : " (GPU deferred)"));
 }
 
@@ -254,6 +272,13 @@ bool PostProcess::RestoreRendererDeviceResources() {
   }
   CreateResources();
   return gpu_ready_;
+}
+
+void PostProcess::ReleaseTransientEffectFramebuffers() {
+  if (!lazy_effect_framebuffers_) {
+    return;
+  }
+  DestroyEffectFramebuffers();
 }
 
 void PostProcess::Update(float dt) {
@@ -335,8 +360,10 @@ void PostProcess::CreateFramebuffers() {
       std::numeric_limits<std::uint16_t>::max());
 
   const auto texture_mode = SelectFfxTextureMode(rectangle_textures_, true, true, true);
+  const std::uint32_t capture_width = ResolveScaledDimension(width_, render_scale_);
+  const std::uint32_t capture_height = ResolveScaledDimension(height_, render_scale_);
   const auto targets =
-      ResolveFfxTargetPyramid({.width = width_, .height = height_}, texture_mode,
+      ResolveFfxTargetPyramid({.width = capture_width, .height = capture_height}, texture_mode,
                               {.width = maximum_dimension, .height = maximum_dimension});
   scene_target_ = targets.full;
   quarter_target_ = targets.quarter;
@@ -353,24 +380,86 @@ void PostProcess::CreateFramebuffers() {
   bgfx::TextureHandle scene_attachments[] = {scene_tex_, scene_depth_};
   scene_fb_ = bgfx::createFrameBuffer(2, scene_attachments, true);
 
+  if (!lazy_effect_framebuffers_ || IsGlowActive() || IsDeathEffectActive()) {
+    CreateEffectFramebuffers();
+  }
+
+  const bool scene_ready = bgfx::isValid(scene_fb_) && bgfx::isValid(scene_tex_) &&
+                           bgfx::isValid(scene_depth_);
+  openwow::diagnostics::Log(
+      scene_ready ? openwow::diagnostics::LogLevel::kInfo
+                  : openwow::diagnostics::LogLevel::kError,
+      "PostProcess: world render targets scale=" + std::to_string(render_scale_) +
+          " output=" + std::to_string(width_) + "x" + std::to_string(height_) +
+          " capture=" + std::to_string(scene_target_.logical.width) + "x" +
+          std::to_string(scene_target_.logical.height) +
+          " multisample=" + std::to_string(multisample_) +
+          (scene_ready ? " status=ready" : " status=failed reason=scene attachment/framebuffer creation"));
+}
+
+void PostProcess::CreateEffectFramebuffers() {
+  const uint64_t tex_flags =
+      BGFX_TEXTURE_RT | BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP;
+
   const uint16_t qw = static_cast<uint16_t>(quarter_target_.backing.width);
   const uint16_t qh = static_cast<uint16_t>(quarter_target_.backing.height);
 
-  quarter_tex_ = bgfx::createTexture2D(qw, qh, false, 1, bgfx::TextureFormat::RGBA8, tex_flags);
-  bgfx::TextureHandle q_att[] = {quarter_tex_};
-  quarter_fb_ = bgfx::createFrameBuffer(1, q_att, true);
+  if (!bgfx::isValid(quarter_fb_)) {
+    quarter_tex_ =
+        bgfx::createTexture2D(qw, qh, false, 1, bgfx::TextureFormat::RGBA8, tex_flags);
+    bgfx::TextureHandle q_att[] = {quarter_tex_};
+    quarter_fb_ = bgfx::createFrameBuffer(1, q_att, true);
+  }
 
-  quarter_scratch_tex_ = bgfx::createTexture2D(qw, qh, false, 1,
-                                                bgfx::TextureFormat::RGBA8, tex_flags);
-  bgfx::TextureHandle qs_att[] = {quarter_scratch_tex_};
-  quarter_scratch_fb_ = bgfx::createFrameBuffer(1, qs_att, true);
+  if (!bgfx::isValid(quarter_scratch_fb_)) {
+    quarter_scratch_tex_ = bgfx::createTexture2D(
+        qw, qh, false, 1, bgfx::TextureFormat::RGBA8, tex_flags);
+    bgfx::TextureHandle qs_att[] = {quarter_scratch_tex_};
+    quarter_scratch_fb_ = bgfx::createFrameBuffer(1, qs_att, true);
+  }
 
-  death_tex_ = bgfx::createTexture2D(
-      static_cast<uint16_t>(scene_target_.backing.width),
-      static_cast<uint16_t>(scene_target_.backing.height),
-      false, 1, bgfx::TextureFormat::RGBA8, tex_flags);
-  bgfx::TextureHandle d_att[] = {death_tex_};
-  death_fb_ = bgfx::createFrameBuffer(1, d_att, true);
+  if ((!lazy_effect_framebuffers_ || IsDeathEffectActive()) &&
+      !bgfx::isValid(death_fb_)) {
+    death_tex_ = bgfx::createTexture2D(
+        static_cast<uint16_t>(scene_target_.backing.width),
+        static_cast<uint16_t>(scene_target_.backing.height), false, 1,
+        bgfx::TextureFormat::RGBA8, tex_flags);
+    bgfx::TextureHandle d_att[] = {death_tex_};
+    death_fb_ = bgfx::createFrameBuffer(1, d_att, true);
+  }
+}
+
+void PostProcess::EnsureEffectFramebuffers() {
+  if (!lazy_effect_framebuffers_) {
+    return;
+  }
+
+  if (IsGlowActive() || IsDeathEffectActive()) {
+    CreateEffectFramebuffers();
+  } else {
+    DestroyEffectFramebuffers();
+  }
+
+  if (!IsDeathEffectActive() && bgfx::isValid(death_fb_)) {
+    bgfx::destroy(death_fb_);
+    death_fb_ = BGFX_INVALID_HANDLE;
+    death_tex_ = BGFX_INVALID_HANDLE;
+  }
+}
+
+void PostProcess::DestroyEffectFramebuffers() {
+  auto destroy_fb = [](bgfx::FrameBufferHandle &handle) {
+    if (bgfx::isValid(handle)) {
+      bgfx::destroy(handle);
+      handle = BGFX_INVALID_HANDLE;
+    }
+  };
+  destroy_fb(quarter_fb_);
+  quarter_tex_ = BGFX_INVALID_HANDLE;
+  destroy_fb(quarter_scratch_fb_);
+  quarter_scratch_tex_ = BGFX_INVALID_HANDLE;
+  destroy_fb(death_fb_);
+  death_tex_ = BGFX_INVALID_HANDLE;
 }
 
 void PostProcess::DestroyFramebuffers() {
@@ -378,10 +467,8 @@ void PostProcess::DestroyFramebuffers() {
     if (bgfx::isValid(h)) { bgfx::destroy(h); h = BGFX_INVALID_HANDLE; }
   };
 
+  DestroyEffectFramebuffers();
   destroyFB(scene_fb_);          scene_tex_ = BGFX_INVALID_HANDLE; scene_depth_ = BGFX_INVALID_HANDLE;
-  destroyFB(quarter_fb_);        quarter_tex_ = BGFX_INVALID_HANDLE;
-  destroyFB(quarter_scratch_fb_); quarter_scratch_tex_ = BGFX_INVALID_HANDLE;
-  destroyFB(death_fb_);          death_tex_ = BGFX_INVALID_HANDLE;
   scene_target_ = {};
   quarter_target_ = {};
 }
@@ -715,6 +802,7 @@ void PostProcess::BindSceneFramebufferToViews(std::span<const std::uint8_t> view
                                               const std::uint16_t width,
                                               const std::uint16_t height,
                                               const std::uint32_t clear_rgba) {
+  EnsureEffectFramebuffers();
   scene_capture_active_ = initialized_ && gpu_ready_ && CanCaptureScene() &&
                           IsAnyEffectActive() && !view_ids.empty();
   if (view_ids.empty()) {
@@ -949,10 +1037,18 @@ void PostProcess::SetSettings(const PostProcessSettings settings) {
   state_.ffx_enabled = settings.enabled;
   state_.glow_enabled = settings.enabled && settings.glow_enabled;
   death_cvar_enabled_ = settings.enabled && settings.death_enabled;
+  const bool framebuffer_mode_changed =
+      rectangle_textures_ != settings.rectangle_textures ||
+      lazy_effect_framebuffers_ != settings.lazy_effect_framebuffers;
   rectangle_textures_ = settings.rectangle_textures;
+  lazy_effect_framebuffers_ = settings.lazy_effect_framebuffers;
   const std::uint8_t next_multisample = NormalizeMultisample(settings.multisample);
-  if (next_multisample != multisample_) {
+  const float next_render_scale = NormalizeRenderScale(settings.render_scale);
+  if (next_multisample != multisample_ ||
+      next_render_scale != render_scale_ ||
+      framebuffer_mode_changed) {
     multisample_ = next_multisample;
+    render_scale_ = next_render_scale;
     if (bgfx::isValid(scene_fb_)) {
       DestroyFramebuffers();
       CreateFramebuffers();
@@ -980,7 +1076,7 @@ bool PostProcess::IsInitialized() const {
 }
 
 bool PostProcess::IsAnyEffectActive() const {
-  return multisample_ > 1u ||
+  return render_scale_ < 1.0f || multisample_ > 1u ||
          (state_.ffx_enabled && (IsDeathEffectActive() || IsGlowActive() ||
                                  std::fabs(state_.color_grade_r - 1.0f) > 0.001f ||
                                  std::fabs(state_.color_grade_g - 1.0f) > 0.001f ||

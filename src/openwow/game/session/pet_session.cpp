@@ -382,11 +382,11 @@ void WorldSession::HandlePetDismissSound(const net::wotlk::WorldPacket &pkt) {
 
   const auto *const display =
       dbc->creature_display_info().LookupEntry(request->creature_display_id);
-  if (display == nullptr || display->npc_sound_id == 0) {
+  if (display == nullptr || display->sound_id == 0) {
     return;
   }
   const auto *const sound_data =
-      dbc->creature_sound_data().LookupEntry(display->npc_sound_id);
+      dbc->creature_sound_data().LookupEntry(display->sound_id);
   if (sound_data == nullptr || sound_data->sound_pet_dismiss_id == 0) {
     return;
   }

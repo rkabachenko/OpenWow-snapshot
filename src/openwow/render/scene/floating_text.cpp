@@ -169,10 +169,29 @@ bool FloatingTextRenderer::Initialize() {
   return true;
 }
 
+void FloatingTextRenderer::SetFontPath(std::string path) {
+  if (font_path_ == path) {
+    return;
+  }
+  text_renderer_.Shutdown();
+  font_pixel_height_ = 0;
+  font_failure_reported_ = false;
+  font_path_ = std::move(path);
+}
+
+void FloatingTextRenderer::SetFileLoader(
+    std::function<std::vector<std::uint8_t>(const std::string&)> loader) {
+  text_renderer_.Shutdown();
+  font_pixel_height_ = 0;
+  font_failure_reported_ = false;
+  file_loader_ = std::move(loader);
+}
+
 void FloatingTextRenderer::Shutdown() {
   ReleaseRendererDeviceResources();
   entries_.clear();
   font_pixel_height_ = 0;
+  font_failure_reported_ = false;
   initialized_ = false;
 }
 
@@ -183,9 +202,6 @@ void FloatingTextRenderer::ReleaseRendererDeviceResources() {
 bool FloatingTextRenderer::RestoreRendererDeviceResources() {
   if (!initialized_) {
     return false;
-  }
-  if (font_pixel_height_ > 0) {
-    return text_renderer_.Init(font_pixel_height_);
   }
   return EnsureDamageTextFont(WorldOverlayMetrics::FromFramebuffer(
       openwow::ui::kFallbackUiViewportWidth,
@@ -362,16 +378,34 @@ bool FloatingTextRenderer::EnsureDamageTextFont(
 
   text_renderer_.Shutdown();
 
-  if (text_renderer_.InitFromVirtualPath(kDamageTextFontPath, pixel_height)) {
+  bool loaded = false;
+  if (!font_path_.empty()) {
+    if (file_loader_) {
+      auto font_bytes = file_loader_(font_path_);
+      if (!font_bytes.empty()) {
+        loaded = text_renderer_.InitFromMemory(
+            font_path_, std::move(font_bytes), pixel_height);
+      }
+    } else {
+      loaded = text_renderer_.InitFromVirtualPath(font_path_, pixel_height);
+    }
+  }
+  if (loaded) {
     font_pixel_height_ = pixel_height;
+    font_failure_reported_ = false;
     return true;
   }
-  if (!text_renderer_.Init(pixel_height)) {
-    font_pixel_height_ = 0;
-    return false;
+  font_pixel_height_ = 0;
+  if (!font_failure_reported_) {
+    openwow::diagnostics::Log(
+        openwow::diagnostics::LogLevel::kError,
+        "FloatingTextRenderer: locale font initialization failed path=" +
+            font_path_ + " source=" +
+            (file_loader_ ? "active-vfs" : "registered-sfile") +
+            " pixel_height=" + std::to_string(pixel_height));
+    font_failure_reported_ = true;
   }
-  font_pixel_height_ = pixel_height;
-  return true;
+  return false;
 }
 
 bool FloatingTextRenderer::WorldToScreen(float wx, float wy, float wz,

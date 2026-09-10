@@ -31,12 +31,12 @@ void main()
     vec3 lighting = u_liquidAmbient.rgb +
                     u_liquidDiffuse.rgb * diffuseFactor +
                     AccumulateLiquidPointLighting(a_position, normal);
-    gl_Position = mul(u_modelViewProj, worldPosition);
+    vec4 viewPosition = mul(u_modelView, worldPosition);
+    gl_Position = mul(u_proj, viewPosition);
     v_primary = vec4(lighting, 1.0) * a_color0;
 
     v_texcoord0 = TransformLiquidDepthLaneUv(
         a_texcoord1, u_liquidUvTransform0);
     v_texcoord1 = TransformLiquidTilingUv(a_texcoord0, u_liquidUvTransform1);
-    v_viewDist = openwowWorldFogDepth(
-        mul(u_modelView, worldPosition).xyz);
+    v_viewDist = openwowWorldFogDepth(viewPosition.xyz);
 }

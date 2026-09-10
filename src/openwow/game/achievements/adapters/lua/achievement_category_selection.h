@@ -17,7 +17,6 @@ enum class AchievementCategorySelectionMode {
   kExactCategory,
   kPrimaryAchievements,
   kMetaAchievements,
-  kAllAchievements,
 };
 
 struct AchievementCategorySelector final {
@@ -26,10 +25,7 @@ struct AchievementCategorySelector final {
   std::uint32_t category_id = 0;
 
   static AchievementCategorySelector FromLuaValue(
-      const std::int32_t category_id, const bool include_all = false) {
-    if (include_all) {
-      return {AchievementCategorySelectionMode::kAllAchievements, 0};
-    }
+      const std::int32_t category_id) {
     if (category_id == -1) {
       return {AchievementCategorySelectionMode::kPrimaryAchievements, 0};
     }
@@ -60,8 +56,6 @@ struct AchievementCategorySelector final {
         return (achievement.flags & kCategorySelectorFlag) == 0;
       case AchievementCategorySelectionMode::kMetaAchievements:
         return (achievement.flags & kCategorySelectorFlag) != 0;
-      case AchievementCategorySelectionMode::kAllAchievements:
-        return true;
     }
 
     return false;

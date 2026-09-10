@@ -72,6 +72,9 @@ class FontFace final {
   [[nodiscard]] float line_height() const noexcept;
   [[nodiscard]] float ascent() const noexcept;
   [[nodiscard]] FontStyle style() const noexcept;
+  [[nodiscard]] std::shared_ptr<FontFace> WithPixelHeight(int pixel_height) const;
+  [[nodiscard]] std::shared_ptr<FontFace> WithSizeAndStyle(
+      int pixel_height, FontStyle style) const;
 
   [[nodiscard]] GlyphMetrics Glyph(std::uint32_t codepoint) const;
   [[nodiscard]] float Advance(std::uint32_t previous_glyph,
@@ -79,6 +82,10 @@ class FontFace final {
   [[nodiscard]] RasterizedGlyph Rasterize(std::uint32_t codepoint) const;
 
  private:
+  static std::shared_ptr<FontFace> LoadSharedMemory(
+      std::string path,
+      std::shared_ptr<const std::vector<std::uint8_t>> bytes,
+      int pixel_height, FontStyle style);
   struct Impl;
   explicit FontFace(std::unique_ptr<Impl> impl);
 

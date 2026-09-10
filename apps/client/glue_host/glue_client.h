@@ -50,6 +50,10 @@
 #include "openwow/runtime/bootstrap/startup_trace.h"
 #include "openwow/vfs/virtual_file_system.h"
 
+#if defined(OPENWOW_PLATFORM_IOS)
+#include "mobile/mobile_input_controller.h"
+#endif
+
 #include <SDL2/SDL.h>
 
 #include <atomic>
@@ -72,8 +76,8 @@ namespace openwow::client {
 class DebugUiControlAdapter;
 
 struct ClientLaunchContext {
-  std::filesystem::path game_root;
-  std::filesystem::path enhanced_assets_root;
+  std::filesystem::path content_root;
+  std::filesystem::path override_content_root;
   std::filesystem::path diagnostic_output_root;
 };
 
@@ -122,7 +126,7 @@ class GlueClient {
 
   bool InitVFS();
 
-  void BuildAndPublishLoginVfs();
+  bool BuildAndPublishLoginVfs();
 
   bool InitGraphics();
 
@@ -191,8 +195,24 @@ class GlueClient {
   void HandleMouseDown(const SDL_Event& event);
   void HandleMouseUp(const SDL_Event& event);
   void HandleKeyDown(const SDL_Event& event);
+#if defined(OPENWOW_PLATFORM_IOS)
+  void HandleMobileFingerEvent(const SDL_TouchFingerEvent& event);
+  void CancelMobileInput();
+  void RefreshMobileInputViewport();
+  void RefreshMobileMouse();
+  void PublishMobileMouse();
+  void MoveMobileMouse(const mobile::TouchContact& contact);
+  void SendMobileMouseButton(std::uint8_t button, bool down);
+  void CancelMobileMouse();
+  void UpdateMobileMovement(const mobile::TouchContact& contact);
+  void ReleaseMobileMovement();
+  void BeginMobileCamera();
+  void EndMobileCamera();
+#elif defined(__APPLE__)
+  void RefreshMobileHudPreviewViewport();
+#endif
   void UpdateInWorldMouseButtonState(std::uint8_t button, bool pressed);
-  void ReleaseInWorldMouseButtons();
+  void ReleaseInWorldInput();
 
   void DispatchRelativeCursorMotionTick();
 
@@ -207,6 +227,7 @@ class GlueClient {
   void UpdateHoverState();
 
   void ApplyWindowFocusChange(bool focused);
+  void ApplyApplicationActiveChange(bool active);
 
   void ReconcileWindowFocus();
   void UpdateOnUpdateScripts(double elapsed_sec);
@@ -291,8 +312,8 @@ class GlueClient {
   int layout_height_{720};
   bool layout_dirty_{true};
   std::string last_window_title_;
-  bool is_fullscreen_desktop_{false};
   bool window_focused_{false};
+  bool application_active_{true};
   bool running_{false};
   bool trace_input_{false};
   bool simple_ui_fast_path_enabled_{true};
@@ -309,6 +330,22 @@ class GlueClient {
   openwow::platform::StockWindowEventState stock_window_event_state_;
   bool left_mouse_held_{false};
   bool right_mouse_held_{false};
+#if defined(OPENWOW_PLATFORM_IOS)
+  mobile::MobileInputController mobile_input_;
+  std::atomic<bool> mobile_log_export_requested_{false};
+  std::uint64_t mobile_log_export_command_id_{0};
+  std::uint32_t last_mobile_glue_tap_ms_{0};
+  float last_mobile_glue_tap_x_{0.0F};
+  float last_mobile_glue_tap_y_{0.0F};
+  bool mobile_move_forward_{false};
+  bool mobile_move_backward_{false};
+  bool mobile_strafe_left_{false};
+  bool mobile_strafe_right_{false};
+  bool mobile_camera_active_{false};
+  std::uint8_t mobile_mouse_button_{0};
+  float mobile_mouse_remainder_x_{0.0F};
+  float mobile_mouse_remainder_y_{0.0F};
+#endif
 
   openwow::net::NetworkRecvThread recv_thread_;
 

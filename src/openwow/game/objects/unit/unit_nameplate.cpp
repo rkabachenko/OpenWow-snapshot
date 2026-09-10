@@ -1,9 +1,9 @@
 #include "openwow/game/objects/unit/unit_nameplate.h"
 
 #include "openwow/data/formats/dbc/dbc_loader.h"
+#include "openwow/game/group_system.h"
 #include "openwow/game/object_manager.h"
 #include "openwow/game/objects/cgunit.h"
-#include "openwow/game/objects/unit/unit_relationship_rules.h"
 #include "openwow/render/m2/m2_system.h"
 #include "openwow/ui/game/cvar_system.h"
 #include "openwow/world/environment/day_night.h"
@@ -31,7 +31,7 @@ constexpr std::uint8_t kUnitVisFlagCreep = 0x02u;
 bool UnitNameplateComponent::ShouldShow(
     const CGUnit_C &unit, const CGUnit_C &viewer, const ObjectManager &objects,
     const float distance_squared, const bool range_exempt_map) const {
-  return PassesHardEligibility(unit, viewer) &&
+  return PassesHardEligibility(unit, viewer, objects) &&
          PassesCvarVisibility(unit, viewer, objects) &&
          PassesRange(distance_squared, range_exempt_map);
 }
@@ -67,7 +67,8 @@ bool UnitNameplateComponent::IsFriendlyForNameplate(const CGUnit_C &unit,
 }
 
 bool UnitNameplateComponent::PassesHardEligibility(
-    const CGUnit_C &unit, const CGUnit_C &viewer) const {
+    const CGUnit_C &unit, const CGUnit_C &viewer,
+    const ObjectManager &objects) const {
   if (static_cast<std::int32_t>(unit.State().GetHealth()) <= 0 ||
       (unit.State().GetUnitFlags() & kUnitFlagNotSelectable) != 0u ||
       unit.GetGuid() == viewer.GetGuid()) {
@@ -89,8 +90,12 @@ bool UnitNameplateComponent::PassesHardEligibility(
   }
   const auto creature_type = unit.State().GetCreatureType();
   if (creature_type == CreatureTypeId::kCritter ||
-      creature_type == CreatureTypeId::kNonCombatPet ||
-      IsPlayerOwnedCritterLootCase(unit)) {
+      creature_type == CreatureTypeId::kNonCombatPet) {
+    return false;
+  }
+  if ((unit.State().GetDynamicFlags() & kUnitDynFlagDead) != 0u &&
+      !GroupSystem::Get().IsActivePlayerPartyOrRaidUnitGuid(
+          objects, unit.GetGuid().GetRawValue())) {
     return false;
   }
   return true;

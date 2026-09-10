@@ -122,7 +122,7 @@ struct CinematicCameraEntry {
 struct CreatureDisplayInfoEntry {
   std::uint32_t id;
   std::uint32_t model_id;
-  std::uint32_t sound_id;
+  std::uint32_t sound_id; // CreatureSoundData override; zero uses CreatureModelData.
   std::uint32_t extra_info;
   float scale;
   std::uint32_t model_alpha;
@@ -130,7 +130,7 @@ struct CreatureDisplayInfoEntry {
   std::string_view portrait_texture_name;
   std::int32_t  size_class;
   std::uint32_t blood_id;
-  std::uint32_t npc_sound_id;
+  std::uint32_t npc_sound_id; // NPCSounds interaction and selection voice kits.
   std::uint32_t particle_color_id;
   std::uint32_t creature_geoset_data;
   std::uint32_t object_effect_package_id;

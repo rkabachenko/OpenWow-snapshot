@@ -66,6 +66,8 @@ class TextureCacheRowStore {
   void ClearTerminalFailure(const TextureCacheRowIdentity& identity);
   void ResetTerminalFailures();
 
+  void ReleaseSource(const TextureCacheRowIdentity& identity);
+
   void InvalidateSources(
       std::span<const std::uint32_t> retained_row_hashes = {});
   void Clear();

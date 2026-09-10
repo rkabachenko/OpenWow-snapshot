@@ -9,7 +9,7 @@
 namespace openwow::render {
 namespace {
 
-constexpr std::array<ShaderProgramDescriptor, 44> kShaderPrograms{{
+constexpr std::array<ShaderProgramDescriptor, 45> kShaderPrograms{{
     {ShaderProgramId::Ui, "ui", s_uiShaders, "vs_ui", "fs_ui"},
     {ShaderProgramId::UiMaterial, "ui_material", s_uiMaterialShaders, "vs_ui",
      "fs_ui_material"},
@@ -22,6 +22,8 @@ constexpr std::array<ShaderProgramDescriptor, 44> kShaderPrograms{{
     {ShaderProgramId::M2Bones64, "m2_bones_64", s_m2Shaders, "vs_m2_bones_64", "fs_m2"},
     {ShaderProgramId::M2Bones128, "m2_bones_128", s_m2Shaders, "vs_m2_bones_128", "fs_m2"},
     {ShaderProgramId::Particle, "particle", s_particleShaders, "vs_particle", "fs_particle"},
+    {ShaderProgramId::DetailDoodad, "detail_doodad", s_detailDoodadShaders,
+     "vs_detail_doodad", "fs_detail_doodad"},
     {ShaderProgramId::Sky, "sky", s_skyShaders, "vs_sky", "fs_sky"},
     {ShaderProgramId::DistantTerrain, "distant_terrain", s_distantTerrainShaders,
      "vs_distant_terrain", "fs_distant_terrain"},

@@ -1,0 +1,12 @@
+Atlas, a World of Warcraft instance map browser
+Version 1.17.0 (August 2010), Interface 30300
+Copyright 2005-2010 Dan Gilbert <dan.b.gilbert@gmail.com>
+
+This distribution includes renamed copies of selected Atlas instance-map
+plates. Atlas is free software under the GNU General Public License as
+published by the Free Software Foundation, either version 2 of the License or
+(at your option) any later version. The license text is included in
+Atlas-GPL-2.0-or-later.txt.
+
+The original Atlas source package identified its website as:
+http://www.atlasmod.com

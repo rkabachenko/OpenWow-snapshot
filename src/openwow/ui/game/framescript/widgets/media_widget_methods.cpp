@@ -143,10 +143,10 @@ void ApplyMinimapMethods(lua_State *L) {
 
   lua_pushcclosure(L, [](lua_State *Ls) -> int {
     const int self_idx = ValidateFrameObjectSelf(Ls, "Minimap");
-    if (lua_isnumber(Ls, 2) == 0 || lua_isnumber(Ls, 3) == 0) {
-      luaL_error(Ls, "Usage: %s:PingLocation(x, y)",
-                 lua_adapter::ScriptObjectDisplayName(Ls, self_idx));
-    }
+    const bool has_numeric_pair =
+        lua_isnumber(Ls, 2) != 0 && lua_isnumber(Ls, 3) != 0;
+    const double frame_x = has_numeric_pair ? lua_tonumber(Ls, 2) : 0.0;
+    const double frame_y = has_numeric_pair ? lua_tonumber(Ls, 3) : 0.0;
 
     auto *session = detail::GetWorldSession(Ls);
     if (session == nullptr) {
@@ -167,9 +167,8 @@ void ApplyMinimapMethods(lua_State *L) {
         ResolveLuaRegionSizeValues(Ls, self_idx, false);
     const auto [world_x, world_y] =
         ping_system.ResolveWorldPositionFromFrameOffset(
-            lua_tonumber(Ls, 2), lua_tonumber(Ls, 3), minimap_size.width,
-            minimap_size.height, player->GetX(), player->GetY(),
-            player->GetOrientation());
+            frame_x, frame_y, minimap_size.width, minimap_size.height,
+            player->GetX(), player->GetY(), player->GetOrientation());
     ping_system.SetLastPingWorldPosition(world_x, world_y);
 
     const auto &group_system = openwow::game::GroupSystem::Get();

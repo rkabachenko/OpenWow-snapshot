@@ -78,7 +78,7 @@ struct ParsedRealmList {
 
 class AuthProtocol {
 public:
-  AuthProtocol();
+  explicit AuthProtocol(std::string locale);
   ~AuthProtocol();
 
   AuthProtocol(const AuthProtocol &) = delete;
@@ -134,6 +134,7 @@ private:
   };
 
   std::unique_ptr<openwow::net::TcpClient> client_;
+  std::string locale_;
   std::atomic_bool authenticated_{false};
   std::atomic_bool file_transfer_accepted_{false};
   std::atomic_uint64_t file_transfer_expected_size_{0};

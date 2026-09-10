@@ -180,6 +180,7 @@ void PlayerInventoryReplicaSync::OnItemDestroyed(ObjectGuid guid) {
                 if (const auto* item = inv.GetItemInSlot(abs_slot);
                     item != nullptr && item->entry != 0) {
                     TrackChangedEntry(item->entry);
+                    TrackCountChange(item, nullptr);
                 }
             }
             inv.ClearSlot(abs_slot);
@@ -196,6 +197,9 @@ void PlayerInventoryReplicaSync::OnItemDestroyed(ObjectGuid guid) {
         if (const auto* item = GetTrackedBagSlot(it->second);
             item != nullptr && item->entry != 0) {
             TrackChangedEntry(item->entry);
+            if (it->second.storage == BagStorage::kInventory) {
+                TrackCountChange(item, nullptr);
+            }
         }
         ClearTrackedBagSlot(it->second);
         TrackChangedBag(TrackedBagLocation{it->second.storage, it->second.bag_index});
@@ -272,11 +276,15 @@ void PlayerInventoryReplicaSync::SyncSlotRange(const CGPlayer_C& player,
         }
 
         if (guid_raw == 0) {
+            if (const auto bag = ResolveTrackedBagLocation(abs_slot); bag.has_value()) {
+                ClearTrackedBagContents(*bag);
+            }
 
             if (TracksCarriedActionBarState(abs_slot)) {
                 if (const auto* old_item = inv.GetItemInSlot(abs_slot);
                     old_item != nullptr && old_item->entry != 0) {
                     TrackChangedEntry(old_item->entry);
+                    TrackCountChange(old_item, nullptr);
                 }
             }
             inv.ClearSlot(abs_slot);
@@ -314,6 +322,9 @@ void PlayerInventoryReplicaSync::SyncTrackedBagContents(const TrackedBagLocation
         ForgetTrackedBagItemMappings(previous_bag);
         for (const auto& item : previous_bag.slots) {
             TrackChangedEntry(item.entry);
+            if (bag.storage == BagStorage::kInventory) {
+                TrackCountChange(&item, nullptr);
+            }
         }
 
         const auto* item = map_runtime_.objects().GetItem(bag_guid);
@@ -322,8 +333,14 @@ void PlayerInventoryReplicaSync::SyncTrackedBagContents(const TrackedBagLocation
             placeholder_bag.item = BuildItemInstanceFromObject(*item);
             placeholder_bag.guid = placeholder_bag.item.guid;
             placeholder_bag.entry = placeholder_bag.item.entry;
+            if (bag.storage == BagStorage::kInventory) {
+                TrackCountChange(&previous_bag.item, &placeholder_bag.item);
+            }
             SetTrackedBag(bag, placeholder_bag);
         } else {
+            if (bag.storage == BagStorage::kInventory) {
+                TrackCountChange(&previous_bag.item, nullptr);
+            }
             ClearTrackedBag(bag);
         }
         return;
@@ -366,18 +383,31 @@ void PlayerInventoryReplicaSync::SyncTrackedBagContents(const TrackedBagLocation
             }
         }
 
+    }
+
+    for (std::size_t s = 0; s < synced_bag.slots.size(); ++s) {
         const std::uint32_t old_entry =
             s < previous_bag.slots.size() ? previous_bag.slots[s].entry : 0;
         if (old_entry != synced_bag.slots[s].entry) {
             TrackChangedEntry(old_entry);
             TrackChangedEntry(synced_bag.slots[s].entry);
         }
+        if (bag.storage == BagStorage::kInventory) {
+            TrackCountChange(s < previous_bag.slots.size() ? &previous_bag.slots[s] : nullptr,
+                             &synced_bag.slots[s]);
+        }
     }
 
     for (std::size_t s = synced_bag.slots.size(); s < previous_bag.slots.size(); ++s) {
         TrackChangedEntry(previous_bag.slots[s].entry);
+        if (bag.storage == BagStorage::kInventory) {
+            TrackCountChange(&previous_bag.slots[s], nullptr);
+        }
     }
 
+    if (bag.storage == BagStorage::kInventory) {
+        TrackCountChange(&previous_bag.item, &synced_bag.item);
+    }
     SetTrackedBag(bag, synced_bag);
     if (!BagPayloadEqual(previous_bag, synced_bag)) {
         TrackChangedBag(bag);
@@ -389,6 +419,7 @@ void PlayerInventoryReplicaSync::PopulateSlot(uint8_t abs_slot, const CGItem_C& 
     auto& inv = inventory_;
     const bool track_changes = TracksCarriedActionBarState(abs_slot);
     if (track_changes) {
+        TrackCountChange(inv.GetItemInSlot(abs_slot), &inst);
         if (const auto* previous = inv.GetItemInSlot(abs_slot);
             previous != nullptr && previous->entry != 0) {
             TrackChangedEntry(previous->entry);
@@ -404,6 +435,9 @@ void PlayerInventoryReplicaSync::PopulateSlot(uint8_t abs_slot, const CGItem_C& 
 void PlayerInventoryReplicaSync::PopulateTrackedBagSlot(const BagSlotLocation slot,
                                              const CGItem_C& item_obj) {
     auto inst = BuildItemInstanceFromObject(item_obj);
+    if (slot.storage == BagStorage::kInventory) {
+        TrackCountChange(GetTrackedBagSlot(slot), &inst);
+    }
     if (const auto* previous = GetTrackedBagSlot(slot);
         previous != nullptr && previous->entry != 0) {
         TrackChangedEntry(previous->entry);
@@ -422,6 +456,12 @@ void PlayerInventoryReplicaSync::ClearTrackedBagContents(const TrackedBagLocatio
     ForgetTrackedBagItemMappings(previous_bag);
     for (const auto& item : previous_bag.slots) {
         TrackChangedEntry(item.entry);
+        if (bag.storage == BagStorage::kInventory) {
+            TrackCountChange(&item, nullptr);
+        }
+    }
+    if (bag.storage == BagStorage::kInventory) {
+        TrackCountChange(&previous_bag.item, nullptr);
     }
     ClearTrackedBag(bag);
     TrackChangedBag(bag);
@@ -514,6 +554,7 @@ void PlayerInventoryReplicaSync::FullResync() {
     guid_to_slot_.clear();
     guid_to_bag_slot_.clear();
     changed_entries_.clear();
+    count_changed_entries_.clear();
     item_template_refreshes_.clear();
     changed_containers_.clear();
     unresolved_reference_diagnostics_ = 0;
@@ -546,6 +587,7 @@ void PlayerInventoryReplicaSync::Reset() {
     guid_to_slot_.clear();
     guid_to_bag_slot_.clear();
     changed_entries_.clear();
+    count_changed_entries_.clear();
     item_template_refreshes_.clear();
     changed_containers_.clear();
     unresolved_reference_diagnostics_ = 0;
@@ -607,6 +649,29 @@ void PlayerInventoryReplicaSync::TrackChangedEntry(std::uint32_t entry) {
     if (entry != 0) {
         changed_entries_.push_back(entry);
     }
+}
+
+void PlayerInventoryReplicaSync::TrackCountChange(const ItemInstance* previous,
+                                                 const ItemInstance* current) {
+    const auto old_entry = previous != nullptr ? previous->entry : 0u;
+    const auto new_entry = current != nullptr ? current->entry : 0u;
+    const auto old_count = old_entry != 0 ? std::max(previous->count, 1u) : 0u;
+    const auto new_count = new_entry != 0 ? std::max(current->count, 1u) : 0u;
+    if (old_entry == new_entry && old_count == new_count) {
+        return;
+    }
+    for (const auto entry : {old_entry, new_entry}) {
+        if (entry != 0 && std::find(count_changed_entries_.begin(), count_changed_entries_.end(),
+                                    entry) == count_changed_entries_.end()) {
+            count_changed_entries_.push_back(entry);
+        }
+    }
+}
+
+std::vector<std::uint32_t> PlayerInventoryReplicaSync::ConsumeCountChangedEntries() {
+    std::vector<std::uint32_t> result;
+    result.swap(count_changed_entries_);
+    return result;
 }
 
 void PlayerInventoryReplicaSync::TrackChangedRootSlot(const std::uint8_t abs_slot) {

@@ -60,9 +60,9 @@ std::optional<std::pair<ObjectGuid, bool>> DecodeLootReleaseResponse(
   PacketReader reader(data, size);
   ObjectGuid source;
   std::uint8_t accepted = 0;
-
-  (void)reader.ReadGuid(source);
-  (void)reader.ReadU8(accepted);
+  if (!reader.ReadGuid(source) || !reader.ReadU8(accepted)) {
+    return std::nullopt;
+  }
   return std::pair{source, accepted != 0};
 }
 
@@ -81,9 +81,9 @@ std::optional<LootMoneyNotify> DecodeMoneyNotify(const std::uint8_t* data,
   PacketReader reader(data, size);
   LootMoneyNotify notify;
   std::uint8_t solo = 0;
-
-  (void)reader.ReadU32(notify.copper);
-  (void)reader.ReadU8(solo);
+  if (!reader.ReadU32(notify.copper) || !reader.ReadU8(solo)) {
+    return std::nullopt;
+  }
   notify.is_solo = solo != 0;
   return notify;
 }
@@ -92,15 +92,15 @@ std::optional<LootRollWon> DecodeRollWon(const std::uint8_t* data,
                                          const std::size_t size) {
   PacketReader reader(data, size);
   LootRollWon result;
-
-  (void)reader.ReadU64(result.source_guid);
-  (void)reader.ReadU32(result.slot);
-  (void)reader.ReadU32(result.item_id);
-  (void)reader.ReadU32(result.random_suffix);
-  (void)reader.ReadU32(result.random_property_id);
-  (void)reader.ReadU64(result.winner_guid);
-  (void)reader.ReadU8(result.roll_number);
-  (void)reader.ReadU8(result.roll_type);
+  if (!reader.ReadU64(result.source_guid) || !reader.ReadU32(result.slot) ||
+      !reader.ReadU32(result.item_id) ||
+      !reader.ReadU32(result.random_suffix) ||
+      !reader.ReadU32(result.random_property_id) ||
+      !reader.ReadU64(result.winner_guid) ||
+      !reader.ReadU8(result.roll_number) ||
+      !reader.ReadU8(result.roll_type)) {
+    return std::nullopt;
+  }
   return result;
 }
 

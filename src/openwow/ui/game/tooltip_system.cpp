@@ -4,13 +4,16 @@
 
 #include "openwow/core/storm_string.h"
 #include "openwow/data/formats/dbc/dbc_loader.h"
+#include "openwow/foundation/diagnostics/logging.h"
 #include "openwow/game/arena_system.h"
 #include "openwow/game/action_validation_utils.h"
 #include "openwow/game/inventory/equipment/equipment_sets.h"
 #include "openwow/game/gossip_manager.h"
+#include "openwow/game/quest_turnin_state.h"
 #include "openwow/game/hyperlink.h"
 #include "openwow/game/inventory/player_inventory_replica.h"
 #include "openwow/game/inventory/items/item_definitions.h"
+#include "openwow/game/inventory/items/item_link_parser.h"
 #include "openwow/game/localization.h"
 #include "openwow/game/commerce/merchants/merchant_requirements.h"
 #include "openwow/game/object_manager.h"
@@ -24,7 +27,9 @@
 #include "openwow/ui/game/tooltip_builders.h"
 #include "openwow/ui/game/cvar_system.h"
 #include "openwow/ui/game/game_ui_manager.h"
+#include "openwow/ui/game/framescript/core/frame_script_dispatch.h"
 #include "openwow/ui/game/loot_tooltip_support.h"
+#include "openwow/ui/game/tooltip_frame_sync.h"
 #include "openwow/ui/game/tooltip_builder.h"
 #include "openwow/ui/ui_enum_helpers.h"
 
@@ -41,7 +46,9 @@ extern "C" {
 #include <cstdlib>
 #include <functional>
 #include <limits>
+#include <mutex>
 #include <string_view>
+#include <unordered_set>
 #include <utility>
 
 namespace {
@@ -60,7 +67,6 @@ constexpr std::uint32_t kTooltipYellowArgb = 0xFFFFFF00u;
 constexpr std::uint32_t kTooltipOrangeArgb = 0xFFFF8040u;
 constexpr std::uint32_t kTooltipRedArgb = 0xFFFF2020u;
 constexpr std::uint32_t kTooltipStatusBarGoType = 33u;
-constexpr std::uint32_t kSpellEffectOpenLock = 33u;
 constexpr std::size_t kMaxTooltipTextures = 10u;
 
 struct TooltipStatusBarSnapshot {
@@ -238,21 +244,45 @@ float ClampStatusBarValue(const float min_value, const float max_value,
   return std::clamp(value, min_value, max_value);
 }
 
+void LogTooltipLuaBridgeFailureOnce(const std::string &stage,
+                                    const std::string &operation,
+                                    const std::string &cause) {
+  static std::mutex mutex;
+  static std::unordered_set<std::string> reported_failures;
+  const std::string key = stage + ":" + operation + ":" + cause;
+  {
+    const std::lock_guard lock(mutex);
+    if (!reported_failures.insert(key).second) {
+      return;
+    }
+  }
+  openwow::diagnostics::Log(
+      openwow::diagnostics::LogLevel::kWarn,
+      "Tooltip Lua bridge failed: stage=" + stage + " operation=" + operation +
+          " cause=" + cause);
+}
+
 bool CallLuaFrameMethod(lua_State *L, const char *global_name, const char *method_name,
                         const std::function<int(lua_State *)> &push_args) {
   if (L == nullptr || global_name == nullptr || method_name == nullptr) {
     return false;
   }
 
+  const std::string operation = std::string(global_name) + "." + method_name;
+
   const int base = lua_gettop(L);
   lua_getglobal(L, global_name);
   if (lua_istable(L, -1) == 0) {
+    LogTooltipLuaBridgeFailureOnce(
+        "method-call", operation, "global-is-not-a-frame-table");
     lua_settop(L, base);
     return false;
   }
 
   lua_getfield(L, -1, method_name);
   if (lua_isfunction(L, -1) == 0) {
+    LogTooltipLuaBridgeFailureOnce(
+        "method-call", operation, "method-is-unavailable");
     lua_settop(L, base);
     return false;
   }
@@ -264,12 +294,20 @@ bool CallLuaFrameMethod(lua_State *L, const char *global_name, const char *metho
   }
 
   const bool ok = lua_pcall(L, arg_count, 0, 0) == LUA_OK;
+  if (!ok) {
+    const char *const error = lua_tostring(L, -1);
+    LogTooltipLuaBridgeFailureOnce(
+        "method-call", operation,
+        error != nullptr && error[0] != '\0'
+            ? std::string("lua-error:") + error
+            : "lua-error:unknown");
+  }
   lua_settop(L, base);
   return ok;
 }
 
-void SyncLiveWorldGameObjectTooltipFrame(const std::string &owner, const std::string &anchor,
-                                         const std::vector<openwow::ui::game::TooltipLine> &lines,
+void SyncLiveWorldGameObjectTooltipFrame(std::string owner, std::string anchor,
+                                         std::vector<openwow::ui::game::TooltipLine> lines,
                                          const TooltipStatusBarSnapshot &status_bar) {
   auto *const manager = openwow::ui::game::runtime::WorldUiRuntimeContext::FromActiveLua();
   if (manager == nullptr || !manager->is_initialized()) {
@@ -282,13 +320,14 @@ void SyncLiveWorldGameObjectTooltipFrame(const std::string &owner, const std::st
   }
 
   const std::string effective_owner = owner.empty() ? "WorldFrame" : owner;
-  (void)CallLuaFrameMethod(lua, "GameTooltip", "SetOwner",
-                           [&](lua_State *state) {
-                             lua_pushlstring(state, effective_owner.c_str(),
-                                             effective_owner.size());
-                             lua_pushlstring(state, anchor.c_str(), anchor.size());
-                             return 2;
-                           });
+  if (!CallLuaFrameMethod(lua, "GameTooltip", "SetOwner",
+                          [&](lua_State *state) {
+                            lua_getglobal(state, effective_owner.c_str());
+                            lua_pushlstring(state, anchor.c_str(), anchor.size());
+                            return 2;
+                          })) {
+    return;
+  }
   (void)CallLuaFrameMethod(lua, "GameTooltip", "ClearLines", nullptr);
 
   for (const auto &line : lines) {
@@ -372,7 +411,36 @@ void SyncLiveWorldGameObjectStatusBar(const TooltipStatusBarSnapshot &status_bar
   (void)CallLuaFrameMethod(lua, "GameTooltipStatusBar", "Hide", nullptr);
 }
 
-void HideLiveWorldGameObjectTooltipFrame() {
+bool PrepareLiveWorldTooltipFrame(const bool floating) {
+  auto *const manager = openwow::ui::game::runtime::WorldUiRuntimeContext::FromActiveLua();
+  if (manager == nullptr || !manager->is_initialized()) {
+    return true;
+  }
+  lua_State *const lua = manager->lua_state();
+  if (lua == nullptr) {
+    LogTooltipLuaBridgeFailureOnce("world-anchor", "GameTooltip", "lua-is-unavailable");
+    return false;
+  }
+  if (floating) {
+    return CallLuaFrameMethod(lua, "GameTooltip", "SetOwner", [](lua_State *state) {
+      lua_getglobal(state, "WorldFrame");
+      lua_pushliteral(state, "ANCHOR_CURSOR");
+      return 2;
+    });
+  }
+  const int base = lua_gettop(lua);
+  lua_getglobal(lua, "GameTooltip");
+  if (lua_istable(lua, -1) == 0) {
+    LogTooltipLuaBridgeFailureOnce("world-anchor", "GameTooltip", "global-is-not-a-frame-table");
+    lua_settop(lua, base);
+    return false;
+  }
+  openwow::ui::game::frame_api::FireScript(lua, -1, "OnTooltipSetDefaultAnchor");
+  lua_settop(lua, base);
+  return true;
+}
+
+void HideLiveGameTooltipFrameUnconditionally() {
   auto *const manager = openwow::ui::game::runtime::WorldUiRuntimeContext::FromActiveLua();
   if (manager == nullptr || !manager->is_initialized()) {
     return;
@@ -387,207 +455,21 @@ void HideLiveWorldGameObjectTooltipFrame() {
   (void)CallLuaFrameMethod(lua, "GameTooltip", "Hide", nullptr);
 }
 
-bool IsLockActionApplicable(const openwow::game::CGGameObject_C &game_object,
-                            const std::uint32_t action) {
-  const auto state_byte = static_cast<std::uint8_t>(game_object.GetGoState());
-  const auto ready_state =
-      static_cast<std::uint8_t>(openwow::game::GOState::Ready);
-  const auto active_state =
-      static_cast<std::uint8_t>(openwow::game::GOState::Active);
-  const auto active_alternative_state =
-      static_cast<std::uint8_t>(openwow::game::GOState::ActiveAlternative);
-  const auto is_locked = (game_object.GetFlags() & openwow::game::GO_FLAG_LOCKED) != 0u;
-
-  if (action == 4u) {
-    return state_byte == active_alternative_state;
-  }
-
-  if (state_byte == active_alternative_state ||
-      (((action < 2u) || action == 3u) && state_byte != ready_state)) {
-    return false;
-  }
-
-  if (action == 0u) {
-    return !is_locked;
-  }
-
-  if (action == 1u) {
-    return is_locked;
-  }
-
-  if (action == 2u && state_byte != active_state) {
-    return false;
-  }
-
-  return true;
-}
-
-const openwow::data::dbc::SpellEntry *LookupSpellEntry(
-    const openwow::data::dbc::DbcLoader &dbc, const std::uint32_t spell_id) {
-  if (spell_id == 0u) {
-    return nullptr;
-  }
-
-  return dbc.spell().LookupEntry(spell_id);
-}
-
-std::uint32_t GetSpellEffectMagnitude(
-    const openwow::data::dbc::SpellEntry &spell, const std::size_t effect_index) {
-  if (effect_index >= spell.effect_base_points.size()) {
-    return 0u;
-  }
-
-  return static_cast<std::uint32_t>(
-      std::max(0, spell.effect_base_points[effect_index] + 1));
-}
-
-bool SpellSatisfiesOpenLockRequirement(
-    const openwow::data::dbc::SpellEntry &spell, const std::uint32_t lock_index,
-    const std::uint32_t required_value, std::uint32_t *const current_value_out) {
-  for (std::size_t effect_index = 0; effect_index < spell.effect.size(); ++effect_index) {
-    if (spell.effect[effect_index] != kSpellEffectOpenLock ||
-        static_cast<std::uint32_t>(spell.effect_misc_value[effect_index]) != lock_index) {
-      continue;
-    }
-
-    const auto current_value = GetSpellEffectMagnitude(spell, effect_index);
-    if (current_value_out != nullptr) {
-      *current_value_out = current_value;
-    }
-    if (current_value >= required_value) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-bool SpellHasAnyOpenLockEffect(const openwow::data::dbc::SpellEntry &spell) {
-  for (const auto effect : spell.effect) {
-    if (effect == kSpellEffectOpenLock) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-bool ResolveAvailableOpenLockSkill(const openwow::game::CGGameObject_C &game_object,
-                                   const openwow::data::dbc::DbcLoader &dbc,
-                                   const openwow::game::SpellCastRuntime &spells,
-                                   const std::uint32_t lock_index,
-                                   const std::uint32_t required_skill,
-                                   std::uint32_t *const current_value_out,
-                                   std::uint32_t *const required_value_out) {
-  const auto required_value =
-      required_skill != 0u ? required_skill : 5u * game_object.GetLevel();
-  if (required_value_out != nullptr) {
-    *required_value_out = required_value;
-  }
-
-  for (const auto &known_spell :
-       openwow::game::SpellbookSystem::Get().GetKnownSpellList()) {
-    const auto *const spell = LookupSpellEntry(dbc, known_spell.spell_id);
-    if (spell == nullptr) {
-      continue;
-    }
-
-    std::uint32_t current_value = 0u;
-    if (SpellSatisfiesOpenLockRequirement(*spell, lock_index, required_value,
-                                          &current_value)) {
-      if (current_value_out != nullptr) {
-        *current_value_out = current_value;
-      }
-      return true;
-    }
-  }
-
-  if (spells.GetTargeting().GetSpellId() == 0u) {
-    return false;
-  }
-
-  const auto *const current_spell =
-      LookupSpellEntry(dbc, spells.GetCurrentSpellId());
-  if (current_spell == nullptr) {
-    return false;
-  }
-
-  std::uint32_t current_value = 0u;
-  if (!SpellSatisfiesOpenLockRequirement(*current_spell, lock_index, required_value,
-                                         &current_value)) {
-    return false;
-  }
-
-  if (current_value_out != nullptr) {
-    *current_value_out = current_value;
-  }
-  return true;
-}
-
 WorldGameObjectTooltipRequirementState BuildWorldGameObjectTooltipRequirementState(
     const openwow::game::CGGameObject_C &game_object,
-    const openwow::game::PlayerInventoryReplica& inventory,
-    const openwow::data::dbc::DbcLoader &dbc,
     const openwow::game::SpellCastRuntime &spells) {
-  WorldGameObjectTooltipRequirementState state;
-  const auto *const lock_entry = game_object.GetLockEntry();
-  if (lock_entry == nullptr) {
-    return state;
-  }
-
-  for (std::size_t index = 0; index < lock_entry->type.size(); ++index) {
-    const auto type = lock_entry->type[index];
-    if (type == 0u) {
-      continue;
-    }
-
-    switch (type) {
-    case 1u:
-      state.has_known_requirement = true;
-      if (IsLockActionApplicable(game_object, lock_entry->action[index]) &&
-          inventory.FindItemByEntry(lock_entry->index[index]) >= 0) {
-        state.has_carried_key = true;
-        state.carried_key_item_entry = lock_entry->index[index];
-        return state;
-      }
-      break;
-
-    case 2u:
-      state.has_known_requirement = true;
-      if (IsLockActionApplicable(game_object, lock_entry->action[index])) {
-        std::uint32_t current_skill = 0u;
-        std::uint32_t required_skill = 0u;
-        if (ResolveAvailableOpenLockSkill(game_object, dbc, spells,
-                                          lock_entry->index[index], lock_entry->skill[index],
-                                          &current_skill, &required_skill)) {
-          state.has_open_lock_skill = true;
-          state.current_skill = current_skill;
-          state.required_skill = required_skill;
-          return state;
-        }
-      }
-      break;
-
-    case 3u: {
-      state.has_known_requirement = true;
-      if (!IsLockActionApplicable(game_object, lock_entry->action[index])) {
-        break;
-      }
-
-      const auto *const spell = LookupSpellEntry(dbc, lock_entry->index[index]);
-      if (spell != nullptr && SpellHasAnyOpenLockEffect(*spell)) {
-        return state;
-      }
-      break;
-    }
-
-    default:
-      break;
-    }
-  }
-
-  state.unsatisfied_requirement = state.has_known_requirement;
-  return state;
+  const auto lock = game_object.ResolveLockInteraction(spells);
+  const bool ready = lock.status ==
+      openwow::game::CGGameObject_C::LockInteractionStatus::kReady;
+  return {
+      .has_known_requirement = lock.has_requirement,
+      .unsatisfied_requirement = !ready,
+      .has_carried_key = ready && lock.key_item_entry != 0u,
+      .carried_key_item_entry = lock.key_item_entry,
+      .has_open_lock_skill = ready && lock.uses_skill,
+      .current_skill = lock.current_skill,
+      .required_skill = lock.required_skill,
+  };
 }
 
 std::uint32_t ResolveLockedRequirementColor(
@@ -650,10 +532,12 @@ void AppendBuilderLine(openwow::ui::game::TooltipSystem &tooltip,
     const float right_b = ParseColorChannel(line.right_color, 6);
     tooltip.AddDoubleLine(line.text, line.right_text, left_r, left_g, left_b, right_r, right_g,
                           right_b);
-    return;
+  } else {
+    tooltip.AddLine(line.text, left_r, left_g, left_b, line.wrap);
   }
-
-  tooltip.AddLine(line.text, left_r, left_g, left_b, line.wrap);
+  if (!line.texture_path.empty()) {
+    tooltip.AddTexture(line.texture_path, nullptr, 0xFFFFFFFFu);
+  }
 }
 
 const openwow::game::VendorItem *FindVendorItemByItemId(const openwow::game::WorldSession &session,
@@ -838,8 +722,7 @@ void AppendWorldGameObjectLockLines(
         dbc != nullptr ? ResolveLockedRequirementColor(
                              requirement_state =
                                   BuildWorldGameObjectTooltipRequirementState(
-                                      game_object,
-                                      session.inventory_replica(), *dbc, session.spells()))
+                                      game_object, session.spells()))
                        : kTooltipRedArgb;
     AppendWorldGameObjectRequirementLine(
         tooltip,
@@ -853,14 +736,14 @@ void AppendWorldGameObjectLockLines(
 
   const auto secondary_lock = ResolveWorldGameObjectTooltipSecondaryLock(lock_entry);
   if (!secondary_lock.has_value() ||
-      !IsLockActionApplicable(game_object, secondary_lock->action)) {
+      !game_object.IsLockActionApplicable(secondary_lock->action)) {
     return;
   }
 
   if (!requirement_state.has_known_requirement &&
       (game_object.GetFlags() & openwow::game::GO_FLAG_LOCKED) != 0u) {
     requirement_state = BuildWorldGameObjectTooltipRequirementState(
-        game_object, session.inventory_replica(), *dbc, session.spells());
+        game_object, session.spells());
   }
 
   switch (secondary_lock->type) {
@@ -915,7 +798,7 @@ void AppendWorldGameObjectLockLines(
   }
 
   case 3u: {
-    const auto *const spell = LookupSpellEntry(*dbc, secondary_lock->index);
+    const auto *const spell = dbc->spell().LookupEntry(secondary_lock->index);
     if (spell == nullptr) {
       return;
     }
@@ -983,10 +866,7 @@ void AppendWorldGameObjectLockLines(
 
 bool IsQuestComplete(const openwow::game::WorldSession &session,
                      const std::uint32_t quest_id) {
-  const auto *const quest_entry = session.quests().FindQuestLogEntry(quest_id);
-  return quest_entry != nullptr &&
-         (quest_entry->status == openwow::game::QuestStatus::kComplete ||
-          quest_entry->status == openwow::game::QuestStatus::kRewarded);
+  return openwow::game::IsQuestTurnInReady(session, quest_id, true);
 }
 
 std::string BuildQuestObjectProgressText(const openwow::game::QuestTemplate &quest_template,
@@ -1306,6 +1186,7 @@ void TooltipSystem::BindWorldSession(openwow::game::WorldSession* session) {
 void TooltipSystem::SetOwner(const std::string &frameName, const std::string &anchor) {
   Hide();
   ClearLines();
+  CommitLayoutState();
   owner_ = frameName;
   anchor_ = frameName.empty() ? "ANCHOR_NONE" : anchor;
   MarkPresentationChanged();
@@ -1336,7 +1217,7 @@ void TooltipSystem::ClearLines() {
   achievement_completed_ = 0;
   achievement_criteria_data_.fill(0);
   achievement_criteria_bitmask_.fill(0);
-  world_game_object_guid_.reset();
+  world_object_guid_.reset();
   world_game_object_rebuild_requested_ = false;
   has_status_bar_ = false;
   status_bar_min_ = 0.0f;
@@ -1439,6 +1320,11 @@ const std::vector<TooltipTextureData> &TooltipSystem::GetTextures() const {
 }
 
 void TooltipSystem::Show() {
+  if (owner_.empty() || lines_.empty()) {
+    Hide();
+    return;
+  }
+
   ClearFadeState();
   CommitLayoutState();
   shown_ = true;
@@ -1485,17 +1371,12 @@ void TooltipSystem::ClearFadeState() {
 }
 
 void TooltipSystem::Hide() {
-  const bool had_world_game_object_tooltip =
-      world_game_object_guid_.has_value() || has_status_bar_;
   ClearFadeState();
-  if (shown_) {
-    shown_ = false;
-    MarkPresentationChanged();
-  }
-
-  if (had_world_game_object_tooltip) {
-    HideLiveWorldGameObjectTooltipFrame();
-  }
+  shown_ = false;
+  owner_.clear();
+  anchor_ = "ANCHOR_NONE";
+  ClearLines();
+  CommitLayoutState();
 }
 
 void TooltipSystem::Reset() {
@@ -1520,7 +1401,7 @@ void TooltipSystem::Reset() {
   achievement_completed_ = 0;
   achievement_criteria_data_.fill(0);
   achievement_criteria_bitmask_.fill(0);
-  world_game_object_guid_.reset();
+  world_object_guid_.reset();
   world_game_object_rebuild_requested_ = false;
   has_status_bar_ = false;
   status_bar_min_ = 0.0f;
@@ -1531,6 +1412,7 @@ void TooltipSystem::Reset() {
   force_min_width_ = false;
   padding_ = 0.0f;
   textures_.clear();
+  CommitLayoutState();
 }
 
 void TooltipSystem::ResetPendingItemTemplateRefresh() {
@@ -1605,7 +1487,7 @@ void TooltipSystem::HandlePendingWorldGameObjectRefresh(
 
   const auto guid =
       openwow::game::ObjectGuid(pending_world_game_object_refresh_->guid);
-  if (world_game_object_guid_ != guid.GetRawValue()) {
+  if (world_object_guid_ != guid.GetRawValue()) {
     return;
   }
 
@@ -1624,25 +1506,20 @@ void TooltipSystem::SetItemById(std::uint32_t itemId) {
 }
 
 void TooltipSystem::SetItemByLink(const std::string &link) {
-  openwow::game::HyperlinkInfo info;
-  if (openwow::game::HyperlinkParser::Parse(link, info) && info.type == "item" && info.id != 0) {
-    std::int32_t random_property_id = 0;
-    std::uint32_t suffix_factor = 0;
-    std::uint32_t player_level = 0;
-    if (info.params.size() >= 7) {
-      random_property_id = std::atoi(info.params[5].c_str());
-      suffix_factor = static_cast<std::uint32_t>(std::strtoul(info.params[6].c_str(), nullptr, 10));
-    }
-    if (info.params.size() >= 8) {
-      player_level = static_cast<std::uint32_t>(
-          std::strtoul(info.params[7].c_str(), nullptr, 10));
-    }
-    SetItemFromLoot(info.id, random_property_id, suffix_factor, player_level);
-    if (!info.display_text.empty()) {
-      item_name_ = info.display_text;
+  if (const auto parsed = openwow::game::ItemLinkParser::Parse(link);
+      parsed.has_value()) {
+    openwow::ui::TooltipItemInstanceData instance_data;
+    instance_data.permanent_enchant_id = parsed->enchantId;
+    instance_data.socket_enchant_ids = parsed->gemIds;
+    (void)SetItemWithInstanceData(
+        parsed->itemId, parsed->randomPropertyId,
+        static_cast<std::uint32_t>(parsed->suffixFactor), instance_data,
+        parsed->linkLevel);
+    if (!parsed->name.empty()) {
+      item_name_ = parsed->name;
       item_link_ = link;
       if (!pending_item_template_refresh_.has_value() && !lines_.empty()) {
-        lines_.front().left_text = info.display_text;
+        lines_.front().left_text = parsed->name;
       }
     }
     return;
@@ -1714,6 +1591,49 @@ bool TooltipSystem::SetItemInternal(std::uint32_t itemId, std::int32_t randomPro
       }
     }
   }
+  std::optional<openwow::game::ItemTemplate> item_snapshot;
+  if (item != nullptr) {
+    item_snapshot = *item;
+    item = &*item_snapshot;
+  }
+
+  openwow::ui::TooltipItemInstanceData effective_instance_data;
+  const openwow::ui::TooltipItemInstanceData* effective_instance = nullptr;
+  if (instance_data != nullptr) {
+    effective_instance_data = *instance_data;
+    effective_instance = &effective_instance_data;
+    for (std::size_t index = 0;
+         index < effective_instance_data.socket_enchant_ids.size(); ++index) {
+      const auto enchantment_id =
+          effective_instance_data.socket_enchant_ids[index];
+      if (enchantment_id != 0u && dbc_ != nullptr) {
+        if (const auto* const enchantment =
+                dbc_->spell_item_enchantment().LookupEntry(enchantment_id);
+            enchantment != nullptr && enchantment->gem_id != 0u) {
+          effective_instance_data.gem_item_ids[index] = enchantment->gem_id;
+        }
+      }
+
+      const auto gem_item_id = effective_instance_data.gem_item_ids[index];
+      if (gem_item_id == 0u) {
+        continue;
+      }
+      bool gem_requested_async = false;
+      const auto* const gem_item = ResolveTooltipItemTemplate(
+          *item_definitions_, gem_item_id, &request_options,
+          &gem_requested_async, world_session_);
+      requested_async = requested_async || gem_requested_async;
+      if (enchantment_id == 0u && gem_item != nullptr && dbc_ != nullptr &&
+          gem_item->gem_properties != 0u) {
+        if (const auto* const properties =
+                dbc_->gem_properties().LookupEntry(gem_item->gem_properties);
+            properties != nullptr) {
+          effective_instance_data.socket_enchant_ids[index] =
+              properties->enchant_id;
+        }
+      }
+    }
+  }
   item_name_ = detail::ResolveLootItemDisplayName(
       dbc_, item_definitions_ != nullptr
                 ? detail::ResolveLootItemBaseName(*item_definitions_, itemId)
@@ -1746,15 +1666,15 @@ bool TooltipSystem::SetItemInternal(std::uint32_t itemId, std::int32_t randomPro
   }
   item_link_ = detail::BuildLootItemLink(itemId, quality, item_name_, randomPropertyId,
                                          suffixFactor, effective_player_level);
-  if (instance_data != nullptr) {
+  if (effective_instance != nullptr) {
     item_link_ = openwow::game::HyperlinkParser::Build(
         "item", itemId, item_name_,
         openwow::game::HyperlinkParser::GetQualityColor(quality),
         {
-            std::to_string(instance_data->permanent_enchant_id),
-            std::to_string(instance_data->gem_item_ids[0]),
-            std::to_string(instance_data->gem_item_ids[1]),
-            std::to_string(instance_data->gem_item_ids[2]),
+            std::to_string(effective_instance->permanent_enchant_id),
+            std::to_string(effective_instance->socket_enchant_ids[0]),
+            std::to_string(effective_instance->socket_enchant_ids[1]),
+            std::to_string(effective_instance->socket_enchant_ids[2]),
             "0",
             std::to_string(randomPropertyId),
             std::to_string(suffixFactor),
@@ -1785,7 +1705,7 @@ bool TooltipSystem::SetItemInternal(std::uint32_t itemId, std::int32_t randomPro
     auto lines = openwow::ui::TooltipBuilder::BuildItemTooltip(
         *item, *item_definitions_, inventory_, effective_player_level,
         player_class_mask, player_race_mask, dbc_, effective_player_level,
-        instance_data, world_session_);
+        randomPropertyId, suffixFactor, effective_instance, world_session_);
     if (!lines.empty()) {
       lines.front().text = item_name_;
     }
@@ -1802,14 +1722,17 @@ bool TooltipSystem::SetItemInternal(std::uint32_t itemId, std::int32_t randomPro
       QueueMoneyScript(item->sell_price);
     }
   } else if (requested_async) {
-    BeginPendingItemTemplateRefresh(itemId, randomPropertyId, suffixFactor, playerLevel, itemGuid,
-                                    instance_data, display_options,
-                                    callback_cookie);
     AddLine(openwow::game::Localization::Get().GetString("RETRIEVING_ITEM_INFO",
                                                          "RETRIEVING_ITEM_INFO"),
             kPendingItemInfoColor, kPendingItemInfoColor, kPendingItemInfoColor);
   } else {
     AddLine(item_name_, 1.0f, 1.0f, 1.0f);
+  }
+
+  if (requested_async) {
+    BeginPendingItemTemplateRefresh(itemId, randomPropertyId, suffixFactor,
+                                    playerLevel, itemGuid, effective_instance,
+                                    display_options, callback_cookie);
   }
 
   if (!display_options.name_only) {
@@ -1913,8 +1836,46 @@ bool TooltipSystem::SetUnit(const std::string &unitToken, bool hideStatus) {
   return BuildUnitTooltipForUnit(*this, *unit, objects, dbc, hideStatus);
 }
 
+void TooltipSystem::SetWorldObject(const openwow::game::ObjectGuid guid) {
+  ScopedActivation activation(*this);
+  auto* const objects = GetObjectManager();
+  if (objects == nullptr) {
+    LogTooltipLuaBridgeFailureOnce("world-population", "GameTooltip", "object-manager-is-unavailable");
+    return;
+  }
+  if (const auto* game_object = objects->GetGameObject(guid)) {
+    SetWorldGameObject(*game_object);
+    return;
+  }
+  const auto* unit = objects->GetUnit(guid);
+  const auto* corpse = objects->GetCorpse(guid);
+  if (unit == nullptr && corpse == nullptr) {
+    if (world_object_guid_.has_value()) {
+      Hide();
+      NotifyContentChanged();
+    }
+    return;
+  }
+  if (world_object_guid_ == guid.GetRawValue() && shown_) {
+    return;
+  }
+  Hide();
+  if (!PrepareLiveWorldTooltipFrame(false)) {
+    NotifyContentChanged();
+    return;
+  }
+  if (unit != nullptr) {
+    BuildUnitTooltipForUnit(*this, *unit, objects, dbc_, false);
+  } else {
+    BuildCorpseTooltip(*this, guid.GetRawValue());
+  }
+  world_object_guid_ = guid.GetRawValue();
+  PublishToLiveGameTooltipFrame();
+}
+
 void TooltipSystem::SetWorldGameObject(const openwow::game::CGGameObject_C &game_object) {
-  if (world_game_object_guid_ == game_object.GetGuid().GetRawValue() &&
+  ScopedActivation activation(*this);
+  if (world_object_guid_ == game_object.GetGuid().GetRawValue() &&
       !world_game_object_rebuild_requested_ && shown_) {
     if (game_object.GetGoType() == static_cast<openwow::game::GameObjectType>(
                                         kTooltipStatusBarGoType)) {
@@ -1932,8 +1893,17 @@ void TooltipSystem::SetWorldGameObject(const openwow::game::CGGameObject_C &game
       });
     }
 
-    PublishToLiveGameTooltipFrame();
     return;
+  }
+
+  if (world_object_guid_ != game_object.GetGuid().GetRawValue() ||
+      world_game_object_rebuild_requested_) {
+    Hide();
+    owner_ = "WorldFrame";
+    anchor_ = game_object.HasFloatingTooltip() ? "ANCHOR_CURSOR" : "ANCHOR_NONE";
+    if (!PrepareLiveWorldTooltipFrame(game_object.HasFloatingTooltip())) {
+      return;
+    }
   }
 
   auto* const session = world_session_;
@@ -1941,23 +1911,10 @@ void TooltipSystem::SetWorldGameObject(const openwow::game::CGGameObject_C &game
   const auto generation = next_pending_world_game_object_generation_++;
   bool requested_async = false;
 
-  ResetPendingItemTemplateRefresh();
-  ResetPendingWorldGameObjectRefresh();
-  lines_.clear();
+  ClearLines();
   shown_ = false;
-  item_id_ = 0;
-  item_guid_ = 0;
-  item_name_.clear();
-  item_link_.clear();
-  spell_id_ = 0;
-  secondary_spell_id_ = 0;
-  pending_spell_async_count_ = 0;
-  unit_guid_ = 0;
-  pending_money_script_.reset();
-  world_game_object_guid_ = game_object.GetGuid().GetRawValue();
+  world_object_guid_ = game_object.GetGuid().GetRawValue();
   world_game_object_rebuild_requested_ = false;
-  owner_ = "WorldFrame";
-  anchor_ = "ANCHOR_TOPRIGHT";
   has_status_bar_ =
       game_object.GetGoType() ==
       static_cast<openwow::game::GameObjectType>(kTooltipStatusBarGoType);
@@ -2009,35 +1966,25 @@ void TooltipSystem::SetWorldGameObject(const openwow::game::CGGameObject_C &game
     }
   }
 
-  Show();
-  SyncLiveWorldGameObjectTooltipFrame(owner_, anchor_, lines_,
-                                      TooltipStatusBarSnapshot{
-                                          .shown = has_status_bar_,
-                                          .min = status_bar_min_,
-                                          .max = status_bar_max_,
-                                          .value = status_bar_value_,
-                                      });
-  owner_ = "WorldFrame";
-  anchor_ = "ANCHOR_TOPRIGHT";
-  world_game_object_guid_ = game_object.GetGuid().GetRawValue();
-  shown_ = true;
-  has_status_bar_ =
-      game_object.GetGoType() ==
-      static_cast<openwow::game::GameObjectType>(kTooltipStatusBarGoType);
-  status_bar_min_ = 0.0f;
-  status_bar_max_ = 1.0f;
-  status_bar_value_ = ClampStatusBarValue(
-      status_bar_min_, status_bar_max_,
-      static_cast<float>(game_object.GetGoAnimProgress()) / 255.0f);
   if (requested_async) {
     pending_world_game_object_refresh_ = PendingWorldGameObjectRefresh{
         .guid = game_object.GetGuid().GetRawValue(),
         .generation = generation,
     };
   }
+  Show();
+  PublishToLiveGameTooltipFrame();
 }
 
 void TooltipSystem::PublishToLiveGameTooltipFrame() {
+  if (world_object_guid_.has_value()) {
+    NotifyContentChanged();
+    SyncLiveWorldGameObjectStatusBar(TooltipStatusBarSnapshot{
+        .shown = has_status_bar_, .min = status_bar_min_,
+        .max = status_bar_max_, .value = status_bar_value_,
+    });
+    return;
+  }
   SyncLiveWorldGameObjectTooltipFrame(
       owner_, anchor_, lines_,
       TooltipStatusBarSnapshot{
@@ -2049,7 +1996,7 @@ void TooltipSystem::PublishToLiveGameTooltipFrame() {
 }
 
 void TooltipSystem::HideLiveGameTooltipFrame() {
-  HideLiveWorldGameObjectTooltipFrame();
+  HideLiveGameTooltipFrameUnconditionally();
 }
 
 void TooltipSystem::SetFrameStack(const TooltipFrameStackSnapshot &snapshot) {
@@ -2130,12 +2077,25 @@ std::uint64_t TooltipSystem::GetPresentationRevision() const {
   return presentation_revision_;
 }
 
-std::uint64_t TooltipSystem::GetLayoutRevision() const {
-  return layout_revision_;
+std::size_t TooltipSystem::GetCommittedLineCount() const {
+  return committed_line_count_;
+}
+
+std::size_t TooltipSystem::GetCommittedTextureCount() const {
+  return committed_texture_count_;
 }
 
 void TooltipSystem::CommitLayoutState() noexcept {
+  committed_line_count_ = lines_.size();
+  committed_texture_count_ = textures_.size();
+  committed_min_width_ = min_width_;
+  committed_force_min_width_ = force_min_width_;
+  committed_padding_ = padding_;
   ++layout_revision_;
+}
+
+std::uint64_t TooltipSystem::GetLayoutRevision() const {
+  return layout_revision_;
 }
 
 void TooltipSystem::MarkPresentationChanged() noexcept {
@@ -2156,6 +2116,14 @@ bool TooltipSystem::IsForceMinWidth() const {
   return force_min_width_;
 }
 
+float TooltipSystem::GetCommittedMinimumWidth() const {
+  return committed_min_width_;
+}
+
+bool TooltipSystem::IsCommittedForceMinWidth() const {
+  return committed_force_min_width_;
+}
+
 void TooltipSystem::SetPadding(float p) {
   padding_ = p;
   MarkPresentationChanged();
@@ -2163,6 +2131,10 @@ void TooltipSystem::SetPadding(float p) {
 
 float TooltipSystem::GetPadding() const {
   return padding_;
+}
+
+float TooltipSystem::GetCommittedPadding() const {
+  return committed_padding_;
 }
 
 std::string TooltipSystem::GetLineText(int line) const {
@@ -2259,8 +2231,8 @@ void TooltipSystem::SetAchievementCriteriaBitmask(const std::array<std::uint32_t
   achievement_criteria_bitmask_ = mask;
 }
 
-std::optional<std::uint64_t> TooltipSystem::GetWorldGameObjectGuid() const {
-  return world_game_object_guid_;
+std::optional<std::uint64_t> TooltipSystem::GetWorldObjectGuid() const {
+  return world_object_guid_;
 }
 
 bool TooltipSystem::HasStatusBar() const {

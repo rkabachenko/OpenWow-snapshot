@@ -9,6 +9,7 @@ openwow_add_component(openwow_world_runtime
   occlusion/world_occluder_volumes.cpp
   terrain/terrain_lod_subdivision.cpp
   terrain/terrain_occlusion.cpp
+  terrain/ground_effect_map.cpp
   liquid/liquid_polygon_clip.cpp
   liquid/wmo_liquid_surface.cpp
   environment/chunk_ambient_audio.cpp

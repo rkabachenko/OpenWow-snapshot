@@ -223,7 +223,9 @@ public:
     return retained_layout_.root_scale();
   }
 
-  void SetViewportSize(float width, float height);
+  void SetViewportSize(
+      float width, float height,
+      std::optional<openwow::ui::framexml::ViewportInsets> insets = std::nullopt);
 
   void SetRootScale(float scale, bool force = false);
   [[nodiscard]] lua_State *lua_state() const {
@@ -253,7 +255,7 @@ public:
 
   bool BuildFrameStackSnapshot(bool show_hidden, TooltipFrameStackSnapshot *out_snapshot);
 
-  [[nodiscard]] debug::UiDebugSnapshot BuildDebugSnapshot(
+  [[nodiscard]] debug::UiDebugSnapshot BuildResolvedDebugSnapshot(
       const debug::UiDebugQuery& query);
   void SetDebugSubmissionReceiptsEnabled(bool enabled);
 
@@ -308,6 +310,9 @@ public:
   }
 
  private:
+  void PublishFrameSizeChanged(std::string_view frame_name, float width,
+                               float height);
+
   explicit GameUIManager(
       openwow::ui::display::ProductionDisplaySettingsRuntime* runtime,
       openwow::render::TextureManager& texture_manager,
@@ -346,6 +351,7 @@ public:
   openwow::ui::display::ProductionDisplaySettingsRuntime*
       display_settings_runtime_{nullptr};
   WorldUiLifecycleCommandPort* lifecycle_commands_{nullptr};
+  std::uint64_t reload_console_registration_{0};
 
   std::unique_ptr<runtime::render::UiRenderResources> render_resources_;
   openwow::game::actions::held_cursor::HeldCursor* held_cursor_{nullptr};

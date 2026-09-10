@@ -28,6 +28,7 @@ namespace openwow::game {
 
 class CGPlayer_C;
 class ObjectManager;
+class WorldSession;
 
 struct QuestRewardItem {
   std::uint32_t item_id = 0;
@@ -124,7 +125,7 @@ struct QuestDetailsDialog {
   std::string title;
   std::string details;
   std::string objectives;
-  bool auto_accept = false;
+  bool activate_accept = false;
   QuestFlags quest_flags = QuestFlags::kNone;
   std::uint32_t suggested_players = 0;
   std::vector<QuestRewardItem> reward_choice_items;
@@ -328,7 +329,7 @@ public:
 
   void AddQuestToLog(std::uint32_t quest_id);
   void RemoveQuestFromLog(std::uint32_t quest_id);
-  void SyncQuestLogFromPlayer(const ObjectManager& objects, const CGPlayer_C &player);
+  void SyncQuestLogFromPlayer(const WorldSession& session, const CGPlayer_C &player);
   [[nodiscard]] bool IsQuestInLog(std::uint32_t quest_id) const;
   [[nodiscard]] std::size_t quest_log_count() const {
     return quest_log_.size();
@@ -413,7 +414,7 @@ public:
   }
   void RecordPendingRewardSelection(std::uint32_t quest_id, std::uint32_t reward_index);
   [[nodiscard]] std::uint32_t TakePendingRewardSelectionItem(std::uint32_t quest_id);
-  void ShowQuestGreeting(const std::string &greeting);
+  void ShowQuestGreeting(const ObjectGuid &giver, const std::string &greeting);
   void BuildQuestLogRewardFactionPreview(std::uint32_t quest_id);
 
   void CloseQuestFrameInteraction() {
@@ -449,6 +450,7 @@ public:
   [[nodiscard]] const std::optional<QuestPvpKillInfo> &last_pvp_kill() const {
     return last_pvp_kill_;
   }
+  [[nodiscard]] std::optional<std::uint32_t> TakeQuestWatchUpdateQuestId();
 
   [[nodiscard]] std::uint32_t force_remove_quest() const {
     return force_remove_quest_;
@@ -515,6 +517,7 @@ private:
   std::optional<QuestFailedInfo> last_quest_failed_;
   std::uint32_t last_update_failed_quest_ = 0;
   std::optional<QuestPvpKillInfo> last_pvp_kill_;
+  std::optional<std::uint32_t> pending_quest_watch_update_;
   DialogTextExpansionFn expand_dialog_text_;
 
   std::uint32_t force_remove_quest_ = 0;

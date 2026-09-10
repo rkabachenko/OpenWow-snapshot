@@ -256,7 +256,8 @@ public:
   void FireQuestProgress();
   void FireQuestFinished();
   void FireQuestGreeting();
-  void FireQuestAccepted(int quest_log_index, int quest_id);
+  void FireQuestAccepted(int quest_log_index);
+  void FireQuestWatchUpdate(int quest_log_index);
   void FireQuestLogUpdate();
   void FireQuestQueryComplete();
   void FireQuestAcceptConfirm(const std::string &sharer_name, const std::string &quest_title);

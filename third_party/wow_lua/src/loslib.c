@@ -33,7 +33,18 @@ static int os_pushresult (lua_State *L, int i, const char *filename) {
 }
 
 static int os_execute (lua_State *L) {
+#if defined(OPENWOW_PLATFORM_IOS)
+  if (lua_isnoneornil(L, 1)) {
+    lua_pushinteger(L, 0);
+  }
+  else {
+    (void)luaL_checkstring(L, 1);
+    errno = ENOTSUP;
+    lua_pushinteger(L, -1);
+  }
+#else
   lua_pushinteger(L, system(luaL_optstring(L, 1, NULL)));
+#endif
   return 1;
 }
 

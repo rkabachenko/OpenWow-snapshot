@@ -2,17 +2,37 @@
 
 #include "openwow/data/formats/dbc/dbc_loader.h"
 #include "openwow/core/storm_intrusive_list.h"
+#include "openwow/foundation/diagnostics/logging.h"
 #include "openwow/game/missile_node.h"
 #include "openwow/game/spell_visual_system.h"
 #include "openwow/game/object_effect_system.h"
 #include "openwow/game/objects/unit/unit_spell_visual_runtime.h"
-#include "openwow/render/m2/m2_system.h"
+#include "openwow/render/m2/m2_public_types.h"
 #include "openwow/ui/game/script_event_dispatch.h"
 
 #include <cstddef>
+#include <cmath>
 #include <cstring>
+#include <string>
 
 namespace openwow::game {
+
+namespace {
+
+[[nodiscard]] float ResolveMountDisplayScale(
+    const CGUnit_C &owner, const std::uint32_t display_id) noexcept {
+  const auto *const dbc = owner.dbc_loader();
+  const auto *const display =
+      dbc != nullptr
+          ? dbc->creature_display_info().LookupEntry(display_id)
+          : nullptr;
+  return display != nullptr && std::isfinite(display->scale) &&
+                 display->scale > 0.0f
+             ? display->scale
+             : 1.0f;
+}
+
+}
 
 UnitMountComponent &CGUnit_C::Mount() noexcept { return mount_; }
 
@@ -51,6 +71,14 @@ bool UnitMountComponent::HasKnockdownAnimation(const CGUnit_C &owner) const {
 bool UnitMountComponent::HasCompletedTransition() const {
   return TransitionHandle().IsValid() &&
          MountTransitionObject_IsTransitionComplete(TransitionHandle());
+}
+
+void UnitMountComponent::InitializeFromDescriptor(
+    const CGUnit_C &owner) noexcept {
+  const std::uint32_t display_id = DisplayId(owner);
+  SetCachedDisplayForSpell(display_id);
+  SetDisplayScale(ResolveMountDisplayScale(owner, display_id));
+  SetPendingDisplayChange(std::nullopt);
 }
 
 void UnitMountComponent::CompleteTransition(CGUnit_C &owner,
@@ -95,15 +123,49 @@ void UnitMountComponent::HandleDismountPacket(CGUnit_C &owner) {
 }
 
 void UnitMountComponent::Dismount(CGUnit_C &owner,
-                                  const bool update_spell_visuals) {
+                                  const bool restore_collision_bounds) {
   if (CachedDisplayForSpell() == 0u) {
     return;
   }
   SetModelDefaultAnimationId(std::nullopt);
+  SetDisplayScale(1.0f);
+  SetOverlayM2InstanceId(0u);
+  const auto animation_result = owner.Animation().SetAnimationRecursive(
+      owner.GetPrimaryM2InstanceId(), -1, 0u, -1, 0, 1.0f, 0, 1, false);
+  if (animation_result.status != render::m2::M2ResultStatus::kReady &&
+      animation_result.status != render::m2::M2ResultStatus::kNotReady) {
+    diagnostics::Log(
+        diagnostics::LogLevel::kWarn,
+        "mount release failed stage=rider-animation guid=" +
+            std::to_string(owner.GetGuid().GetRawValue()) +
+            " status=" + std::to_string(static_cast<unsigned>(animation_result.status)));
+  }
+  owner.Animation().InvalidateDeferredStandSelection();
   owner.State().ClearSpellStateFlags(0x00882004u);
   owner.Presentation().RefreshActiveDisplayRuntimeState();
-  static_cast<void>(update_spell_visuals);
+  if (restore_collision_bounds &&
+      !owner.Presentation().InitDisplayCollisionBounds(true, false)) {
+    diagnostics::Log(
+        diagnostics::LogLevel::kWarn,
+        "mount release failed stage=collision-bounds guid=" +
+            std::to_string(owner.GetGuid().GetRawValue()) +
+            " display=" + std::to_string(owner.Presentation().DisplayId()) +
+            " retainedMountDisplay=" + std::to_string(CachedDisplayForSpell()));
+  }
   owner.State().ClearSpellStateFlags(CGUnit_C::kSpellStateSuppressMountFootprint);
+  if (owner.IsActivePlayer()) {
+    const auto position = owner.GetPosition();
+    diagnostics::Log(
+        diagnostics::LogLevel::kInfo,
+        "mount release guid=" + std::to_string(owner.GetGuid().GetRawValue()) +
+            " retainedMountDisplay=" + std::to_string(CachedDisplayForSpell()) +
+            " restoreCollision=" + std::to_string(restore_collision_bounds) +
+            " collisionHeight=" +
+            std::to_string(owner.Movement().Data().GetCollisionHeightProduct()) +
+            " movementFlags=" + std::to_string(owner.GetMovementInfo().flags) +
+            " position=(" + std::to_string(position.x) + "," +
+            std::to_string(position.y) + "," + std::to_string(position.z) + ")");
+  }
 }
 
 void UnitMountComponent::ApplyDisplayChange(
@@ -123,35 +185,20 @@ void UnitMountComponent::ApplyDisplayChange(
     Dismount(owner, mount_display_id == 0u);
   }
   SetCachedDisplayForSpell(mount_display_id);
+  SetDisplayScale(ResolveMountDisplayScale(owner, mount_display_id));
   owner.Presentation().RefreshActiveDisplayRuntimeState();
   if (mount_display_id != 0u && previous_display == 0u) {
     AddHardcodedOneShotEffect(session, owner, HardcodedEffectId::kMountPoof);
   }
 
+  owner.Animation().InvalidateDeferredStandSelection();
   owner.Animation().RefreshSelectedStandAnimation(session, 0u, ~0u);
   owner.Presentation().RefreshModelBoundsAndEffects();
   ui::game::ScriptEventDispatch::Get().FireUnitModel(owner.GetGuid().GetRawValue());
   owner.SpellVisuals().UpdateObjectEffect();
 }
 
-void UnitMountComponent::ReleaseOverlayM2Instance(CGUnit_C &owner) {
-  if (OverlayM2InstanceId() == 0u) {
-    return;
-  }
-  auto &system = *owner.m2_system();
-  const auto instance_id = OverlayM2InstanceId();
-  auto status = render::m2::M2ResultStatus::kReady;
-  status = render::m2::MergeM2ResultStatus(
-      status, system.ClearAnimationChangedCallback(instance_id));
-  status = render::m2::MergeM2ResultStatus(
-      status, system.ClearTriggeredEventCallback(instance_id));
-  status = render::m2::MergeM2ResultStatus(
-      status, system.ClearReplacementColors(instance_id));
-  status = render::m2::MergeM2ResultStatus(
-      status, system.DestroyInstance(instance_id));
-  if (render::m2::IsTerminalM2ResultStatus(status)) {
-    SetModelDefaultAnimationId(std::nullopt);
-  }
+void UnitMountComponent::ClearOverlayM2InstanceBinding() noexcept {
   SetOverlayM2InstanceId(0u);
   SetModelDefaultAnimationId(std::nullopt);
 }

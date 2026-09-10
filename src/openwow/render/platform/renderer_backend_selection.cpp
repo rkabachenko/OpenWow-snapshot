@@ -23,7 +23,8 @@ bool IsRendererBackendSupported(const api::RendererBackend backend) noexcept {
     case api::RendererBackend::Auto:
       return true;
     case api::RendererBackend::Vulkan:
-#if defined(_WIN32) || defined(__linux__) || defined(__APPLE__)
+#if defined(_WIN32) || defined(__linux__) || \
+    (defined(__APPLE__) && !defined(OPENWOW_PLATFORM_IOS))
 
       return true;
 #else

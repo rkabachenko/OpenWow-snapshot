@@ -21,11 +21,6 @@ SAMPLER2D(s_terrainTex3, 3);
 
 SAMPLER2D(s_terrainAlpha, 4);
 
-SAMPLER2DSHADOW(s_shadowMap, 5);
-
-uniform mat4 u_shadowMtx;
-uniform vec4 u_shadowParams;
-
 #include "world_shadow.sh"
 
 void main()
@@ -52,11 +47,7 @@ void main()
     blended = mix(blended, c3, alphaBytes.b);
 
     float shadowVisibility = mix(1.0, alphaBytes.a, u_terrainShadowMod.a);
-    if (u_shadowParams.z > 0.0) {
-        float projectedVisibility = openwowSampleWorldShadow(v_worldPos, u_shadowParams.x);
-        projectedVisibility = mix(1.0, projectedVisibility, u_shadowParams.z);
-        shadowVisibility = min(shadowVisibility, projectedVisibility);
-    }
+    shadowVisibility = min(shadowVisibility, openwowSampleWorldShadow(v_worldPos));
     vec3 shadowModulate = mix(u_terrainShadowMod.rgb, vec3_splat(1.0), shadowVisibility);
     vec3 litColor = blended.rgb * v_color0.rgb * u_terrainColor.rgb
                   * (2.0 * shadowModulate);

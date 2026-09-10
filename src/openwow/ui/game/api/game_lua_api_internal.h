@@ -627,11 +627,27 @@ inline void SetPortraitStateField(lua_State *L, const int texture_index,
                     : std::optional<std::string_view>(value));
 }
 
+inline void MarkPortraitTexturePresent(lua_State *L, const int texture_index) {
+  runtime::SetTextureRenderStateBoolean(
+      L, texture_index, runtime::TextureRenderStateField::kTextureCleared,
+      false);
+}
+
 inline void ClearPortraitState(lua_State *L, const int texture_index) {
   using runtime::TextureRenderStateField;
   SetPortraitStateField(L, texture_index, TextureRenderStateField::kTexture, {});
   SetPortraitStateField(L, texture_index, TextureRenderStateField::kPortraitUnit, {});
   SetPortraitStateField(L, texture_index, TextureRenderStateField::kPortraitGuid, {});
+  lua_pushnil(L);
+  runtime::SetInternedLuaField(
+      L, texture_index,
+      runtime::TextureRenderStateFieldName(
+          TextureRenderStateField::kPortraitDisplayId));
+  if (auto* const source =
+          runtime::EnsureTextureRenderStateSource(L, texture_index);
+      source != nullptr) {
+    source->portrait_display_id.reset();
+  }
 }
 
 inline void BindPortraitTexturePath(lua_State *L, const int texture_index,
@@ -641,6 +657,14 @@ inline void BindPortraitTexturePath(lua_State *L, const int texture_index,
                         texture_path);
   SetPortraitStateField(L, texture_index, TextureRenderStateField::kPortraitUnit, {});
   SetPortraitStateField(L, texture_index, TextureRenderStateField::kPortraitGuid, {});
+  lua_pushnil(L);
+  runtime::SetInternedLuaField(
+      L, texture_index,
+      runtime::TextureRenderStateFieldName(
+          TextureRenderStateField::kPortraitDisplayId));
+  runtime::EnsureTextureRenderStateSource(L, texture_index)
+      ->portrait_display_id.reset();
+  MarkPortraitTexturePresent(L, texture_index);
 }
 
 inline void BindPortraitUnitToken(lua_State *L, const int texture_index,
@@ -650,6 +674,15 @@ inline void BindPortraitUnitToken(lua_State *L, const int texture_index,
   SetPortraitStateField(L, texture_index, TextureRenderStateField::kPortraitUnit,
                         unit_id);
   SetPortraitStateField(L, texture_index, TextureRenderStateField::kPortraitGuid, {});
+  lua_pushnil(L);
+  runtime::SetInternedLuaField(
+      L, texture_index,
+      runtime::TextureRenderStateFieldName(
+          TextureRenderStateField::kPortraitDisplayId));
+  auto* const source = runtime::EnsureTextureRenderStateSource(L, texture_index);
+  source->portrait_display_id.reset();
+  source->portrait_request = std::make_shared<runtime::TexturePortraitRequest>();
+  MarkPortraitTexturePresent(L, texture_index);
 }
 
 inline void BindPortraitGuid(lua_State *L, const int texture_index, const ObjectGuid &guid) {
@@ -663,6 +696,34 @@ inline void BindPortraitGuid(lua_State *L, const int texture_index, const Object
 
   SetPortraitStateField(L, texture_index, TextureRenderStateField::kPortraitGuid,
                         std::string_view(std::to_string(guid.GetRawValue())));
+  auto* const source = runtime::EnsureTextureRenderStateSource(L, texture_index);
+  lua_pushnil(L);
+  runtime::SetInternedLuaField(
+      L, texture_index,
+      runtime::TextureRenderStateFieldName(
+          TextureRenderStateField::kPortraitDisplayId));
+  source->portrait_display_id.reset();
+  source->portrait_request = std::make_shared<runtime::TexturePortraitRequest>();
+  MarkPortraitTexturePresent(L, texture_index);
+}
+
+inline void BindPortraitDisplayId(lua_State* L, const int texture_index,
+                                  const std::uint32_t display_id) {
+  using runtime::TextureRenderStateField;
+  SetPortraitStateField(L, texture_index, TextureRenderStateField::kTexture, {});
+  SetPortraitStateField(L, texture_index, TextureRenderStateField::kPortraitUnit,
+                        {});
+  SetPortraitStateField(L, texture_index, TextureRenderStateField::kPortraitGuid,
+                        {});
+  lua_pushinteger(L, static_cast<lua_Integer>(display_id));
+  runtime::SetInternedLuaField(
+      L, texture_index,
+      runtime::TextureRenderStateFieldName(
+          TextureRenderStateField::kPortraitDisplayId));
+  auto* const source = runtime::EnsureTextureRenderStateSource(L, texture_index);
+  source->portrait_display_id = display_id;
+  source->portrait_request = std::make_shared<runtime::TexturePortraitRequest>();
+  MarkPortraitTexturePresent(L, texture_index);
 }
 
 inline int ValidateTextureWidgetArgument(lua_State *L) {

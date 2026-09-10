@@ -21,6 +21,7 @@
 #include "openwow/game/query_cache.h"
 #include "openwow/game/world_session.h"
 #include "openwow/ui/surfaces/game/runtime/system_message_dispatch.h"
+#include "openwow/foundation/diagnostics/logging.h"
 #include "openwow/foundation/text/ascii.h"
 
 #include <lua.hpp>
@@ -1048,6 +1049,36 @@ int LuaPlayerModelSetCreature(lua_State *Ls) {
 
   openwow::ui::game::detail::ApplyCreatureTemplateBindingToFrame(
       Ls, 1, *creature_template);
+  ClearCharacterModelHiddenState(Ls, 1);
+  return 0;
+}
+
+int LuaPlayerModelSetDisplayInfo(lua_State *Ls) {
+  if (!lua_istable(Ls, 1)) {
+    return 0;
+  }
+  if (!lua_isnumber(Ls, 2)) {
+    return luaL_error(Ls, "Usage: SetDisplayInfo(displayID)");
+  }
+
+  const auto display_id = ClampLuaNumberToClientU32(Ls, 2);
+  if (const auto* dbc = openwow::ui::game::detail::GetDbcLoader(Ls);
+      display_id != 0 && dbc != nullptr &&
+      dbc->creature_display_info().LookupEntry(display_id) == nullptr) {
+    openwow::diagnostics::Log(
+        openwow::diagnostics::LogLevel::kWarn,
+        "PlayerModel SetDisplayInfo rejected display=" +
+            std::to_string(display_id) +
+            " reason=missing from active CreatureDisplayInfo.dbc");
+    return 0;
+  }
+
+  StoreBoundUnitGuid(Ls, 1, openwow::game::ObjectGuid{});
+  ClearBoundCreatureBinding(Ls, 1);
+  lua_pushnil(Ls);
+  lua_setfield(Ls, 1, "__ow_model_path");
+  StoreBoundUnitDisplayId(Ls, 1, display_id);
+  ClearBoundUnitSequence(Ls, 1);
   ClearCharacterModelHiddenState(Ls, 1);
   return 0;
 }

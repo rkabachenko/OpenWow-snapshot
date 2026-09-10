@@ -89,8 +89,6 @@ class QuestLog {
     bool ExpireTimedWatches();
     void LoadTrackedQuestsFromCVarIfNeeded(const ObjectManager& objects);
     void SaveTrackedQuestsToCVar() const;
-    void SignalWatchUpdate();
-    [[nodiscard]] std::uint64_t GetWatchUpdateSerial() const;
     static constexpr size_t kMaxTracked = 25;
 
     void UpdateObjective(uint32_t questId, uint8_t objectiveIndex,
@@ -115,9 +113,6 @@ class QuestLog {
 
     [[nodiscard]] int GetQuestLogIndexById(uint32_t questId) const;
 
-    [[nodiscard]] int GetVisibleIndexByQuestId(uint32_t questId) const;
-    [[nodiscard]] uint32_t GetQuestIdByVisibleIndex(int visibleIndex) const;
-
     [[nodiscard]] bool IsQuestCompleteDetailed(uint32_t questId,
                                                 bool checkReputation = true) const;
 
@@ -133,22 +128,16 @@ class QuestLog {
 
     [[nodiscard]] int FindTrackedIndexLocked(uint32_t questId) const;
     [[nodiscard]] bool IsTrackedLocked(uint32_t questId) const;
-    enum class WatchMutationMode {
-        kGameplay,
-        kNativeLua,
-    };
     bool AddQuestWatchLocked(const ObjectManager* objects, uint32_t questId,
-                             uint32_t durationSeconds, WatchMutationMode mode);
+                             uint32_t durationSeconds);
     bool SortQuestWatchesLocked(const ObjectManager& objects);
     bool ExpireTimedWatchesLocked();
-    void MarkWatchUpdateLocked();
     void SetEntryTrackedFlagLocked(uint32_t questId, bool tracked);
 
     std::vector<QuestLogSlot> entries_;
     std::vector<QuestWatchEntry> tracked_;
     uint32_t selected_quest_ = 0;
     uint32_t daily_done_ = 0;
-    std::uint64_t watch_update_serial_ = 0;
     bool tracked_quests_loaded_ = false;
     const openwow::ui::WorldMapSystem* world_map_ = nullptr;
     mutable std::mutex mutex_;

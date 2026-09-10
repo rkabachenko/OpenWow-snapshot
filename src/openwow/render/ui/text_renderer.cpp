@@ -164,6 +164,41 @@ void TextRenderer::Shutdown() {
   ready_ = false;
 }
 
+bool TextRenderer::PrepareGlyphRasterScale(const float scale) {
+  constexpr double kMaxRasterPixelHeight = 512.0;
+  const double height = face_ != nullptr
+      ? std::ceil(static_cast<double>(face_->pixel_height()) *
+                  std::max(1.0f, scale))
+      : 0.0;
+  const auto fail = [&](const char* reason) {
+    openwow::diagnostics::Log(
+        openwow::diagnostics::LogLevel::kError,
+        "TextRenderer: glyph raster preparation failed path=" +
+            (face_ != nullptr ? face_->path() : std::string{"<uninitialized>"}) +
+            " source=retained-font-bytes scale=" + std::to_string(scale) +
+            " pixel_height=" + std::to_string(height) + " reason=" + reason +
+            " retained_raster_pixel_height=" +
+            std::to_string(atlas_ != nullptr ? atlas_->face().pixel_height() : 0));
+    return false;
+  };
+  if (!ready_ || !face_ || !atlas_) return fail("font-not-ready");
+  if (!std::isfinite(scale) || scale <= 0.0f || height > kMaxRasterPixelHeight) {
+    return fail("invalid-or-unsupported-raster-size");
+  }
+  const int pixel_height = static_cast<int>(height);
+  if (atlas_->face().pixel_height() == pixel_height) return true;
+  if (world_depth_active_) return fail("world-text-frame-active");
+
+  auto raster_face = pixel_height == face_->pixel_height()
+      ? face_ : face_->WithPixelHeight(pixel_height);
+  if (!raster_face) return fail("font-size-initialization-failed");
+  atlas_ = std::make_unique<openwow::render::BgfxGlyphAtlas>(
+      std::move(raster_face), 0);
+  ClearPageBatches(screen_batches_);
+  ClearPageBatches(world_batches_);
+  return true;
+}
+
 bool TextRenderer::EnsureWorldDepthProgram() {
   if (bgfx::isValid(world_depth_program_)) {
     return true;
@@ -329,6 +364,8 @@ bool TextRenderer::DrawTextCentered(
       (color_argb & 0x00ffffffu) | (modulated_alpha << 24u));
 
   const float left0 = center_x - layout.width * scale * 0.5f;
+  const float glyph_scale = scale * static_cast<float>(face_->pixel_height()) /
+                            static_cast<float>(atlas_->face().pixel_height());
 
   if (world_depth_active_) {
     world_batch_view_id_ = view_id;
@@ -350,16 +387,16 @@ bool TextRenderer::DrawTextCentered(
     if (glyph == nullptr || glyph->width <= 0.0f || glyph->height <= 0.0f) {
       continue;
     }
-    const float left = left0 + (element.x + glyph->bearing_x) * scale;
+    const float left = left0 + element.x * scale + glyph->bearing_x * glyph_scale;
     const float top = y + element.y * scale +
-                      (face_->ascent() - glyph->bearing_y) * scale;
+                      face_->ascent() * scale - glyph->bearing_y * glyph_scale;
     if (!has_current_batch || current_batch_page != glyph->page) {
       current_batch = &batches[glyph->page];
       current_batch_page = glyph->page;
       has_current_batch = true;
     }
-    AppendGlyphQuad(*current_batch, left, top, left + glyph->width * scale,
-                    top + glyph->height * scale, glyph->u0, glyph->v0,
+    AppendGlyphQuad(*current_batch, left, top, left + glyph->width * glyph_scale,
+                    top + glyph->height * glyph_scale, glyph->u0, glyph->v0,
                     glyph->u1, glyph->v1, fill_abgr);
     emitted = true;
   }
@@ -405,6 +442,8 @@ bool TextRenderer::DrawLayout(
       openwow::render::text::LayoutText(*face_, text, request);
   ResolveTokenColors(layout, color_argb, layout_token_colors_);
   const auto& colors = layout_token_colors_;
+  const float glyph_scale = scale * static_cast<float>(face_->pixel_height()) /
+                            static_cast<float>(atlas_->face().pixel_height());
 
   ClearPageBatches(screen_batches_);
   auto& batches = screen_batches_;
@@ -434,13 +473,13 @@ bool TextRenderer::DrawLayout(
             ? (box_width - layout.lines[line_index].width * scale) * 0.5f
             : 0.0f;
     const float left =
-        box_left + line_offset +
-        (element.x + glyph->bearing_x) * scale;
+        box_left + line_offset + element.x * scale +
+        glyph->bearing_x * glyph_scale;
     const float top =
         y + element.y * scale +
-        (face_->ascent() - glyph->bearing_y) * scale;
-    const float right = left + glyph->width * scale;
-    const float bottom = top + glyph->height * scale;
+        face_->ascent() * scale - glyph->bearing_y * glyph_scale;
+    const float right = left + glyph->width * glyph_scale;
+    const float bottom = top + glyph->height * glyph_scale;
     const std::uint32_t color = ArgbToAbgr(colors[element.token_index]);
     if (!has_current_batch || current_batch_page != glyph->page) {
       current_batch = &batches[glyph->page];

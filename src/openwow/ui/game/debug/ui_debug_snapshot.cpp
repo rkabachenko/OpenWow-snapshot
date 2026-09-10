@@ -8,7 +8,7 @@
 
 namespace openwow::ui::game {
 
-debug::UiDebugSnapshot GameUIManager::BuildDebugSnapshot(
+debug::UiDebugSnapshot GameUIManager::BuildResolvedDebugSnapshot(
     const debug::UiDebugQuery& query) {
   debug::UiDebugSnapshot snapshot;
   snapshot.initialized = is_initialized();

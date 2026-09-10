@@ -123,7 +123,8 @@ void UiRenderer::Begin(int view_id, int width, int height) {
 UiRenderer::DrawStateKey UiRenderer::BuildDrawStateKey(
     const std::uint64_t bgfx_state, const float alpha_reference,
     const bgfx::TextureHandle texture, const std::uint64_t sampler_flags,
-    const bgfx::TextureHandle mask_texture, const bool desaturated,
+    const bgfx::TextureHandle mask_texture,
+    const bool replace_alpha_with_mask, const bool desaturated,
     const bool flip_texture_y) const noexcept {
 
   const bool use_mask = bgfx::isValid(mask_texture);
@@ -133,7 +134,8 @@ UiRenderer::DrawStateKey UiRenderer::BuildDrawStateKey(
       .texture = texture.idx,
       .mask_texture = use_mask ? mask_texture.idx : white_pixel_.idx,
       .material = {alpha_reference, desaturated ? 1.0f : 0.0f,
-                   use_mask ? 1.0f : 0.0f, flip_texture_y ? 1.0f : 0.0f},
+                   use_mask ? (replace_alpha_with_mask ? 2.0f : 1.0f) : 0.0f,
+                   flip_texture_y ? 1.0f : 0.0f},
       .scissor_active = scissor_active_,
       .scissor = {scissor_x_, scissor_y_, scissor_w_, scissor_h_},
   };
@@ -300,6 +302,7 @@ bool UiRenderer::Submit(const Quad& quad) {
   return EmitRun(BuildDrawStateKey(material.bgfx_state,
                                    material.alpha_reference, quad.texture,
                                    quad.sampler_flags, quad.mask_texture,
+                                   quad.replace_alpha_with_mask,
                                    quad.desaturated, quad.flip_texture_y),
                  quad_vertices, kQuadIndices, true);
 }
@@ -321,7 +324,7 @@ bool UiRenderer::SubmitMesh(const Mesh& mesh) {
   return EmitRun(
       BuildDrawStateKey(state, material.alpha_reference, mesh.texture,
                         mesh.sampler_flags, BGFX_INVALID_HANDLE,
-                        mesh.desaturated, false),
+                        false, mesh.desaturated, false),
       mesh.vertices, mesh.indices, !is_triangle_strip);
 }
 

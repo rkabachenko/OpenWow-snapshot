@@ -4,6 +4,7 @@
 #include "openwow/data/formats/dbc/dbc_entries_gameplay.h"
 #include "openwow/data/formats/dbc/dbc_loader.h"
 #include "openwow/data/formats/dbc/dbc_structures.h"
+#include "openwow/foundation/diagnostics/logging.h"
 #include "openwow/game/gossip_manager.h"
 #include "openwow/game/object_manager.h"
 #include "openwow/game/skill_line_ability_lookup.h"
@@ -1013,10 +1014,23 @@ void Trainer_ResetFrameState() {
   GetTrainerFrameCache().Reset();
 }
 
-void Trainer_UpdateGreetingText(const WorldSession &session) {
+bool Trainer_PrepareFrameState(const WorldSession &session) {
+  auto &cache = GetTrainerFrameCache();
+  // Each accepted list starts a new presentation, even when its contents match
+  // the previous response. Prepare filters, categories and selection before SHOW.
+  cache.Reset();
   const auto *trainer = session.gossip().has_trainer() ? &session.gossip().trainer() : nullptr;
-  if (trainer == nullptr) {
-    return;
+  const auto *dbc = session.GetDbcLoader();
+  const auto *player = session.objects().GetActivePlayer();
+  if (trainer == nullptr || dbc == nullptr || player == nullptr) {
+    openwow::diagnostics::Log(
+        openwow::diagnostics::LogLevel::kWarn,
+        "interaction preparation failed SMSG_TRAINER_LIST guid=" +
+            (trainer != nullptr ? trainer->trainer_guid.ToString() : "0") +
+            " stage=trainer-services reason=" +
+            (trainer == nullptr ? "missing-trainer-list"
+             : dbc == nullptr ? "missing-dbc-loader" : "missing-active-player"));
+    return false;
   }
 
   std::array<char, 0x800> expanded{};
@@ -1025,7 +1039,17 @@ void Trainer_UpdateGreetingText(const WorldSession &session) {
   SpellTextFormatter::ExpandObjectTextVariables(
       trainer->greeting.c_str(), expanded.data(), static_cast<std::uint32_t>(expanded.size()),
       session.objects().GetActivePlayerGuid().GetRawValue(), nullptr, 0);
-  GetTrainerFrameCache().SetGreetingText(expanded.data());
+  cache.SetGreetingText(expanded.data());
+  cache.Sync(session, dbc);
+  openwow::diagnostics::Log(
+      openwow::diagnostics::LogLevel::kInfo,
+      "interaction publish SMSG_TRAINER_LIST guid=" +
+          trainer->trainer_guid.ToString() + " services=" +
+          std::to_string(trainer->spells.size()) + " visibleRows=" +
+          std::to_string(cache.visible_service_count()) + " serviceTypeFilter=" +
+          std::to_string(GetTrainerServiceTypeFilterMask()) +
+          " stage=TRAINER_SHOW");
+  return true;
 }
 
 const std::string &Trainer_GetGreetingText() {

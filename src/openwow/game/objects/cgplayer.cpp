@@ -444,10 +444,7 @@ std::optional<CGPlayer_C::ActiveSkillValues> CGPlayer_C::FindActiveSkillValues(
   const auto skill = GetSkill(*slot);
   ActiveSkillValues values;
   values.raw_value = skill.value;
-  values.adjusted_value = skill.value;
-  if (values.adjusted_value != 0) {
-    values.adjusted_value += static_cast<std::uint16_t>(skill.step_modifier);
-  }
+  values.adjusted_value = skill.EffectiveValue();
 
   return values;
 }

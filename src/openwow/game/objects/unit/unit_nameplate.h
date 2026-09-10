@@ -43,7 +43,8 @@ public:
                                  float distance_squared,
                                  bool range_exempt_map = false) const;
   [[nodiscard]] bool PassesHardEligibility(const CGUnit_C &unit,
-                                            const CGUnit_C &viewer) const;
+                                            const CGUnit_C &viewer,
+                                            const ObjectManager &objects) const;
 
   [[nodiscard]] static bool IsFriendlyForNameplate(const CGUnit_C &unit,
                                                    const CGUnit_C &viewer);

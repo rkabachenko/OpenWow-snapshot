@@ -261,14 +261,32 @@ void ApplyTextureTemplate(lua_State *L, int texture_index,
   }
 
   if (frame.has_vertex_color || HasColorOverride(frame)) {
-    StoreQuantizedRenderStateColorField(
-        L, texture_index, TextureRenderStateField::kVertexColorR, frame.color_r);
-    StoreQuantizedRenderStateColorField(
-        L, texture_index, TextureRenderStateField::kVertexColorG, frame.color_g);
-    StoreQuantizedRenderStateColorField(
-        L, texture_index, TextureRenderStateField::kVertexColorB, frame.color_b);
-    StoreTextureAlphaByte(L, texture_index,
-                          QuantizeScriptColorByte(frame.color_a));
+    if (frame.file.empty()) {
+      StoreQuantizedRenderStateColorField(
+          L, texture_index, TextureRenderStateField::kSolidColorR,
+          frame.color_r);
+      StoreQuantizedRenderStateColorField(
+          L, texture_index, TextureRenderStateField::kSolidColorG,
+          frame.color_g);
+      StoreQuantizedRenderStateColorField(
+          L, texture_index, TextureRenderStateField::kSolidColorB,
+          frame.color_b);
+      StoreQuantizedRenderStateColorField(
+          L, texture_index, TextureRenderStateField::kSolidColorA,
+          frame.color_a);
+    } else {
+      StoreQuantizedRenderStateColorField(
+          L, texture_index, TextureRenderStateField::kVertexColorR,
+          frame.color_r);
+      StoreQuantizedRenderStateColorField(
+          L, texture_index, TextureRenderStateField::kVertexColorG,
+          frame.color_g);
+      StoreQuantizedRenderStateColorField(
+          L, texture_index, TextureRenderStateField::kVertexColorB,
+          frame.color_b);
+      StoreTextureAlphaByte(L, texture_index,
+                            QuantizeScriptColorByte(frame.color_a));
+    }
   }
   if (frame.texture_alpha.has_value()) {
     StoreTextureAlphaByte(

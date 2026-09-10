@@ -12,6 +12,7 @@
 #include "openwow/game/objects/cgunit.h"
 #include "openwow/game/tracking_system.h"
 #include "openwow/game/world_session.h"
+#include "openwow/foundation/diagnostics/logging.h"
 
 #include "openwow/render/m2/m2_system.h"
 #include "openwow/world/camera/world_camera.h"
@@ -692,6 +693,7 @@ std::uint32_t CGObject_C::UpdateOverlayModel() {
   overlay_model_scale_ = 1.0f;
   overlay_model_visible_ = false;
   overlay_bone_attached_ = false;
+  overlay_attachment_failure_logged_ = false;
   overlay_bone_rotation_compensated_ = false;
 
   const std::uint32_t model_index = ResolveOverlayModelIndex();
@@ -712,13 +714,29 @@ void CGObject_C::AttachOverlayModelToBone() {
     return;
   }
 
-  float attachment_position[3]{};
-  if (!QueryPrimaryM2AttachmentPosition(
-          *this, openwow::render::m2::kM2AttachmentLookupPlayerName,
-          attachment_position)) {
+  auto* const system = m2_system();
+  if (system == nullptr) {
+    return;
+  }
+  const auto attachment = system->QueryAttachmentPosition(
+      primary_m2_instance_id_, openwow::render::m2::kM2AttachmentLookupPlayerName);
+  if (attachment.status != openwow::render::m2::M2ResultStatus::kReady) {
+    if (openwow::render::m2::IsTerminalM2ResultStatus(attachment.status) &&
+        !overlay_attachment_failure_logged_) {
+      openwow::diagnostics::Log(
+          openwow::diagnostics::LogLevel::kWarn,
+          "NPC overlay stage=attachment source=world-object guid=" + GetGuid().ToString() +
+              " entry=" + std::to_string(GetEntry()) +
+              " overlay=" + std::to_string(active_overlay_model_index_) +
+              " instance=" + std::to_string(primary_m2_instance_id_) +
+              " reason=" + openwow::render::m2::M2ResultReasonName(attachment.reason) +
+              " detail=" + attachment.detail);
+      overlay_attachment_failure_logged_ = true;
+    }
     return;
   }
 
+  overlay_attachment_failure_logged_ = false;
   overlay_bone_attached_ = true;
   RefreshOverlayBoneScale();
   SetIdleAnimation();

@@ -44,111 +44,32 @@ float DistanceSquared(const game::Vec3& left, const game::Vec3& right) {
   return delta.x * delta.x + delta.y * delta.y + delta.z * delta.z;
 }
 
-float DistanceSquaredXY(const game::Vec3& left, const game::Vec3& right) {
-  const float x = left.x - right.x;
-  const float y = left.y - right.y;
-  return x * x + y * y;
-}
-
-std::vector<game::Vec3> BuildClippedPath(
-    const game::MonsterMoveInfo& info,
-    const std::optional<game::Vec3>& current_position);
-
-std::vector<game::Vec3> BuildClippedPath(
+std::vector<game::Vec3> BuildMonsterMovePath(
     const game::MonsterMoveInfo& info,
     const std::optional<game::Vec3>& current_position) {
-  std::vector<game::Vec3> wire_path;
-  wire_path.reserve(info.waypoints.size() + 1u);
-  wire_path.push_back(info.position);
-  wire_path.insert(wire_path.end(), info.waypoints.begin(), info.waypoints.end());
+  std::vector<game::Vec3> path;
+  path.reserve(info.waypoints.size() + 1u);
 
-  if (!current_position || wire_path.size() < 2u) {
-    return wire_path;
+  if (!info.catmull_rom) {
+    path.push_back(info.position);
+    path.insert(path.end(), info.waypoints.begin(), info.waypoints.end());
+    return path;
   }
 
-  const std::size_t segment_count = wire_path.size() - 1u;
-  std::size_t behind_count = 0u;
-  std::size_t ahead_count = 0u;
-  std::optional<std::size_t> straddling_segment;
-
-  for (std::size_t segment = 0; segment < segment_count; ++segment) {
-    const auto edge = wire_path[segment + 1u] - wire_path[segment];
-    const auto from_pose_to_start = wire_path[segment] - *current_position;
-    const auto from_pose_to_end = wire_path[segment + 1u] - *current_position;
-    const float start_projection =
-        edge.x * from_pose_to_start.x + edge.y * from_pose_to_start.y +
-        edge.z * from_pose_to_start.z;
-    const float end_projection =
-        edge.x * from_pose_to_end.x + edge.y * from_pose_to_end.y +
-        edge.z * from_pose_to_end.z;
-
-    if (start_projection < 0.0f || end_projection < 0.0f) {
-      if (start_projection > 0.0f || end_projection > 0.0f) {
-        straddling_segment = segment;
-        break;
-      }
-      ++behind_count;
-    } else {
-      ++ahead_count;
+  const game::Vec3 start = current_position.value_or(info.position);
+  path.push_back(start);
+  bool first_wire_point = true;
+  for (const auto& point : info.waypoints) {
+    const bool merge_with_start =
+        first_wire_point &&
+        DistanceSquared(start, point) < kRetailPointMergeDistanceSquared;
+    first_wire_point = false;
+    if (merge_with_start) {
+      continue;
     }
+    path.push_back(point);
   }
-
-  if (ahead_count == segment_count) {
-    if (DistanceSquaredXY(wire_path.front(), *current_position) < 1.0f) {
-      return wire_path;
-    }
-    wire_path.insert(wire_path.begin(), *current_position);
-    return wire_path;
-  }
-
-  if (behind_count == segment_count) {
-    if (DistanceSquared(wire_path.back(), *current_position) <
-        kRetailPointMergeDistanceSquared) {
-      return {*current_position};
-    }
-    return {*current_position, wire_path.back()};
-  }
-
-  if (!straddling_segment.has_value()) {
-
-    straddling_segment = std::min(behind_count, segment_count - 1u);
-  }
-
-  const std::size_t segment = *straddling_segment;
-  const auto edge = wire_path[segment + 1u] - wire_path[segment];
-  const float length_squared =
-      edge.x * edge.x + edge.y * edge.y + edge.z * edge.z;
-  const auto from_start = *current_position - wire_path[segment];
-  const float t = length_squared > kLengthEpsilon
-                      ? std::clamp((from_start.x * edge.x +
-                                    from_start.y * edge.y +
-                                    from_start.z * edge.z) /
-                                       length_squared,
-                                   0.0f, 1.0f)
-                      : 0.0f;
-  const auto projected = wire_path[segment] + edge * t;
-
-  std::vector<game::Vec3> clipped;
-  clipped.reserve(wire_path.size() - segment);
-  if (DistanceSquared(projected, wire_path[segment + 1u]) >=
-      kRetailPointMergeDistanceSquared) {
-    clipped.push_back(projected);
-  } else if (DistanceSquared(*current_position, wire_path[segment + 1u]) >=
-             kRetailPointMergeDistanceSquared) {
-    clipped.push_back(*current_position);
-  }
-
-  for (std::size_t index = segment + 1u; index < wire_path.size(); ++index) {
-    if (clipped.empty() ||
-        DistanceSquared(clipped.back(), wire_path[index]) >=
-            kRetailPointMergeDistanceSquared) {
-      clipped.push_back(wire_path[index]);
-    }
-  }
-  if (clipped.empty()) {
-    clipped.push_back(*current_position);
-  }
-  return clipped;
+  return path;
 }
 
 }
@@ -206,7 +127,7 @@ void MoveSpline::Initialize(const game::MonsterMoveInfo& info, float start_facin
   coordinate_parent_seat_ =
       has_coordinate_parent_binding_ ? info.transport_seat : -1;
 
-  points_ = BuildClippedPath(info, current_position);
+  points_ = BuildMonsterMovePath(info, current_position);
 
   if (IsCyclic() && points_.size() > 2u &&
       DistanceSquared(points_[1], points_.back()) >=

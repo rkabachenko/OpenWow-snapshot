@@ -16,6 +16,7 @@
 #include "openwow/ui/game/runtime/retained_layout.h"
 #include "openwow/world/camera/world_camera.h"
 
+#include <algorithm>
 #include <cstdio>
 
 namespace openwow::game {
@@ -44,6 +45,23 @@ void SnapshotSavedCameraConfigCVars(
   constexpr float kRadiansToDegrees = 57.29578f;
   FormatAndSetRuntimeConfigCVar("cameraSavedPitch",
                                 world_camera->target_pitch() * kRadiansToDegrees);
+}
+
+void RestoreSavedCameraConfigCVars(WorldSession& session) {
+  auto* const world_camera = session.world_camera();
+  if (world_camera == nullptr) {
+    return;
+  }
+
+  const auto& cvars = openwow::ui::game::CVarSystem::Instance();
+  const float distance =
+      std::clamp(cvars.GetCVarFloat("cameraSavedDistance"), 0.0f, 50.0f);
+  constexpr float kDegreesToRadians = 0.017453292f;
+  const float pitch =
+      cvars.GetCVarFloat("cameraSavedPitch") * kDegreesToRadians;
+
+  world_camera->SetDistance(distance);
+  world_camera->SetPitch(pitch);
 }
 
 void SyncRuntimeConfigAccountDataInternal(
@@ -253,6 +271,9 @@ void ApplyCachedAccountDataPayload(WorldSession& session,
     case AccountDataType::PerCharacterConfig:
 
       (void)openwow::core::ida::CVar_ParseConfigBuffer(data);
+      if (type == AccountDataType::PerCharacterConfig) {
+        RestoreSavedCameraConfigCVars(session);
+      }
       break;
     case AccountDataType::NumTypes:
       break;

@@ -13,7 +13,6 @@
 #include <utility>
 #include <vector>
 
-#include "openwow/foundation/diagnostics/logging.h"
 #include "openwow/foundation/text/ascii.h"
 #include "openwow/game/localization.h"
 #include "openwow/game/world_session.h"
@@ -73,29 +72,19 @@ constexpr const char* const kNames[] = {
     "__ow_keyboard_enabled",
     "__ow_enableKeyboard",
     runtime::kMouseCategoryHandlerFields[0].stored,
-    runtime::kMouseCategoryHandlerFields[0].direct,
     runtime::kMouseCategoryHandlerFields[1].stored,
-    runtime::kMouseCategoryHandlerFields[1].direct,
     runtime::kMouseCategoryHandlerFields[2].stored,
-    runtime::kMouseCategoryHandlerFields[2].direct,
     runtime::kMouseCategoryHandlerFields[3].stored,
-    runtime::kMouseCategoryHandlerFields[3].direct,
     runtime::kMouseCategoryHandlerFields[4].stored,
-    runtime::kMouseCategoryHandlerFields[4].direct,
     runtime::kMouseCategoryHandlerFields[5].stored,
-    runtime::kMouseCategoryHandlerFields[5].direct,
     runtime::kMouseCategoryHandlerFields[6].stored,
-    runtime::kMouseCategoryHandlerFields[6].direct,
     runtime::kMouseCategoryHandlerFields[7].stored,
-    runtime::kMouseCategoryHandlerFields[7].direct,
     runtime::kMouseCategoryHandlerFields[8].stored,
-    runtime::kMouseCategoryHandlerFields[8].direct,
     runtime::kMouseWheelHandlerFields.stored,
-    runtime::kMouseWheelHandlerFields.direct,
 };
 static_assert(runtime::kMouseCategoryHandlerFields.size() == 9,
               "metadata_field::kNames spells nine mouse-category handler "
-              "pairs; extend both when the canonical list grows");
+              "slots; extend both when the canonical list grows");
 
 using runtime::InternedLuaFieldKeyOrdinal;
 inline constexpr int kParentName =
@@ -127,15 +116,22 @@ inline constexpr int kEnableKeyboard =
 
 struct HandlerOrdinals {
   int stored;
-  int direct;
 };
 
 inline constexpr HandlerOrdinals kMouseWheelHandler{
     .stored = InternedLuaFieldKeyOrdinal(kNames,
                                          runtime::kMouseWheelHandlerFields.stored),
-    .direct = InternedLuaFieldKeyOrdinal(kNames,
-                                         runtime::kMouseWheelHandlerFields.direct),
 };
+
+inline constexpr auto kMouseCategoryHandlers = [] {
+  std::array<HandlerOrdinals, runtime::kMouseCategoryHandlerFields.size()>
+      handlers{};
+  for (std::size_t index = 0; index < handlers.size(); ++index) {
+    handlers[index].stored = InternedLuaFieldKeyOrdinal(
+        kNames, runtime::kMouseCategoryHandlerFields[index].stored);
+  }
+  return handlers;
+}();
 
 struct Source {
   int table;
@@ -484,6 +480,7 @@ constexpr const char* const kTextureFieldNames[] = {
     "__ow_texture_cleared",
     "__ow_portrait_unit",
     "__ow_portrait_guid",
+    "__ow_portrait_display_id",
     "__ow_tc_ul_x",
     "__ow_tc_ul_y",
     "__ow_tc_ll_x",
@@ -530,6 +527,8 @@ inline constexpr int kPortraitUnit =
     runtime::InternedLuaFieldKeyOrdinal(kTextureFieldNames, "__ow_portrait_unit");
 inline constexpr int kPortraitGuid =
     runtime::InternedLuaFieldKeyOrdinal(kTextureFieldNames, "__ow_portrait_guid");
+inline constexpr int kPortraitDisplayId = runtime::InternedLuaFieldKeyOrdinal(
+    kTextureFieldNames, "__ow_portrait_display_id");
 inline constexpr int kTexCoordUpperLeftX =
     runtime::InternedLuaFieldKeyOrdinal(kTextureFieldNames, "__ow_tc_ul_x");
 inline constexpr int kTexCoordUpperLeftY =
@@ -835,10 +834,19 @@ static void ApplyFrameTextureDefaultsExceptPath(
   state->tile_x = frame.tile_x;
   state->tile_y = frame.tile_y;
   state->clamp_v_wrap = frame.clamp_v_wrap;
-  state->color_r = frame.color_r;
-  state->color_g = frame.color_g;
-  state->color_b = frame.color_b;
-  state->color_a = frame.texture_alpha.value_or(frame.color_a);
+  state->solid_color_texture = frame.file.empty() && frame.has_vertex_color;
+  if (state->solid_color_texture) {
+    state->solid_color_r = frame.color_r;
+    state->solid_color_g = frame.color_g;
+    state->solid_color_b = frame.color_b;
+    state->solid_color_a = frame.color_a;
+    state->color_a = frame.texture_alpha.value_or(1.0F);
+  } else {
+    state->color_r = frame.color_r;
+    state->color_g = frame.color_g;
+    state->color_b = frame.color_b;
+    state->color_a = frame.texture_alpha.value_or(frame.color_a);
+  }
 
   const std::string_view alpha_mode = frame.alpha_mode;
   if (openwow::text::EqualsIgnoreCaseAscii(alpha_mode, "DISABLE")) {
@@ -851,7 +859,6 @@ static void ApplyFrameTextureDefaultsExceptPath(
     state->blend = openwow::render::ui::BlendMode::kModulate;
   }
 
-  state->solid_color_texture = frame.file.empty() && frame.has_vertex_color;
   state->has_gradient = frame.gradient.enabled;
   if (frame.gradient.enabled) {
     const auto colors = frame.gradient.ToUiRendererCornerColors();
@@ -1002,6 +1009,8 @@ static TextureRenderState& ResetTextureRenderStateForRegion(
 static void BindTexturePortraitFromTokens(
     const std::optional<std::string>& portrait_unit,
     const std::optional<std::string>& portrait_guid,
+    const std::optional<std::uint32_t> portrait_display_id,
+    const std::shared_ptr<const void>& request_owner,
     openwow::game::WorldSession* session,
     const openwow::vfs::VirtualFileSystem* vfs,
     openwow::render::PortraitRenderer* portraits,
@@ -1012,14 +1021,14 @@ static void BindTexturePortraitFromTokens(
     return;
   }
   const auto bind_dynamic_portrait =
-      [&](const openwow::game::WorldObject* object) {
-        if (object == nullptr || !object->IsUnit()) {
+      [&](const std::uint32_t display_id,
+          const std::uint32_t model_instance_id) {
+        if (display_id == 0) {
           return;
         }
 
         const auto binding =
-            portraits->Acquire(object->GetGuid(), object->GetDisplayId(),
-                               object->GetPrimaryM2InstanceId(),
+            portraits->Acquire(request_owner, display_id, model_instance_id,
                                *portrait_view_id, portrait_view_limit);
         if (!binding.texture.has_value()) {
           return;
@@ -1029,16 +1038,27 @@ static void BindTexturePortraitFromTokens(
         state.dynamic_texture_width = binding.texture->width;
         state.dynamic_texture_height = binding.texture->height;
         state.dynamic_texture_is_render_target = true;
+        state.replace_dynamic_texture_alpha_with_portrait_mask = true;
         state.texture_path.clear();
       };
 
-  if (portrait_unit.has_value()) {
-    bind_dynamic_portrait(detail::ResolveUnit(session, *portrait_unit));
+  const auto bind_object_portrait =
+      [&](const openwow::game::WorldObject* object) {
+        if (object != nullptr && object->IsUnit()) {
+          bind_dynamic_portrait(object->GetDisplayId(),
+                                object->GetPrimaryM2InstanceId());
+        }
+      };
+
+  if (portrait_display_id.has_value()) {
+    bind_dynamic_portrait(*portrait_display_id, 0);
+  } else if (portrait_unit.has_value()) {
+    bind_object_portrait(detail::ResolveUnit(session, *portrait_unit));
   } else if (portrait_guid.has_value() && !portrait_guid->empty()) {
     const auto raw_guid = static_cast<std::uint64_t>(
         std::strtoull(portrait_guid->c_str(), nullptr, 10));
     if (raw_guid != 0) {
-      bind_dynamic_portrait(
+      bind_object_portrait(
           session->objects().Get(openwow::game::ObjectGuid(raw_guid)));
     }
   }
@@ -1057,6 +1077,8 @@ void BuildTextureRenderStateFromLuaFieldsInto(
   }
   TextureRenderState& state =
       ResetTextureRenderStateForRegion(frame, out_state);
+  const runtime::TextureRenderStateSource* const native_source =
+      runtime::FindTextureRenderStateSource(L, table_index);
 
   const texture_field::Source source{
       .table = lua_absindex(L, table_index),
@@ -1081,11 +1103,28 @@ void BuildTextureRenderStateFromLuaFieldsInto(
   } else {
 
     state.texture_path = frame.file;
+    int portrait_display_id = 0;
+    const bool has_portrait_display_id = texture_field::ReadInteger(
+        L, source, texture_field::kPortraitDisplayId, &portrait_display_id);
     BindTexturePortraitFromTokens(
         texture_field::ReadString(L, source, texture_field::kPortraitUnit),
         texture_field::ReadString(L, source, texture_field::kPortraitGuid),
+        has_portrait_display_id && portrait_display_id > 0
+            ? std::optional<std::uint32_t>(
+                  static_cast<std::uint32_t>(portrait_display_id))
+            : std::nullopt,
+        native_source != nullptr ? native_source->portrait_request : nullptr,
         session, vfs, portraits, portrait_view_id, portrait_view_limit,
         state);
+  }
+
+  if (!state.texture_path.empty() || state.clear_texture ||
+      bgfx::isValid(state.dynamic_texture)) {
+    state.solid_color_texture = false;
+    state.solid_color_r = 1.0F;
+    state.solid_color_g = 1.0F;
+    state.solid_color_b = 1.0F;
+    state.solid_color_a = 1.0F;
   }
 
   TextureQuadUv custom_uv_quad{};
@@ -1126,22 +1165,22 @@ void BuildTextureRenderStateFromLuaFieldsInto(
   if (state.texture_path.empty() && !state.clear_texture) {
     if (texture_field::ReadNumber(L, source, texture_field::kSolidColorR,
                                   &component)) {
-      state.color_r = static_cast<float>(component);
+      state.solid_color_r = static_cast<float>(component);
       state.solid_color_texture = true;
     }
     if (texture_field::ReadNumber(L, source, texture_field::kSolidColorG,
                                   &component)) {
-      state.color_g = static_cast<float>(component);
+      state.solid_color_g = static_cast<float>(component);
       state.solid_color_texture = true;
     }
     if (texture_field::ReadNumber(L, source, texture_field::kSolidColorB,
                                   &component)) {
-      state.color_b = static_cast<float>(component);
+      state.solid_color_b = static_cast<float>(component);
       state.solid_color_texture = true;
     }
     if (texture_field::ReadNumber(L, source, texture_field::kSolidColorA,
                                   &component)) {
-      state.color_a = static_cast<float>(component);
+      state.solid_color_a = static_cast<float>(component);
       state.solid_color_texture = true;
     }
   }
@@ -1226,8 +1265,19 @@ void BuildTextureRenderStateInto(
   } else {
     state.texture_path = frame.file;
     BindTexturePortraitFromTokens(source->portrait_unit, source->portrait_guid,
+                                  source->portrait_display_id,
+                                  source->portrait_request,
                                   session, vfs, portraits, portrait_view_id,
                                   portrait_view_limit, state);
+  }
+
+  if (!state.texture_path.empty() || state.clear_texture ||
+      bgfx::isValid(state.dynamic_texture)) {
+    state.solid_color_texture = false;
+    state.solid_color_r = 1.0F;
+    state.solid_color_g = 1.0F;
+    state.solid_color_b = 1.0F;
+    state.solid_color_a = 1.0F;
   }
 
   if (source->has_tex_coord_quad) {
@@ -1263,19 +1313,19 @@ void BuildTextureRenderStateInto(
 
   if (state.texture_path.empty() && !state.clear_texture) {
     if (source->solid_color[0].has_value()) {
-      state.color_r = static_cast<float>(*source->solid_color[0]);
+      state.solid_color_r = static_cast<float>(*source->solid_color[0]);
       state.solid_color_texture = true;
     }
     if (source->solid_color[1].has_value()) {
-      state.color_g = static_cast<float>(*source->solid_color[1]);
+      state.solid_color_g = static_cast<float>(*source->solid_color[1]);
       state.solid_color_texture = true;
     }
     if (source->solid_color[2].has_value()) {
-      state.color_b = static_cast<float>(*source->solid_color[2]);
+      state.solid_color_b = static_cast<float>(*source->solid_color[2]);
       state.solid_color_texture = true;
     }
     if (source->solid_color[3].has_value()) {
-      state.color_a = static_cast<float>(*source->solid_color[3]);
+      state.solid_color_a = static_cast<float>(*source->solid_color[3]);
       state.solid_color_texture = true;
     }
   }
@@ -1435,17 +1485,10 @@ static bool ReadLuaOptionalBooleanField(lua_State* L,
 static bool LuaFrameHasHandler(lua_State* L,
                                const metadata_field::Source& source,
                                const metadata_field::HandlerOrdinals& handler) {
-  metadata_field::Get(L, source, handler.stored);
+  metadata_field::RawGet(L, source, handler.stored);
   const bool stored_handler = lua_isfunction(L, -1) != 0;
   lua_pop(L, 1);
-  if (stored_handler) {
-    return true;
-  }
-
-  metadata_field::Get(L, source, handler.direct);
-  const bool direct_handler = lua_isfunction(L, -1) != 0;
-  lua_pop(L, 1);
-  return direct_handler;
+  return stored_handler;
 }
 
 static bool LuaFrameUsesMouseCategory(lua_State* L,
@@ -1459,7 +1502,12 @@ static bool LuaFrameUsesMouseCategory(lua_State* L,
     return explicit_value;
   }
 
-  return openwow::ui::framexml::StockConstructorEnablesMouse(kind);
+  return openwow::ui::framexml::StockConstructorEnablesMouse(kind) ||
+         std::any_of(metadata_field::kMouseCategoryHandlers.begin(),
+                     metadata_field::kMouseCategoryHandlers.end(),
+                     [&](const metadata_field::HandlerOrdinals& handler) {
+                       return LuaFrameHasHandler(L, source, handler);
+                     });
 }
 
 static bool LuaFrameUsesMouseWheelCategory(

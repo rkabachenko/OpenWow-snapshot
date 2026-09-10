@@ -329,4 +329,35 @@ const char* GetUnitFieldEventName(std::uint32_t field_index) {
     return s_unit_field_event_names[field_index];
 }
 
+const char* GetUnitFieldEventNameForUpdatedField(
+    const std::uint32_t field_index,
+    std::uint32_t* const out_event_id) {
+    if (field_index >= kUnitFieldEventSlotCount) {
+        return nullptr;
+    }
+
+    if (s_unit_field_event_names[field_index] != nullptr) {
+        if (out_event_id != nullptr) {
+            *out_event_id = field_index;
+        }
+        return s_unit_field_event_names[field_index];
+    }
+
+    static constexpr std::uint32_t kMultiWordEventStarts[] = {
+        0u, 2u, 12u, 125u, 132u,
+    };
+    for (const std::uint32_t event_id : kMultiWordEventStarts) {
+        const std::uint32_t field_count =
+            GetFieldCallbackSize(event_id) / sizeof(std::uint32_t);
+        if (field_index > event_id && field_index < event_id + field_count) {
+            if (out_event_id != nullptr) {
+                *out_event_id = event_id;
+            }
+            return s_unit_field_event_names[event_id];
+        }
+    }
+
+    return nullptr;
+}
+
 }

@@ -34,6 +34,10 @@ int PlayerQuestLogChangedCallback(std::uint32_t guid_low,
 
 const char* GetUnitFieldEventName(std::uint32_t field_index);
 
+const char* GetUnitFieldEventNameForUpdatedField(
+    std::uint32_t field_index,
+    std::uint32_t* out_event_id);
+
 void Player_RegisterUnitFieldEventCallbacks(void* player_obj);
 
 void Player_UnregisterUnitFieldEventCallbacks(void* player_obj);

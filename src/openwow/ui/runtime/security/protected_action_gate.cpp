@@ -1,9 +1,11 @@
 #include "openwow/ui/runtime/security/protected_action_gate.h"
 
 #include "openwow/core/decimal_parse.h"
+#include "openwow/foundation/diagnostics/logging.h"
 #include "openwow/ui/game/game_events.h"
 #include "openwow/ui/game/script_event_dispatch.h"
 #include "openwow/ui/game/secure_execution.h"
+#include "openwow/ui/lua_taint_api.h"
 
 extern "C" {
 #include <lua.hpp>
@@ -191,13 +193,36 @@ void GameUI_ReportProtectedActionFailure(
     ~ReportingGuard() { *flag = false; }
   } const reporting_guard{&reporting};
 
-  const std::string call = ResolveFailedActionName(state);
-
   const auto& secure = SecureExecution::Get();
   const auto taint_source = secure.CurrentTaint(state);
   if (taint_source == kSecureTaintSourceId) {
     return;
   }
+
+  std::string call;
+  std::string call_site;
+  std::string local_protected = "unavailable";
+  {
+    const openwow::ui::ScopedNeutralLuaExecutionTaint neutral_taint(state);
+    call = ResolveFailedActionName(state);
+    call_site = ResolveTaintLogCallSite(state);
+    if (state != nullptr && lua_istable(state, 1)) {
+      lua_pushliteral(state, "__ow_protected");
+      lua_rawget(state, 1);
+      local_protected = lua_toboolean(state, -1) ? "1" : "0";
+      lua_pop(state, 1);
+    }
+  }
+  const std::string source_name = secure.TaintSourceName(taint_source);
+  openwow::diagnostics::Log(
+      openwow::diagnostics::LogLevel::kWarn,
+      "Protected action rejected: action=" + call + " source=" +
+          (source_name.empty() ? std::string(kAnonymousTaintLogName) : source_name) +
+          " mode=" + std::to_string(static_cast<int>(mode)) +
+          " combat=" + (secure.InCombatLockdown() ? "1" : "0") +
+          " hardware_grant=" + (secure.HardwareActionGranted() ? "1" : "0") +
+          " local_protected=" + local_protected +
+          " call_site=" + (call_site.empty() ? "<native>" : call_site));
 
   const bool anonymous_source = taint_source == kAnonymousTaintSourceId;
   if (!anonymous_source) {
@@ -205,7 +230,7 @@ void GameUI_ReportProtectedActionFailure(
                             ? events::ADDON_ACTION_FORBIDDEN
                             : events::ADDON_ACTION_BLOCKED;
     ScriptEventDispatch::Get().FireEventArgs(
-        event, {secure.TaintSourceName(taint_source), call});
+        event, {source_name, call});
   } else {
     const char* event = mode == ProtectedActionFailureMode::kForbidden
                             ? events::MACRO_ACTION_FORBIDDEN
@@ -222,8 +247,8 @@ void GameUI_ReportProtectedActionFailure(
               ? kInCombatTaintLogPrefix
               : kTaintLogPrefix)
       << (anonymous_source ? std::string(kAnonymousTaintLogName)
-                           : secure.TaintSourceName(taint_source))
-      << " - " << ResolveTaintLogCallSite(state) << ' ' << call << '\n';
+                           : source_name)
+      << " - " << call_site << ' ' << call << '\n';
 }
 
 void GameUI_ReportProtectedActionFailure(

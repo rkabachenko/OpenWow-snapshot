@@ -118,6 +118,9 @@ bool SetItemTooltip(TooltipSystem& tooltip,
 
   openwow::ui::TooltipItemInstanceData instance_data;
   instance_data.permanent_enchant_id = item->GetPermanentEnchant();
+  instance_data.socket_enchant_ids = {
+      item->GetSocketEnchant(0), item->GetSocketEnchant(1),
+      item->GetSocketEnchant(2)};
   instance_data.gem_item_ids[0] = ResolveGemItemId(tooltip, item->GetSocketEnchant(0));
   instance_data.gem_item_ids[1] = ResolveGemItemId(tooltip, item->GetSocketEnchant(1));
   instance_data.gem_item_ids[2] = ResolveGemItemId(tooltip, item->GetSocketEnchant(2));
@@ -324,6 +327,8 @@ TooltipVoidResult SetTooltipHyperlink(
 
     openwow::ui::TooltipItemInstanceData instance_data;
     instance_data.permanent_enchant_id = parse_u32(field(2));
+    instance_data.socket_enchant_ids = {
+        parse_u32(field(3)), parse_u32(field(4)), parse_u32(field(5))};
     instance_data.gem_item_ids[0] = ResolveGemItemId(tooltip, parse_u32(field(3)));
     instance_data.gem_item_ids[1] = ResolveGemItemId(tooltip, parse_u32(field(4)));
     instance_data.gem_item_ids[2] = ResolveGemItemId(tooltip, parse_u32(field(5)));

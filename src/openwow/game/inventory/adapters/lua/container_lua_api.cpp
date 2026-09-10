@@ -1694,8 +1694,6 @@ int LuaSetBagPortraitTexture(lua_State* L) {
     return luaL_error(L, "Invalid slot in SetBagPortraitTexture");
   }
 
-  SetTextureOverrideField(L, 1, nullptr);
-
   const auto* bag_info = ResolveBagPortraitBagInfo(L, zero_based_slot);
   if (bag_info == nullptr || bag_info->IsEmpty()) {
     return 0;

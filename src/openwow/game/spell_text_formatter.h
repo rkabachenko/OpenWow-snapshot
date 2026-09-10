@@ -14,6 +14,7 @@ class DbcLoader;
 namespace openwow::game {
 
 class WorldSession;
+class ObjectManager;
 
 class SpellTextFormatter {
  public:
@@ -53,7 +54,9 @@ class SpellTextFormatter {
       std::int32_t name_size,
       const WorldStateValueResolver& resolve_world_state = {},
       std::int32_t current_time_seconds = 0,
-      std::int32_t achievement_id = 0);
+      std::int32_t achievement_id = 0,
+      const ObjectManager* objects = nullptr,
+      const openwow::data::dbc::DbcLoader* dbc = nullptr);
 
   static bool ExpandSimpleIntegerVariable(
       const void* data,

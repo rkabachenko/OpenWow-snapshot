@@ -180,6 +180,9 @@ openwow::ui::TooltipItemInstanceData BuildTooltipInstanceDataFromItem(
     const openwow::game::ItemInstance &item) {
   openwow::ui::TooltipItemInstanceData instance_data;
   instance_data.permanent_enchant_id = item.GetPermanentEnchant();
+  instance_data.socket_enchant_ids = {
+      item.GetSocketEnchant(0), item.GetSocketEnchant(1),
+      item.GetSocketEnchant(2)};
   instance_data.gem_item_ids[0] = ResolveTooltipGemId(tooltip, item.GetSocketEnchant(0));
   instance_data.gem_item_ids[1] = ResolveTooltipGemId(tooltip, item.GetSocketEnchant(1));
   instance_data.gem_item_ids[2] = ResolveTooltipGemId(tooltip, item.GetSocketEnchant(2));
@@ -206,6 +209,8 @@ openwow::ui::TooltipItemInstanceData BuildTooltipInstanceDataFromMailAttachment(
     const openwow::game::MailAttachment &attachment) {
   openwow::ui::TooltipItemInstanceData instance_data;
   instance_data.permanent_enchant_id = attachment.enchant_id;
+  instance_data.socket_enchant_ids = {
+      attachment.gem_ids[0], attachment.gem_ids[1], attachment.gem_ids[2]};
   instance_data.gem_item_ids[0] = ResolveTooltipGemId(tooltip, attachment.gem_ids[0]);
   instance_data.gem_item_ids[1] = ResolveTooltipGemId(tooltip, attachment.gem_ids[1]);
   instance_data.gem_item_ids[2] = ResolveTooltipGemId(tooltip, attachment.gem_ids[2]);
@@ -231,6 +236,9 @@ openwow::ui::TooltipItemInstanceData BuildTooltipInstanceDataFromTradeSlot(
     const TooltipSystem& tooltip, const openwow::game::TradeSlotItem &slot) {
   openwow::ui::TooltipItemInstanceData instance_data;
   instance_data.permanent_enchant_id = slot.permanent_enchant;
+  instance_data.socket_enchant_ids = {
+      slot.socket_enchants[0], slot.socket_enchants[1],
+      slot.socket_enchants[2]};
   instance_data.gem_item_ids[0] = ResolveTooltipGemId(tooltip, slot.socket_enchants[0]);
   instance_data.gem_item_ids[1] = ResolveTooltipGemId(tooltip, slot.socket_enchants[1]);
   instance_data.gem_item_ids[2] = ResolveTooltipGemId(tooltip, slot.socket_enchants[2]);
@@ -1166,6 +1174,13 @@ TooltipInventoryResult SetTooltipInventoryItem(
     openwow::ui::TooltipItemInstanceData instance_data;
     instance_data.permanent_enchant_id = item->GetEnchantId(
         static_cast<std::uint8_t>(openwow::game::EnchantmentSlot::Permanent));
+    instance_data.socket_enchant_ids = {
+        item->GetEnchantId(static_cast<std::uint8_t>(
+            openwow::game::EnchantmentSlot::Socket1)),
+        item->GetEnchantId(static_cast<std::uint8_t>(
+            openwow::game::EnchantmentSlot::Socket2)),
+        item->GetEnchantId(static_cast<std::uint8_t>(
+            openwow::game::EnchantmentSlot::Socket3))};
     instance_data.gem_item_ids[0] = ResolveTooltipGemId(
         tooltip, item->GetEnchantId(
             static_cast<std::uint8_t>(openwow::game::EnchantmentSlot::Socket1)));
@@ -1221,6 +1236,13 @@ TooltipInventoryResult SetTooltipInventoryItem(
       openwow::ui::TooltipItemInstanceData instance_data;
       instance_data.permanent_enchant_id = inspected.detail_values[
           static_cast<std::size_t>(openwow::game::EnchantmentSlot::Permanent)];
+      instance_data.socket_enchant_ids = {
+          inspected.detail_values[static_cast<std::size_t>(
+              openwow::game::EnchantmentSlot::Socket1)],
+          inspected.detail_values[static_cast<std::size_t>(
+              openwow::game::EnchantmentSlot::Socket2)],
+          inspected.detail_values[static_cast<std::size_t>(
+              openwow::game::EnchantmentSlot::Socket3)]};
       instance_data.gem_item_ids[0] = ResolveTooltipGemId(
           tooltip, inspected.detail_values[static_cast<std::size_t>(
                  openwow::game::EnchantmentSlot::Socket1)]);
@@ -1388,6 +1410,13 @@ TooltipInboxResult SetTooltipInboxItem(TooltipSystem& tooltip,
   instance_data.permanent_enchant_id =
       attachment->enchants[static_cast<std::size_t>(openwow::game::EnchantmentSlot::Permanent)]
           .enchant_id;
+  instance_data.socket_enchant_ids = {
+      attachment->enchants[static_cast<std::size_t>(
+          openwow::game::EnchantmentSlot::Socket1)].enchant_id,
+      attachment->enchants[static_cast<std::size_t>(
+          openwow::game::EnchantmentSlot::Socket2)].enchant_id,
+      attachment->enchants[static_cast<std::size_t>(
+          openwow::game::EnchantmentSlot::Socket3)].enchant_id};
   instance_data.gem_item_ids[0] = ResolveTooltipGemId(
       tooltip, attachment->enchants[static_cast<std::size_t>(openwow::game::EnchantmentSlot::Socket1)]
              .enchant_id);

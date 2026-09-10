@@ -2,6 +2,7 @@
 
 #include "openwow/core/client_init.h"
 #include "openwow/core/storm_utils.h"
+#include "openwow/foundation/diagnostics/logging.h"
 #include "openwow/game/actions/bindings/application/binding_profiles.h"
 #include "openwow/game/actions/bindings/adapters/xml/binding_xml_adapter.h"
 #include "openwow/net/wotlk/addon_handshake.h"
@@ -89,7 +90,68 @@ const char *ResolveCharacterName(const AddonRuntimeIdentity &identity) {
 
 bool AddonRunsInSecureContext(const openwow::ui::AddOnState &addon_state) {
 
-  return addon_state.security == 0;
+  return addon_state.EffectiveSecurity() == 0;
+}
+
+std::optional<std::array<std::uint8_t, 16>> VerifyBuiltinUiContent(
+    const openwow::vfs::VirtualFileSystem& vfs,
+    const openwow::ui::AddOnState& addon, UiLoadStatusSink& status) {
+  const auto mount = openwow::ui::AddonManager::ResolveBuiltinUiAddonMount(
+      vfs, addon.name);
+  const auto reject = [&](const std::string& path, const std::string& reason) {
+    const std::string message = "Built-in UI content rejected addon=" + addon.name +
+        " path=" + path + " stage=secure-load reason=" + reason;
+    status.AppendStatus(0, message);
+    openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kWarn, message);
+  };
+  if (!mount.has_value()) {
+    reject(addon.toc_path, "TOC no longer resolves to packaged UI content");
+    return std::nullopt;
+  }
+
+  openwow::vfs::VirtualFileSystem builtin_content;
+  builtin_content.Mount(*mount);
+  const auto bindings_path = openwow::vfs::MakeClientPathIdentity(
+      "/Interface/AddOns/" + addon.name + "/Bindings.xml");
+  bool valid = true;
+  std::size_t verified_files = 0;
+  const auto digest = openwow::net::wotlk::ComputeAddonContentDigest(
+      addon.name,
+      [&](const std::string& client_path, std::vector<std::uint8_t>& bytes) {
+        const auto identity = openwow::vfs::MakeClientPathIdentity(client_path);
+        const auto actual = vfs.Resolve(identity.display_path);
+        const auto expected = builtin_content.Resolve(identity.display_path);
+        // Bindings.xml is optional and is probed separately from the TOC.
+        if (!actual.has_value() && !expected.has_value() &&
+            identity.lookup_path == bindings_path.lookup_path) {
+          return false;
+        }
+        std::error_code ec;
+        if (!actual.has_value() || !expected.has_value() ||
+            !std::filesystem::equivalent(*actual, *expected, ec) || ec) {
+          valid = false;
+          reject(client_path, "missing packaged file or shadowed source; resolved=" +
+              (actual.has_value() ? actual->string() : "<missing>"));
+          return false;
+        }
+        auto contents = vfs.ReadFileBytes(identity.display_path);
+        if (!contents.has_value()) {
+          valid = false;
+          reject(client_path, "packaged file read failed");
+          return false;
+        }
+        bytes = std::move(*contents);
+        ++verified_files;
+        return true;
+      });
+  if (!valid) {
+    return std::nullopt;
+  }
+  openwow::diagnostics::Log(
+      openwow::diagnostics::LogLevel::kInfo,
+      "Built-in UI trusted addon=" + addon.name + " files=" +
+          std::to_string(verified_files) + " source=" + mount->source_root.string());
+  return digest;
 }
 
 class ScopedAddonExecutionContext {
@@ -591,10 +653,28 @@ bool AddonRuntimeLoader::LoadInternal(
 
   UiLoadStatusBuffer addon_status;
   const bool secure_context = AddonRunsInSecureContext(*addon_state);
+  auto expected_digest = addon_state->secure_content_digest;
+  if (addon_state->is_builtin_ui) {
+    const auto builtin_digest = VerifyBuiltinUiContent(vfs_, *addon_state, addon_status);
+    if (!builtin_digest.has_value()) {
+      AppendAddonStatus(context.status_sink, addon_state->name, addon_status);
+      addons_data_.SetAddonLoadedState(addon_state->name.c_str(), false, false);
+      active_chain.erase(addon_state->name);
+      return false;
+    }
+    expected_digest = *builtin_digest;
+  }
   {
     const ScopedLuaStack stack(lua_state_);
     const ScopedAddonExecutionContext execution_scope(
         secure_execution_, &lua_state_, secure_context, addon_state->name);
+
+    // SavedVariables are part of the add-on's initial Lua environment.  They
+    // must be restored before any file in the TOC runs so add-on code can keep
+    // references to the restored tables instead of references to temporary
+    // defaults that are replaced after execution.
+    (void)LoadAddonSavedVariables(&lua_state_, addon_state->name,
+                                  context.identity, &addon_status);
 
     if (!ui_manager_.LoadToc(addon_state->toc_path, &addon_status,
                              context.progress, addon_state->name, nullptr)) {
@@ -612,9 +692,6 @@ bool AddonRuntimeLoader::LoadInternal(
           LoadFile(binding_profiles_, &lua_state_, &vfs_, bindings_xml_path,
                    &addon_status, nullptr);
     }
-    (void)LoadAddonSavedVariables(&lua_state_, addon_state->name,
-                                  context.identity, &addon_status);
-
     if (secure_context) {
       const auto actual_digest = openwow::net::wotlk::ComputeAddonContentDigest(
           addon_state->name,
@@ -632,7 +709,7 @@ bool AddonRuntimeLoader::LoadInternal(
             bytes = std::move(*contents);
             return true;
           });
-      if (actual_digest != addon_state->secure_content_digest) {
+      if (actual_digest != expected_digest) {
         (void)openwow::core::RequestClientShutdownWithErrorCode(
             kSecureAddonDigestMismatchErrorCode);
         addon_status.AppendStatus(

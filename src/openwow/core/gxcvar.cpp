@@ -448,6 +448,10 @@ const char *GetRetailDefaultGxApiCVarValue() {
 }
 
 bool IsSimplifiedChineseClientLocale() {
+  const auto &cvars = openwow::ui::game::CVarSystem::Instance();
+  if (cvars.Exists("locale") && cvars.GetCVar("locale") == "zhCN") {
+    return true;
+  }
   return openwow::game::ClientConfig::Get().GetLocale() == "zhCN";
 }
 
@@ -1398,6 +1402,24 @@ bool GxRestartCurrentDisplayMode() {
   return ApplyGxRestart(false);
 }
 
+bool GxToggleFullscreen() {
+  GxDisplayCVarState requested_state = s_gx_restart_runtime.active_state;
+  requested_state.window_mode =
+      openwow::platform::WindowManager::Get().IsFullscreen() ? 1 : 0;
+
+  const auto applied_state = TryApplyDisplayState(requested_state);
+  if (!applied_state.has_value()) {
+    EmitDisplayRestartFailure(kUnableToSetRequestedDisplayMode);
+    return false;
+  }
+
+  s_gx_restart_runtime.active_state = *applied_state;
+  s_gx_restart_runtime.last_good_state = *applied_state;
+  (void)openwow::ui::game::CVarSystem::Instance().SetRegisteredCVarValueDirect(
+      "gxWindow", FormatDisplayInteger(applied_state->window_mode));
+  return true;
+}
+
 void GxCVarRegister() {
   using F = openwow::ui::game::CVarFlags;
   auto &sys = openwow::ui::game::CVarSystem::Instance();
@@ -1596,7 +1618,7 @@ MacHardwareClassification ClassifyMacHardware(
   return result;
 }
 
-#if defined(__APPLE__)
+#if defined(__APPLE__) && !defined(OPENWOW_PLATFORM_IOS)
 template <typename T>
 bool ReadMacHardwareSysctl(const char *name, T &value) {
   std::size_t size = sizeof(value);
@@ -1648,7 +1670,7 @@ void DetectHardware(const openwow::vfs::VirtualFileSystem *vfs) {
     s_hw_info.driver_lo = adapter_identity.driver_lo;
   }
 
-#if defined(__APPLE__)
+#if defined(__APPLE__) && !defined(OPENWOW_PLATFORM_IOS)
   const MacHardwareSpecs mac_specs = CollectMacHardwareSpecs(
       has_adapter_identity ? adapter_identity.video_memory_bytes : 0u);
   const MacHardwareClassification mac_classification =

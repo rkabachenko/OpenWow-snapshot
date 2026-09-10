@@ -7,6 +7,7 @@
 #include <bgfx/bgfx.h>
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -63,6 +64,10 @@ class FloatingTextRenderer {
 
   bool Initialize();
 
+  void SetFontPath(std::string path);
+  void SetFileLoader(
+      std::function<std::vector<std::uint8_t>(const std::string&)> loader);
+
   void Shutdown();
   void ReleaseRendererDeviceResources();
   bool RestoreRendererDeviceResources();
@@ -103,8 +108,11 @@ class FloatingTextRenderer {
   std::vector<FloatingTextEntry> entries_;
   core::ClientCrtRandom random_;
   openwow::render::ui::TextRenderer text_renderer_;
+  std::function<std::vector<std::uint8_t>(const std::string&)> file_loader_;
+  std::string font_path_{"Fonts\\FRIZQT__.TTF"};
   int font_pixel_height_{0};
   bool initialized_{false};
+  bool font_failure_reported_{false};
 
   static constexpr float kDefaultLife = 1.5f;
   static constexpr float kCritLife = 2.0f;
@@ -112,8 +120,6 @@ class FloatingTextRenderer {
   static constexpr float kCritFloatSpeed = 2.5f;
   static constexpr float kNormalScale = 1.0f;
   static constexpr std::size_t kMaxEntries = 64;
-
-  static constexpr const char* kDamageTextFontPath = "Fonts\\FRIZQT__.TTF";
 
   [[nodiscard]] static bool WorldToScreen(float wx, float wy, float wz,
                                            const float* view_mtx,

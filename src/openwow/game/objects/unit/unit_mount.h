@@ -28,6 +28,7 @@ public:
   void SetDisplayScale(float scale) noexcept { display_scale_ = scale; }
   [[nodiscard]] float DisplayScale() const noexcept { return display_scale_; }
 
+  // Borrowed render handle. MountRenderer retains destruction ownership.
   void SetOverlayM2InstanceId(std::uint32_t id) noexcept {
     overlay_m2_instance_id_ = id;
   }
@@ -83,14 +84,15 @@ public:
   }
 
   [[nodiscard]] bool HasCompletedTransition() const;
+  void InitializeFromDescriptor(const CGUnit_C &owner) noexcept;
   void CompleteTransition(CGUnit_C &owner, const WorldSession &session);
   void SetPendingTransition(std::uint32_t spell_id,
                             std::uint32_t cached_mount_display) noexcept;
   void HandleDismountPacket(CGUnit_C &owner);
-  void Dismount(CGUnit_C &owner, bool update_spell_visuals);
+  void Dismount(CGUnit_C &owner, bool restore_collision_bounds);
   void ApplyDisplayChange(CGUnit_C &owner, const WorldSession &session,
                           std::uint32_t mount_display_id);
-  void ReleaseOverlayM2Instance(CGUnit_C &owner);
+  void ClearOverlayM2InstanceBinding() noexcept;
 
 private:
   float display_scale_{1.0f};

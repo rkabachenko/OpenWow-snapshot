@@ -181,7 +181,8 @@ public:
       std::array<std::uint16_t, 3> additional_active_doodad_sets = {},
       std::uint64_t object_guid = 0u);
   void PublishStreamingWmoGroup(WmoOwnerId owner, const data::wmo::WmoRoot &root,
-                                const data::wmo::WmoGroup &group, std::uint16_t group_index,
+                                std::span<const std::uint16_t> doodad_refs,
+                                std::uint32_t group_flags, std::uint16_t group_index,
                                 const RenderMatrix4x4 &wmo_model_matrix);
   void UnloadWmoInstance(WmoOwnerId owner);
 

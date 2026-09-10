@@ -407,6 +407,7 @@ void CMovementData::ApplySplineMovementMode(const SplineMovementMode mode) {
 }
 
 void CMovementData::ClearParentMovement() {
+  runtime_flags2_ &= ~kHasParentMovementUpdateBitMask;
   vehicle_seat_transfer_runtime_flags_ &= ~kHasParentMovementUpdateBitMask;
   if (has_parent_movement_) {
     has_parent_movement_ = false;
@@ -918,28 +919,30 @@ void CMovementData::RefreshGravityState() {
   const std::uint32_t old_flags = runtime_flags_;
   const bool was_falling =
       (old_flags & openwow::game::kMoveFlagFalling) != 0u;
-  const bool had_pending_root =
-      (old_flags & openwow::game::kMoveFlagPendingRoot) != 0u;
-
-  if (was_falling || had_pending_root) {
-    if (was_falling) {
-      runtime_flags_ &= ~(openwow::game::kMoveFlagFalling |
-                          openwow::game::kMoveFlagFallingFar);
-    }
-    if (had_pending_root) {
-      runtime_flags_ =
-          (runtime_flags_ & 0xFF203F00u) | openwow::game::kMoveFlagRoot;
-    }
-    SnapshotStateForDirectionRecompute();
-    if ((runtime_flags_ & openwow::game::kMoveFlagFalling) == 0u) {
-      current_speed_ = CalculateCurrentSpeed(false);
-    }
-  }
+  StopFalling();
 
   ProcessPendingMovementStops();
   if (was_falling &&
       (runtime_flags2_ & openwow::game::kMoveFlag2FullSpeedPitching) == 0u) {
     HandleRemotePoseSnapshot();
+  }
+}
+
+void CMovementData::StopFalling() {
+  const bool was_falling =
+      (runtime_flags_ & openwow::game::kMoveFlagFalling) != 0u;
+  const bool had_pending_root =
+      (runtime_flags_ & openwow::game::kMoveFlagPendingRoot) != 0u;
+  if (was_falling) {
+    runtime_flags_ &= ~(openwow::game::kMoveFlagFalling |
+                        openwow::game::kMoveFlagFallingFar);
+  }
+  if (had_pending_root) {
+    runtime_flags_ =
+        (runtime_flags_ & 0xFF203F00u) | openwow::game::kMoveFlagRoot;
+  }
+  if (was_falling || had_pending_root) {
+    ApplyDirectionStateTransition(SpeedRefreshTiming::kAfterDirection);
   }
 }
 

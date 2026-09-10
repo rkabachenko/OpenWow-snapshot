@@ -10,6 +10,7 @@
 #include "openwow/ui/framexml/framexml_parser.h"
 #include "openwow/ui/game/api/game_lua_api_profession.h"
 #include "openwow/ui/game/autocomplete.h"
+#include "openwow/ui/game/cvar_system.h"
 #include "openwow/ui/game/game_ui_manager.h"
 #include "openwow/ui/game/runtime/framexml_runtime_loader.h"
 #include "openwow/ui/game/runtime/world_lua_runtime.h"
@@ -19,7 +20,14 @@
 #include "openwow/ui/game/ui_error_manager.h"
 #include "openwow/foundation/diagnostics/logging.h"
 
+#include <algorithm>
+
 namespace openwow::ui::game::runtime {
+
+namespace {
+constexpr std::array<const char*, 2> kMinimapZoomCVars = {
+    "minimapZoom", "minimapInsideZoom"};
+}
 
 WorldUiRuntimeHost::WorldUiRuntimeHost(GameUIManager& owner) noexcept
     : owner_(owner) {}
@@ -89,6 +97,25 @@ bool WorldUiRuntimeHost::Initialize(
   }
 
   openwow::input::InputManager::Get().SyncMousePositionFromWindow();
+  const auto restore_minimap_zoom = [this]() {
+    const auto& cvars = CVarSystem::Instance();
+    owner_.minimap_state_.SetZoomLevels(
+        static_cast<std::uint32_t>(std::clamp(cvars.GetCVarInt("minimapZoom"), 0, 5)),
+        static_cast<std::uint32_t>(std::clamp(cvars.GetCVarInt("minimapInsideZoom"), 0, 5)));
+  };
+  for (std::size_t i = 0; i < kMinimapZoomCVars.size(); ++i) {
+    minimap_zoom_callbacks_[i] = CVarSystem::Instance().AddCallback(
+        kMinimapZoomCVars[i],
+        [restore_minimap_zoom](const std::string&, const std::string&) {
+          restore_minimap_zoom();
+        });
+    if (minimap_zoom_callbacks_[i] == 0) {
+      openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kError,
+          std::string("Minimap zoom stage=bind source=world-ui cvar=") +
+              kMinimapZoomCVars[i] + " reason=cvar-unavailable");
+    }
+  }
+  restore_minimap_zoom();
   lua_State* const lua = owner_.world_lua_runtime_->state();
   owner_.frame_event_runtime_.Initialize(lua, session);
   owner_.movie_frame_runtime_.BindLuaState(lua);
@@ -159,9 +186,14 @@ void WorldUiRuntimeHost::SaveSavedVariables() {
 
 void WorldUiRuntimeHost::Shutdown() {
   owner_.frame_input_router_.SetRunningMacroInputButtonProvider({});
-  owner_.lifecycle_commands_ = nullptr;
+  owner_.BindWorldUiLifecycleCommands(nullptr);
   if (!initialized()) {
     return;
+  }
+
+  for (std::size_t i = 0; i < kMinimapZoomCVars.size(); ++i) {
+    CVarSystem::Instance().RemoveCallback(kMinimapZoomCVars[i], minimap_zoom_callbacks_[i]);
+    minimap_zoom_callbacks_[i] = 0;
   }
 
   if (owner_.session_ != nullptr) {

@@ -87,7 +87,8 @@ class SpellCastRuntime {
                                std::uint64_t target_guid = 0,
                                std::uint32_t* blocking_mechanic_out = nullptr);
   [[nodiscard]] SpellCastResult ValidatePlayerCastRequest(
-      const WorldSession& session, std::uint32_t spell_id) const;
+      const WorldSession& session, std::uint32_t spell_id,
+      ObjectGuid interaction_target = {}) const;
 
   void OnSpellStart(std::uint32_t spell_id, std::uint8_t cast_count,
                     const ObjectGuid& caster, const ObjectGuid& target);

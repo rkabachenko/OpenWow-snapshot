@@ -809,14 +809,14 @@ bool IsLocalPlayerSpellEvent(const WorldSession& session,
 
 bool ReadLearnedSpellPacket(const net::wotlk::WorldPacket& pkt,
                             std::uint32_t& spell_id,
-                            std::uint16_t& learn_flags) {
-  if (pkt.payload.size() < sizeof(spell_id) + sizeof(learn_flags)) {
+                            std::uint16_t& slot_or_zero) {
+  if (pkt.payload.size() < sizeof(spell_id) + sizeof(slot_or_zero)) {
     return false;
   }
 
   std::memcpy(&spell_id, pkt.payload.data(), sizeof(spell_id));
-  std::memcpy(&learn_flags, pkt.payload.data() + sizeof(spell_id),
-              sizeof(learn_flags));
+  std::memcpy(&slot_or_zero, pkt.payload.data() + sizeof(spell_id),
+              sizeof(slot_or_zero));
   return true;
 }
 
@@ -900,12 +900,12 @@ void WorldSession::HandleLearnedSpell(const net::wotlk::WorldPacket& pkt) {
   }
 
   std::uint32_t learned_spell_id = 0;
-  std::uint16_t learn_flags = 0;
-  if (!ReadLearnedSpellPacket(pkt, learned_spell_id, learn_flags)) {
+  std::uint16_t slot_or_zero = 0;
+  if (!ReadLearnedSpellPacket(pkt, learned_spell_id, slot_or_zero)) {
     return;
   }
 
-  if (learn_flags != 0) {
+  if (slot_or_zero != 0) {
     NotifyChangedActionSlots(
         *this, action_assignments_.ReplaceSpellActionReferences(0, learned_spell_id));
   }
@@ -965,13 +965,12 @@ void WorldSession::HandleCastFailed(const net::wotlk::WorldPacket& pkt) {
                result == SpellCastResult::kInterruptedCombat) {
       event_id = kUnitSpellcastInterruptedEvent;
     }
-    FireUnitSpellcastPacketEvent(
-        *this, player_guid, event_id, failure->spell_id, failure->cast_count);
-
     if (event_id != kUnitSpellcastFailedQuietEvent) {
       SpellAction_DisplaySpellFailure(*this, failure->spell_id, player_guid,
-                                      failure->result);
+                                      failure->result, {}, "SMSG_CAST_FAILED");
     }
+    FireUnitSpellcastPacketEvent(
+        *this, player_guid, event_id, failure->spell_id, failure->cast_count);
 
     spell_cast_runtime_.OnSpellFailed(
         failure->spell_id, failure->cast_count);
@@ -1154,6 +1153,17 @@ void WorldSession::HandleSpellGo(const net::wotlk::WorldPacket& pkt) {
         objects().GetMutableUnit(info->caster_guid) != nullptr) {
       visual_caster = info->caster_guid;
     }
+
+    bool completed_current_cast = false;
+    if (auto* const unit = objects().GetMutableUnit(info->caster_unit_guid);
+        unit != nullptr && unit->Casts().IsCasting()) {
+      const auto& cast = unit->Casts().GetCurrentCast();
+      completed_current_cast = cast.spell_id == info->spell_id &&
+                               cast.cast_id == info->cast_count;
+      if (completed_current_cast) {
+        unit->Casts().ClearCurrentCast();
+      }
+    }
     QueueSpellGoVisual(*this, visual_caster, info->spell_id,
                        info->hit_targets, visual_destination, visual_data);
 
@@ -1226,16 +1236,6 @@ void WorldSession::HandleSpellGo(const net::wotlk::WorldPacket& pkt) {
       }
     }
 
-    bool completed_current_cast = false;
-    if (auto* const unit = objects().GetMutableUnit(info->caster_unit_guid);
-        unit != nullptr && unit->Casts().IsCasting()) {
-      const auto& cast = unit->Casts().GetCurrentCast();
-      completed_current_cast = cast.spell_id == info->spell_id &&
-                               cast.cast_id == info->cast_count;
-      if (completed_current_cast) {
-        unit->Casts().ClearCurrentCast();
-      }
-    }
     FireUnitSpellcastPacketEvent(
         *this, info->caster_unit_guid, kUnitSpellcastSucceededEvent,
         info->spell_id,
@@ -1452,6 +1452,9 @@ void WorldSession::HandleAttackStart(const net::wotlk::WorldPacket& pkt) {
         attacker != nullptr) {
 
       attacker->Interaction().SetCachedUpdateTarget(parsed->victim);
+      if (attacker->IsActivePlayer()) {
+        ui::game::ScriptEventDispatch::Get().FirePlayerEnterCombat();
+      }
     }
     if (auto_attack_combat_event_callback_) {
       auto_attack_combat_event_callback_(
@@ -1472,6 +1475,9 @@ void WorldSession::HandleAttackStop(const net::wotlk::WorldPacket& pkt) {
         attacker != nullptr) {
 
       attacker->Interaction().SetCachedUpdateTarget(ObjectGuid{});
+      if (attacker->IsActivePlayer()) {
+        ui::game::ScriptEventDispatch::Get().FirePlayerLeaveCombat();
+      }
     }
     if (auto_attack_combat_event_callback_) {
       auto_attack_combat_event_callback_(

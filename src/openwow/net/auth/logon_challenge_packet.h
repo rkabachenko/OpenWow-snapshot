@@ -18,6 +18,6 @@ inline constexpr std::uint8_t kAuthLogonChallengeProtocolVersion = 0x08;
 [[nodiscard]] std::int32_t QueryRetailLogonChallengeTimezoneBiasMinutes();
 
 [[nodiscard]] std::vector<std::uint8_t> BuildRetailLogonChallengePacket(
-    std::string_view username);
+    std::string_view username, std::string_view locale);
 
 }

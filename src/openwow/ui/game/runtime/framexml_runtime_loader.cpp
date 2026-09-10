@@ -19,9 +19,11 @@
 #include "openwow/ui/game/secure_execution.h"
 #include "openwow/ui/game/ui_load_status_log.h"
 #include "openwow/ui/lua_c_api_convenience.h"
+#include "openwow/ui/lua_taint_api.h"
 #include "openwow/ui/ui_aspect_scales.h"
 #include "openwow/ui/widgets/script_object.h"
 #include "openwow/foundation/diagnostics/logging.h"
+#include "openwow/foundation/diagnostics/performance_logging.h"
 #include "openwow/foundation/text/ascii.h"
 
 extern "C" {
@@ -133,6 +135,9 @@ void AppendFrameXmlLoadResult(UiLoadStatusSink* sink,
 }
 
 int SnapshotLuaTable(lua_State* lua, const int table_index) {
+  // A load checkpoint copies retained values; it must neither acquire their
+  // execution origin nor stamp the loading add-on onto secure values.
+  const openwow::ui::ScopedNeutralLuaExecutionTaint neutral_taint(lua);
   const int source = lua_absindex(lua, table_index);
   lua_newtable(lua);
   const int snapshot = lua_absindex(lua, -1);
@@ -147,6 +152,7 @@ int SnapshotLuaTable(lua_State* lua, const int table_index) {
 }
 
 void RestoreLuaGlobalTable(lua_State* lua, const int snapshot_ref) {
+  const openwow::ui::ScopedNeutralLuaExecutionTaint neutral_taint(lua);
   lua_pushvalue(lua, LUA_GLOBALSINDEX);
   const int globals = lua_absindex(lua, -1);
   lua_newtable(lua);
@@ -177,6 +183,7 @@ void RestoreLuaGlobalTable(lua_State* lua, const int snapshot_ref) {
 }
 
 int SnapshotNamedFontRegistry(lua_State* lua) {
+  const openwow::ui::ScopedNeutralLuaExecutionTaint neutral_taint(lua);
   lua_getfield(lua, LUA_REGISTRYINDEX,
                frame_api::kNamedFontObjectRegistryKey);
   if (lua_istable(lua, -1) == 0) {
@@ -189,6 +196,7 @@ int SnapshotNamedFontRegistry(lua_State* lua) {
 }
 
 void RestoreNamedFontRegistry(lua_State* lua, const int snapshot_ref) {
+  const openwow::ui::ScopedNeutralLuaExecutionTaint neutral_taint(lua);
   if (snapshot_ref == LUA_NOREF) {
     lua_pushnil(lua);
   } else {
@@ -234,6 +242,9 @@ void FrameXmlRuntimeLoader::BeginLifetime(
 bool FrameXmlRuntimeLoader::LoadDefaultUI(
     std::function<void(float)> progress_callback,
     UiLoadStatusSink* status_sink) {
+  static openwow::diagnostics::PerformanceLogSite performance_site;
+  const openwow::diagnostics::ScopedPerformanceLog performance(
+      performance_site, "ui.load_default", kDefaultFrameXmlTocPath, 0.0);
   const auto load_started = std::chrono::steady_clock::now();
   CVarSystem::Instance().RegisterDefaults();
   const std::uint32_t interface_version =
@@ -431,7 +442,10 @@ bool FrameXmlRuntimeLoader::LoadDefaultUI(
       "GameUIManager: LoadDefaultUI complete — " +
           std::to_string(bootstrap.frame_xml.xml_files_loaded) + " XML, " +
           std::to_string(bootstrap.frame_xml.lua_files_loaded) + " Lua, " +
-          std::to_string(owner_.frame_store_.size()) + " frames");
+          std::to_string(owner_.frame_store_.size()) + " frames duration_ms=" +
+          std::to_string(owner_.performance_counters_.default_ui_load_duration_ns / 1000000u) +
+          " texture_validation_reads=" + std::to_string(texture_validation.source_reads) +
+          " texture_validation_hits=" + std::to_string(texture_validation.cache_hits));
   return true;
 }
 
@@ -439,6 +453,9 @@ bool FrameXmlRuntimeLoader::LoadToc(
     const std::string& toc_path, UiLoadStatusSink* status_sink,
     TocLoadProgress* progress, const std::string_view addon_name,
     openwow::core::MD5Context* digest) {
+  static openwow::diagnostics::PerformanceLogSite performance_site;
+  const openwow::diagnostics::ScopedPerformanceLog performance(
+      performance_site, "ui.load_toc", toc_path, 0.0);
   lua_State* const lua = owner_.world_lua_runtime_->state();
   const auto frame_checkpoint = owner_.frame_store_.registration_checkpoint();
   auto materializer_checkpoint =
@@ -624,6 +641,9 @@ void FrameXmlRuntimeLoader::ProcessXmlFrameGroup(
     const std::string& path,
     const openwow::ui::framexml::ParseResult& result,
     const std::size_t group_index) {
+  static openwow::diagnostics::PerformanceLogSite performance_site;
+  const openwow::diagnostics::ScopedPerformanceLog performance(
+      performance_site, "ui.xml_materialize_group", path);
   if (group_index >= result.top_level_groups.size()) {
     return;
   }

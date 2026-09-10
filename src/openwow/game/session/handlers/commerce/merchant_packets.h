@@ -36,7 +36,7 @@ void HandleNpcTextUpdatePacket(
     const std::function<bool()>& prepare_gossip_text,
     const net::wotlk::WorldPacket& packet);
 void HandleTrainerListPacket(
-    GossipManager& gossip, const std::function<void()>& update_greeting,
+    GossipManager& gossip, const std::function<bool()>& prepare_trainer,
     const net::wotlk::WorldPacket& packet);
 void HandleTrainerBuySucceededPacket(
     PetitionHandler& petition, const net::wotlk::WorldPacket& packet);

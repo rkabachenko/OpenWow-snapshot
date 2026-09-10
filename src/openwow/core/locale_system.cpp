@@ -26,7 +26,7 @@ static constexpr std::array<LocaleEntry, 13> kLocaleTable = {{
      "HH:mm", false},
     {GameLocale::deDE, "deDE", "Deutsch", "FRIZQT__.TTF", "DD.MM.YYYY",
      "HH:mm", false},
-    {GameLocale::zhCN, "zhCN", "简体中文", "ARKai_T.TTF", "YYYY/MM/DD",
+    {GameLocale::zhCN, "zhCN", "简体中文", "ZYKai_T.TTF", "YYYY/MM/DD",
      "HH:mm", true},
     {GameLocale::zhTW, "zhTW", "繁體中文", "bLEI00D.TTF", "YYYY/MM/DD",
      "A h:mm", true},

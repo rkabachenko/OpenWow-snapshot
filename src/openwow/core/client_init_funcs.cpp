@@ -1,5 +1,6 @@
 
 #include "openwow/core/client_init.h"
+#include "openwow/foundation/diagnostics/performance_logging.h"
 #include "openwow/core/client_init_internal.h"
 #include "openwow/core/client_misc.h"
 #include "openwow/core/cobject_heap.h"
@@ -612,6 +613,9 @@ std::string BuildBugReport() {
 
 bool EnterWorldInit(const EnterWorldInitParams &params,
                     openwow::audio::SoundRuntime& sound_runtime) {
+  static openwow::diagnostics::PerformanceLogSite performance_site;
+  const openwow::diagnostics::ScopedPerformanceLog performance(
+      performance_site, "world.core_init", {}, 0.0);
 
   if (const auto selected_realm = openwow::game::RealmList::Get().GetSelectedRealm()) {
     (void)openwow::net::RealmConfigTables::Get()

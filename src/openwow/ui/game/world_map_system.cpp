@@ -12,6 +12,7 @@
 #include "openwow/ui/game/game_ui_manager.h"
 #include "openwow/ui/rect_utils.h"
 #include "openwow/vfs/virtual_file_system.h"
+#include "openwow/world/streaming/world_map.h"
 
 #include <algorithm>
 #include <bit>
@@ -331,7 +332,11 @@ void WorldMapSystem::BuildRuntimeDataFromDbcNoLock(const openwow::data::dbc::Dbc
   continents_.reserve(dbc.world_map_area().size());
 
   for (const auto &wma : dbc.world_map_area()) {
-    if (wma.area_id != 0) {
+    // area_id == 0 also occurs on instance roots. WorldMapContinent is the
+    // authority for which of those roots are exposed as continents.
+    const auto continent_entry_it = continent_bounds_by_map_id.find(wma.map_id);
+    if (wma.area_id != 0 || continent_entry_it == continent_bounds_by_map_id.end() ||
+        continent_entry_it->second == nullptr) {
       continue;
     }
 
@@ -344,18 +349,15 @@ void WorldMapSystem::BuildRuntimeDataFromDbcNoLock(const openwow::data::dbc::Dbc
       ci.name = std::move(*map_name);
     }
 
-    if (const auto bounds_it = continent_bounds_by_map_id.find(wma.map_id);
-        bounds_it != continent_bounds_by_map_id.end() && bounds_it->second != nullptr) {
-      const auto &continent_entry = *bounds_it->second;
-      ci.left_boundary = continent_entry.left_boundary;
-      ci.right_boundary = continent_entry.right_boundary;
-      ci.top_boundary = continent_entry.top_boundary;
-      ci.bottom_boundary = continent_entry.bottom_boundary;
-      ci.continent_offset_x = continent_entry.continent_offset_x;
-      ci.continent_offset_y = continent_entry.continent_offset_y;
-      ci.scale = continent_entry.scale;
-      ci.has_overview_bounds = true;
-    }
+    const auto &continent_entry = *continent_entry_it->second;
+    ci.left_boundary = continent_entry.left_boundary;
+    ci.right_boundary = continent_entry.right_boundary;
+    ci.top_boundary = continent_entry.top_boundary;
+    ci.bottom_boundary = continent_entry.bottom_boundary;
+    ci.continent_offset_x = continent_entry.continent_offset_x;
+    ci.continent_offset_y = continent_entry.continent_offset_y;
+    ci.scale = continent_entry.scale;
+    ci.has_overview_bounds = true;
 
     for (const auto &child_wma : dbc.world_map_area()) {
       if (child_wma.area_id == 0) {
@@ -618,6 +620,18 @@ bool WorldMapSystem::SetMapByWorldMapAreaId(std::uint32_t world_map_area_id, int
 
     const auto continent_index = FindContinentIndexByMapIdNoLock(wma_it->second.map_id);
     if (continent_index < 0) {
+      if (dungeon_map_id <= 0 && wma_it->second.default_dungeon_map_id > 0) {
+        dungeon_map_id = wma_it->second.default_dungeon_map_id;
+      } else if (dungeon_map_id <= 0 && wma_it->second.default_dungeon_map_id != -1) {
+        // Build 12340 SetMapByID selects floor 1 when the WMA marks a dungeon
+        // but does not name an explicit default DungeonMap record.
+        for (const auto &dungeon_map : dungeon_maps_in_order_) {
+          if (dungeon_map.map_id == wma_it->second.map_id && dungeon_map.floor_index == 1) {
+            dungeon_map_id = static_cast<int>(dungeon_map.id);
+            break;
+          }
+        }
+      }
       updated = CommitSelectionAndRefreshLandmarksNoLock(-2, static_cast<int>(world_map_area_id),
                                                          dungeon_map_id);
     } else {
@@ -662,17 +676,29 @@ bool WorldMapSystem::ClickLandmark(const std::uint32_t map_link_id) {
 }
 
 bool WorldMapSystem::UpdatePlayerPosition(const openwow::game::WorldSession &session) {
+  const auto *const player = session.objects().GetLocalPlayerTyped();
+  const std::int32_t map_id =
+      session.has_current_map()
+          ? static_cast<std::int32_t>(session.current_map_id())
+          : -1;
+  std::int32_t wmo_group_id = -1;
+  if (player != nullptr && map_id >= 0 && world_map_ != nullptr &&
+      world_map_->map_id() == static_cast<std::uint32_t>(map_id)) {
+    wmo_group_id = world_map_->ResolveAreaEnvironmentContextAtPosition(
+        player->GetX(), player->GetY(), player->GetZ()).wmo_group_id;
+  }
+
   bool updated = false;
   {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    const auto *player = session.objects().GetLocalPlayerTyped();
+    current_wmo_map_id_ = map_id;
+    current_wmo_group_id_ = wmo_group_id;
+    current_wmo_dungeon_map_id_ = -1;
     if (!player) {
       updated = CommitSelectionAndRefreshLandmarksNoLock(-1, -1, -1);
     } else {
 
-      std::int32_t map_id =
-          session.has_current_map() ? static_cast<std::int32_t>(session.current_map_id()) : -1;
       if (map_id < 0) {
         updated = CommitSelectionAndRefreshLandmarksNoLock(-1, -1, -1);
       } else {

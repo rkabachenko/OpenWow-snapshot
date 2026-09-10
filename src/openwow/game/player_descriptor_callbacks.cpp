@@ -31,7 +31,6 @@
 #include "openwow/game/objects/cgplayer.h"
 #include "openwow/game/shapeshift_bonus_bar.h"
 #include "openwow/game/spell_shapeshift_mask.h"
-#include "openwow/game/player_unit_field_event_callbacks.h"
 #include "openwow/game/profession_system.h"
 #include "openwow/game/skill_info.h"
 #include "openwow/game/commerce/trade/trade_interaction.h"
@@ -127,7 +126,7 @@ constexpr std::uint32_t kSkillFlagNoSkillUpMessage = 0x402;
 constexpr std::uint32_t kSkillCategorySecondary = 9;
 constexpr std::uint32_t kSkillCategoryProfession = 11;
 
-constexpr int kSysMsg_SkillUnlearned = 57;
+constexpr int kSysMsg_SkillGained = 57;
 constexpr int kSysMsg_SkillIncreased = 58;
 
 void RefreshActivePlayerSkillInfo(WorldSession& session) {
@@ -167,26 +166,15 @@ void OnSkillValueDescriptorChanged(WorldSession& session,
         SkillDbcHelpers::Get().FindBySkillId(
             info.race, info.player_class, info.skill_line_id);
 
-    if (race_class_info &&
+    if (skill_line_entry != nullptr && race_class_info &&
         (race_class_info->flags & kSkillFlagNoSkillUpMessage) == 0) {
-      if (info.new_adjusted_value == 0) {
-
-        if (skill_line_entry != nullptr) {
-          const std::string name(skill_line_entry->name);
-          ui::game::DisplaySystemMessage(kSysMsg_SkillUnlearned, name.c_str());
-        } else {
-          ui::game::DisplaySystemMessage(kSysMsg_SkillUnlearned);
-        }
-      } else if (info.old_raw_value > 0) {
-
-        if (skill_line_entry != nullptr) {
-          const std::string name(skill_line_entry->name);
-          ui::game::DisplaySystemMessage(
-              kSysMsg_SkillIncreased, name.c_str(),
-              static_cast<int>(info.new_adjusted_value));
-        } else {
-          ui::game::DisplaySystemMessage(kSysMsg_SkillIncreased);
-        }
+      const std::string name(skill_line_entry->name);
+      if (info.old_raw_value == 0) {
+        ui::game::DisplaySystemMessage(kSysMsg_SkillGained, name.c_str());
+      } else if (info.new_adjusted_value > 0) {
+        ui::game::DisplaySystemMessage(
+            kSysMsg_SkillIncreased, name.c_str(),
+            static_cast<int>(info.new_adjusted_value));
       }
     }
 
@@ -986,11 +974,7 @@ void OnComboTargetDescriptorChanged(
 
     if (!new_guid.IsEmpty()) {
       const auto *unit = objects.GetUnit(new_guid);
-      if (unit != nullptr) {
-
-        Player_RegisterUnitFieldEventCallbacks(
-            const_cast<void *>(static_cast<const void *>(unit)));
-      } else if (new_guid != old_guid) {
+      if (unit == nullptr && new_guid != old_guid) {
 
         if (auto *targeting_system = session.targeting_system();
             targeting_system != nullptr) {
@@ -1005,12 +989,6 @@ void OnComboTargetDescriptorChanged(
       }
     }
 
-    if (!old_guid.IsEmpty()) {
-      if (const auto* unit = objects.GetUnit(old_guid); unit != nullptr) {
-        Player_RegisterUnitFieldEventCallbacks(
-            const_cast<void*>(static_cast<const void*>(unit)));
-      }
-    }
   }
 
   if (ObjectGuid(player_guid) == active_guid) {
@@ -1039,8 +1017,6 @@ void OnCoinageDescriptorChanged(WorldSession& session,
 
   ui::game::ScriptEventDispatch::Get().FireEvent(
       ui::game::events::TRAINER_UPDATE);
-
-  ui::game::ScriptEventDispatch::Get().FirePlayerMoney();
 
   const auto* player = session.objects().GetLocalPlayer();
   if (player != nullptr) {

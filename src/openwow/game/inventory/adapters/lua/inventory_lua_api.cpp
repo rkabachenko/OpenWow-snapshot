@@ -302,7 +302,8 @@ static std::optional<std::string> ResolvePlayerInventoryTexturePath(
              ? std::optional<std::string>{
                    ResolveItemDisplayIdIconTexturePathOrFallback(
                        L, cached_item->display_id)}
-             : std::nullopt;
+             : std::optional<std::string>{
+                   BuildItemIconTexturePath(kFallbackItemIconName)};
 }
 
 static std::optional<std::string> ResolveInventoryItemTexturePath(

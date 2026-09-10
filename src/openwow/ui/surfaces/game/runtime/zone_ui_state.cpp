@@ -32,8 +32,8 @@ std::uint32_t NonNegativeId(const std::int32_t value) {
 }
 
 void ZoneUiState::Apply(const ZoneUiUpdate &update, openwow::game::WorldSession *session) {
-  const bool area_changed = location_.area != update.location.area;
-  const bool was_first_zone = location_.area == AreaId{};
+  const bool zone_changed = location_.zone != update.location.zone;
+  const bool was_first_zone = location_.zone == ZoneId{};
   location_ = update.location;
 
   if (was_first_zone && session != nullptr) {
@@ -63,7 +63,7 @@ void ZoneUiState::Apply(const ZoneUiUpdate &update, openwow::game::WorldSession 
   minimap_.SetZoneText(zone_text_, subzone_text_);
 
   auto &dispatch = ScriptEventDispatch::Get();
-  if (area_changed) {
+  if (zone_changed) {
     dispatch.FireZoneChangedNewArea();
   } else if (text_changed) {
     if (update.is_instance) {
@@ -73,7 +73,7 @@ void ZoneUiState::Apply(const ZoneUiUpdate &update, openwow::game::WorldSession 
     }
   }
 
-  if (openwow::data::IsOnlineModeActive() && (area_changed || text_changed)) {
+  if (openwow::data::IsOnlineModeActive() && (zone_changed || text_changed)) {
     GameUI_SetBackgroundZoneState(location_.area.value(), location_.zone.value());
   }
 

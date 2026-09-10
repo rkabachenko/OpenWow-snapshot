@@ -10,7 +10,6 @@
 #include <algorithm>
 #include <cmath>
 #include <iterator>
-#include <limits>
 #include <utility>
 
 namespace openwow::render {
@@ -74,6 +73,8 @@ std::vector<NameplateDrawInfo> NameplateRenderer::BuildDrawList(
   const float screen_w = metrics.framebuffer_width;
   const float screen_h = metrics.framebuffer_height;
   const auto geometry = ResolvePixelGeometry(metrics);
+  const auto aspect = openwow::ui::ComputeUiAspectScaleState(
+      metrics.aspect_ratio);
   std::vector<NameplateDrawInfo> draw_list;
   if (screen_w <= 0.0f || screen_h <= 0.0f || view_mtx == nullptr ||
       proj_mtx == nullptr) {
@@ -89,56 +90,17 @@ std::vector<NameplateDrawInfo> NameplateRenderer::BuildDrawList(
   const auto nameplates = nameplates_.AcquireSnapshot();
   draw_list.reserve(nameplates->size());
   for (const auto& np : *nameplates) {
-    float sx = 0.0f;
-    float sy = 0.0f;
-    const bool anchor_projected = WorldToScreen(
-        np.world_x, np.world_y, np.world_z, view_mtx, proj_mtx, metrics, sx,
-        sy);
-    if (!anchor_projected && !np.has_world_bounds) {
+    float projected_x = 0.0f;
+    float projected_y = 0.0f;
+    float projected_depth = 0.0f;
+    if (!WorldToScreen(np.world_x, np.world_y, np.world_z, view_mtx,
+                       proj_mtx, metrics, projected_x, projected_y,
+                       projected_depth)) {
       continue;
     }
-
-    float projected_min_x = sx;
-    float projected_max_x = sx;
-    float projected_min_y = sy;
-    float projected_max_y = sy + geometry.frame_height;
-    if (np.has_world_bounds) {
-      bool projected_corner = false;
-      projected_min_x = std::numeric_limits<float>::infinity();
-      projected_min_y = std::numeric_limits<float>::infinity();
-      projected_max_x = -std::numeric_limits<float>::infinity();
-      projected_max_y = -std::numeric_limits<float>::infinity();
-      for (std::uint32_t corner = 0u; corner < 8u; ++corner) {
-        const float x = (corner & 1u) != 0u ? np.world_bounds[3]
-                                            : np.world_bounds[0];
-        const float y = (corner & 2u) != 0u ? np.world_bounds[4]
-                                            : np.world_bounds[1];
-        const float z = (corner & 4u) != 0u ? np.world_bounds[5]
-                                            : np.world_bounds[2];
-        float corner_x = 0.0f;
-        float corner_y = 0.0f;
-        if (!WorldToScreen(x, y, z, view_mtx, proj_mtx, metrics, corner_x,
-                           corner_y)) {
-          continue;
-        }
-        projected_corner = true;
-        projected_min_x = std::min(projected_min_x, corner_x);
-        projected_max_x = std::max(projected_max_x, corner_x);
-        projected_min_y = std::min(projected_min_y, corner_y);
-        projected_max_y = std::max(projected_max_y, corner_y);
-      }
-      if (!projected_corner) {
-        continue;
-      }
-      if (!anchor_projected) {
-        sx = (projected_min_x + projected_max_x) * 0.5f;
-        sy = projected_min_y;
-      }
-    }
-    if (projected_max_x < 0.0f || projected_min_x > screen_w ||
-        projected_max_y < 0.0f || projected_min_y > screen_h) {
-      continue;
-    }
+    const float sx = projected_x / aspect.horizontal_scale * screen_w;
+    const float sy = screen_h -
+                     projected_y / aspect.vertical_scale * screen_h;
 
     float camera_distance = 8.0f;
     if (have_camera) {
@@ -148,18 +110,8 @@ std::vector<NameplateDrawInfo> NameplateRenderer::BuildDrawList(
       camera_distance = std::sqrt(dx * dx + dy * dy + dz * dz);
     }
 
-    const float normalized_x = sx / screen_w;
-    const float normalized_y = sy / screen_h;
-    const float sort_dx = normalized_x - kNameplateSortAnchorX;
-    const float sort_dy = normalized_y - kNameplateSortAnchorY;
-
-    float view_depth = 0.0f;
-    if (view_mtx != nullptr) {
-      const RenderVec4 anchor_world{np.world_x, np.world_y, np.world_z, 1.0f};
-      const RenderVec4 anchor_view = TransformRowVector4x4(
-          anchor_world, RenderMatrix4x4View{view_mtx, 16u});
-      view_depth = anchor_view[2];
-    }
+    const float sort_dx = projected_x - kNameplateSortAnchorX;
+    const float sort_dy = projected_y - kNameplateSortAnchorY;
 
     draw_list.push_back({
         np,
@@ -167,61 +119,40 @@ std::vector<NameplateDrawInfo> NameplateRenderer::BuildDrawList(
         sy,
         sort_dx * sort_dx + sort_dy * sort_dy,
         camera_distance,
-        view_depth,
+        projected_depth,
         static_cast<std::uint8_t>(np.is_target ? 20u : 10u),
     });
   }
 
-  const auto aspect = openwow::ui::ComputeUiAspectScaleState(
-      metrics.aspect_ratio);
-  std::vector<std::size_t> layout_order(draw_list.size());
-  for (std::size_t index = 0; index < layout_order.size(); ++index) {
-    layout_order[index] = index;
-  }
-  std::stable_sort(layout_order.begin(), layout_order.end(),
-                   [&draw_list](const std::size_t lhs, const std::size_t rhs) {
-                     if (draw_list[lhs].screen_sort_key !=
-                         draw_list[rhs].screen_sort_key) {
-                       return draw_list[lhs].screen_sort_key <
-                              draw_list[rhs].screen_sort_key;
-                     }
-                     return draw_list[lhs].nameplate.guid <
-                            draw_list[rhs].nameplate.guid;
-                   });
-  openwow::ui::ClearAnchorGrid(0);
-  for (const auto index : layout_order) {
-    auto& draw = draw_list[index];
-    const auto position = openwow::ui::game::ComputeNameplatePosition2D(
-        {
-            .screen_x = draw.screen_x / screen_w * aspect.horizontal_scale,
-            .screen_y = (screen_h - draw.screen_y) / screen_h *
-                        aspect.vertical_scale,
-            .frame_width = geometry.frame_width / screen_w *
-                           aspect.horizontal_scale,
-            .frame_height = geometry.frame_height / screen_h *
-                            aspect.vertical_scale,
-            .grid_index = 0,
-        },
-        aspect.horizontal_scale, aspect.vertical_scale);
-    draw.screen_x = position.offset_x / aspect.horizontal_scale * screen_w;
-    draw.screen_y = screen_h -
-                    position.offset_y / aspect.vertical_scale * screen_h;
-    if (allow_overlap_) {
-
-      openwow::ui::ClearAnchorGrid(0);
-    }
-  }
   std::stable_sort(draw_list.begin(), draw_list.end(),
                    [](const NameplateDrawInfo& lhs,
                       const NameplateDrawInfo& rhs) {
-                     if (lhs.frame_level != rhs.frame_level) {
-                       return lhs.frame_level < rhs.frame_level;
-                     }
                      if (lhs.screen_sort_key != rhs.screen_sort_key) {
                        return lhs.screen_sort_key > rhs.screen_sort_key;
                      }
                      return lhs.nameplate.guid < rhs.nameplate.guid;
                    });
+  if (!allow_overlap_) {
+    openwow::ui::ClearAnchorGrid(0);
+    for (auto& draw : draw_list) {
+      const auto position = openwow::ui::game::ComputeNameplatePosition2D(
+          {
+              .screen_x = draw.screen_x / screen_w * aspect.horizontal_scale,
+              .screen_y = (screen_h - draw.screen_y) / screen_h *
+                          aspect.vertical_scale,
+              .screen_z = draw.projected_depth,
+              .frame_width = geometry.frame_width / screen_w *
+                             aspect.horizontal_scale,
+              .frame_height = geometry.frame_height / screen_h *
+                              aspect.vertical_scale,
+              .grid_index = 0,
+          },
+          aspect.horizontal_scale, aspect.vertical_scale);
+      draw.screen_x = position.offset_x / aspect.horizontal_scale * screen_w;
+      draw.screen_y = screen_h -
+                      position.offset_y / aspect.vertical_scale * screen_h;
+    }
+  }
   return draw_list;
 }
 
@@ -243,7 +174,7 @@ void NameplateRenderer::PublishFrameLayout(
           .screen_x = draw.screen_x,
           .screen_y = draw.screen_y,
           .camera_distance = draw.camera_distance,
-          .view_depth = draw.view_depth,
+          .projected_depth = draw.projected_depth,
           .frame_level = draw.frame_level,
       });
     }
@@ -255,30 +186,26 @@ bool NameplateRenderer::WorldToScreen(float wx, float wy, float wz,
                                        const float* view_mtx,
                                        const float* proj_mtx,
                                        const WorldOverlayMetrics& metrics,
-                                       float& sx, float& sy) {
+                                       float& projected_x,
+                                       float& projected_y,
+                                       float& projected_depth) {
   if (view_mtx == nullptr || proj_mtx == nullptr) {
     return false;
   }
 
-  const RenderVec4 world{wx, wy, wz, 1.0f};
-  const RenderVec4 view = TransformRowVector4x4(
-      world, RenderMatrix4x4View{view_mtx, 16u});
-  const RenderVec4 clip = TransformRowVector4x4(
-      view, RenderMatrix4x4View{proj_mtx, 16u});
-  const float px = clip[0];
-  const float py = clip[1];
-  const float pw = clip[3];
-
-  if (pw <= 0.0f) return false;
-
-  const float inv_w = 1.0f / pw;
-  const float ndc_x = px * inv_w;
-  const float ndc_y = py * inv_w;
-
-  const auto screen = metrics.NdcToFramebuffer(ndc_x, ndc_y);
-  sx = screen.x;
-  sy = screen.y;
-
+  const auto aspect =
+      openwow::ui::ComputeUiAspectScaleState(metrics.aspect_ratio);
+  const auto projected = ProjectWorldPointToViewport(
+      RenderVec3{wx, wy, wz}, RenderMatrix4x4View{view_mtx, 16u},
+      RenderMatrix4x4View{proj_mtx, 16u},
+      RenderProjectionViewport{.right = aspect.horizontal_scale,
+                               .bottom = aspect.vertical_scale});
+  if (!projected.on_screen || projected.position[1] <= 0.0f) {
+    return false;
+  }
+  projected_x = projected.position[0];
+  projected_y = projected.position[1];
+  projected_depth = projected.position[2];
   return true;
 }
 

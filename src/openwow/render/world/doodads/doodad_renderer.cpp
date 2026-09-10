@@ -1,6 +1,7 @@
 #include "openwow/render/world/doodads/doodad_renderer.h"
 
 #include "openwow/foundation/diagnostics/logging.h"
+#include "openwow/core/platform_runtime_policy.h"
 #include "openwow/foundation/math/row_major_mat4x4.h"
 #include "openwow/render/api/math/render_matrix_math.h"
 #include "openwow/render/m2/m2_system.h"
@@ -775,8 +776,11 @@ bool DoodadRenderer::Initialize() {
     return true;
 
   const std::uint32_t hardware_threads = std::thread::hardware_concurrency();
+  constexpr auto runtime_policy =
+      openwow::core::GetPlatformRuntimePolicy();
   m2_system_.StartAsyncLoading(
-      std::clamp(hardware_threads == 0u ? 2u : hardware_threads / 2u, 2u, 4u));
+      std::clamp(hardware_threads == 0u ? 2u : hardware_threads / 2u, 1u,
+                 runtime_policy.resource_worker_limit));
   initialized_ = true;
   openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kInfo, "DoodadRenderer: initialized");
   return true;
@@ -1071,14 +1075,16 @@ void DoodadRenderer::BeginStreamingWmoInstance(
 }
 
 void DoodadRenderer::PublishStreamingWmoGroup(
-    const WmoOwnerId owner_id, const data::wmo::WmoRoot &root, const data::wmo::WmoGroup &group,
-    const std::uint16_t group_index, const RenderMatrix4x4 &wmo_model_matrix) {
+    const WmoOwnerId owner_id, const data::wmo::WmoRoot &root,
+    const std::span<const std::uint16_t> doodad_refs,
+    const std::uint32_t group_flags, const std::uint16_t group_index,
+    const RenderMatrix4x4 &wmo_model_matrix) {
   const auto owner_it = wmo_doodads_.find(owner_id);
   if (owner_it == wmo_doodads_.end() || group_index >= owner_it->second.group_count) {
     return;
   }
   auto &owner = owner_it->second;
-  for (const std::uint16_t doodad_ref : group.doodadRefs) {
+  for (const std::uint16_t doodad_ref : doodad_refs) {
     const auto doodad_set_index = ResolveWmoDoodadSetIndex(root, doodad_ref);
     if (doodad_set_index == kInvalidWmoDoodadSetIndex ||
         static_cast<std::size_t>(doodad_ref) >= root.doodadDefs.size()) {
@@ -1109,7 +1115,7 @@ void DoodadRenderer::PublishStreamingWmoGroup(
     instance.render_placement_index = doodad_ref;
     instance.wmo_doodad_set_index = static_cast<std::uint16_t>(doodad_set_index);
     instance.authored_wmo_doodad_set_index = instance.wmo_doodad_set_index;
-    const auto tint_usage = ResolveWmoDoodadTintUsage(group.header.flags);
+    const auto tint_usage = ResolveWmoDoodadTintUsage(group_flags);
     if (tint_usage.is_ambient_substitute) {
       instance.tint_color = DecodeBgraColor(doodad_def.color);
       instance.wmo_color_is_ambient_substitute = true;

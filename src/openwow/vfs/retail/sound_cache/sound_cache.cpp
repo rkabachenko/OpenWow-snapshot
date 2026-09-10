@@ -175,13 +175,7 @@ private:
 };
 
 std::filesystem::path ResolveArchivePath() {
-  const auto &startup = openwow::data::GetStartupFileSystemState();
-  std::filesystem::path path;
-  if (!startup.executable_base_path.empty()) {
-    path = ToNativePath(startup.executable_base_path.c_str());
-  }
-  path /= "Data";
-  path /= "SoundCache.MPQ";
+  auto path = openwow::data::ResolveStartupWritablePath("Data/SoundCache.MPQ");
   path.make_preferred();
   return path;
 }

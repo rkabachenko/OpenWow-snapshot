@@ -4,6 +4,8 @@
 #include "openwow/data/formats/dbc/dbc_loader.h"
 #include "openwow/data/formats/dbc/dbc_structures.h"
 #include "openwow/debug/diagnostics/debug_console.h"
+#include "openwow/foundation/diagnostics/logging.h"
+#include "openwow/foundation/diagnostics/performance_logging.h"
 #include "openwow/game/gossip_manager.h"
 #include "openwow/game/actions/held_cursor/adapters/platform/cursor_surface.h"
 #include "openwow/game/group_system.h"
@@ -536,9 +538,10 @@ GetQuestPreviewItem(const openwow::game::WorldSession *session, std::string_view
   return slot.item;
 }
 
-const ::openwow::game::ItemTemplate *
-GetOrRequestQuestPreviewItemTemplate(::openwow::game::WorldSession *session,
-                                     const std::uint32_t item_id) {
+static const ::openwow::game::ItemTemplate *
+GetOrRequestQuestItemTemplate(::openwow::game::WorldSession *session,
+                              const std::uint32_t item_id,
+                              const bool for_quest_log) {
   if (session == nullptr || item_id == 0) {
     return nullptr;
   }
@@ -548,16 +551,36 @@ GetOrRequestQuestPreviewItemTemplate(::openwow::game::WorldSession *session,
       item_id,
       ::openwow::game::QueryCache::QueryRequestOptions{
           .dedupe_callbacks = false,
-          .callback = [owner, session, item_id](const bool success) {
+          .callback = [owner, session, item_id, for_quest_log](const bool success) {
             if (owner.expired()) {
               return;
             }
             if (!success || session->query_cache().GetItemTemplate(item_id) == nullptr) {
+              openwow::diagnostics::Log(
+                  openwow::diagnostics::LogLevel::kWarn,
+                  "quest item display query failed source=" +
+                      std::string(for_quest_log ? "quest-log" : "quest-dialog") +
+                      " item=" + std::to_string(item_id) +
+                      " reason=" + (success ? "resolved-record-missing" : "query-failed"));
               return;
             }
 
-            ScriptEventDispatch::Get().FireEvent(events::QUEST_ITEM_UPDATE);
+            if (for_quest_log) {
+              ScriptEventDispatch::Get().QueueGlobalEvent(events::QUEST_LOG_UPDATE);
+            } else {
+              if (openwow::diagnostics::IsPerformanceLoggingEnabled()) {
+                openwow::diagnostics::LogPerformanceEvent(
+                    "ui.quest_item_refresh", "item=" + std::to_string(item_id));
+              }
+              ScriptEventDispatch::Get().FireEvent(events::QUEST_ITEM_UPDATE);
+            }
           }});
+}
+
+const ::openwow::game::ItemTemplate *
+GetOrRequestQuestPreviewItemTemplate(::openwow::game::WorldSession *session,
+                                     const std::uint32_t item_id) {
+  return GetOrRequestQuestItemTemplate(session, item_id, false);
 }
 
 static std::string BuildQuestItemLink(openwow::game::WorldSession &session, std::uint32_t item_id) {
@@ -1087,66 +1110,6 @@ struct QuestWorldMapAreaSelection {
   std::uint32_t floor_id = 0;
 };
 
-static bool IsQuestReadyForTurnInOnWorldMap(const ::openwow::game::WorldSession &session,
-                                            const ::openwow::game::QuestTemplate &quest_template,
-                                            const CGPlayer_C::QuestLogEntry &player_slot) {
-  if ((player_slot.state & 0x02u) != 0) {
-    return false;
-  }
-
-  if ((player_slot.state & 0x10000u) != 0) {
-    return true;
-  }
-
-  if ((HasFlag(quest_template.flags, ::openwow::game::QuestFlags::kPartyAccept) ||
-       HasFlag(quest_template.flags, ::openwow::game::QuestFlags::kExploration)) &&
-      (player_slot.state & 0x01u) == 0) {
-    return false;
-  }
-
-  const auto *player = session.objects().GetLocalPlayerTyped();
-  if (player == nullptr) {
-    return false;
-  }
-
-  const auto &reputation = ::openwow::game::ReputationInfo::Get();
-  if (quest_template.required_reputation_faction != 0 &&
-      reputation.GetCurrentStanding(static_cast<std::int32_t>(
-          quest_template.required_reputation_faction)) < quest_template.required_reputation_value) {
-    return false;
-  }
-
-  if (quest_template.required_reputation_faction_max != 0 &&
-      reputation.GetCurrentStanding(
-          static_cast<std::int32_t>(quest_template.required_reputation_faction_max)) >
-          quest_template.required_reputation_value_max) {
-    return false;
-  }
-
-  const auto required_money = DecodeQuestMoneyRequirement(quest_template.reward_money);
-  if (required_money > 0 && player->GetMoney() < static_cast<std::uint32_t>(required_money)) {
-    return false;
-  }
-
-  for (int objective_index = 0; objective_index < ::openwow::game::kQuestObjectivesCount;
-       ++objective_index) {
-    const auto &objective = quest_template.npc_or_go_objectives[objective_index];
-    if (objective.creature_or_go != 0 &&
-        player_slot.counts[objective_index] < objective.required_count) {
-      return false;
-    }
-  }
-
-  for (const auto &item_objective : quest_template.item_objectives) {
-    if (item_objective.item_id != 0 &&
-        session.inventory_replica().GetItemCount(item_objective.item_id) <
-            item_objective.required_count) {
-      return false;
-    }
-  }
-
-  return player_slot.counts[0] >= quest_template.required_player_kills;
-}
 static std::vector<std::uint32_t> BuildVisibleWorldMapQuestIds(
     ::openwow::game::WorldSession &session,
     const ::openwow::ui::WorldMapSystem &world_map,
@@ -1156,6 +1119,7 @@ static std::vector<std::uint32_t> BuildVisibleWorldMapQuestIds(
   std::vector<std::uint32_t> visible_query_slot_quests;
   visible_query_slot_quests.reserve(::openwow::game::QuestPOIData::kMaxQuerySlots);
   std::unordered_set<std::uint32_t> visible_set;
+  std::unordered_map<std::uint32_t, std::int32_t> objective_masks;
 
   for (std::size_t slot = 1; slot <= ::openwow::game::QuestPOIData::kMaxQuerySlots; ++slot) {
     const auto quest_id = poi_data.GetQuestIdByQuerySlot(slot);
@@ -1164,6 +1128,7 @@ static std::vector<std::uint32_t> BuildVisibleWorldMapQuestIds(
     }
 
     const auto objective_mask = BuildQuestPoiIncompleteObjectiveMask(session, quest_id);
+    objective_masks.emplace(quest_id, objective_mask);
     for (const auto &poi : poi_data.GetPOIsForQuest(quest_id)) {
       if (!QuestPoiPassesObjectiveMask(poi, objective_mask)) {
         continue;
@@ -1205,6 +1170,7 @@ static std::vector<std::uint32_t> BuildVisibleWorldMapQuestIds(
     }
   }
 
+  poi_data.SetWorldMapObjectiveMasks(std::move(objective_masks));
   return ordered_visible_quests;
 }
 
@@ -1777,8 +1743,7 @@ int LuaGetQuestLogTitle(lua_State *L) {
 
   if (entry.status == ::openwow::game::QuestStatus::kFailed) {
     lua_pushnumber(L, -1.0);
-  } else if (entry.status == ::openwow::game::QuestStatus::kComplete ||
-             entry.status == ::openwow::game::QuestStatus::kRewarded) {
+  } else if (IsQuestTurnInReady(*session, entry.quest_id, true)) {
     lua_pushnumber(L, 1.0);
   } else {
     lua_pushnil(L);
@@ -2029,7 +1994,7 @@ int LuaGetQuestTimers(lua_State *L) {
     return 0;
   }
 
-  bool fire_quest_watch_update = false;
+  bool fire_quest_log_update = false;
   int return_count = 0;
   std::vector<int> processed_player_slots;
 
@@ -2056,7 +2021,7 @@ int LuaGetQuestTimers(lua_State *L) {
         if (quest_template != nullptr) {
           DisplayTimedQuestFailureMessage(*quest_template);
         }
-        fire_quest_watch_update = true;
+        fire_quest_log_update = true;
       }
       return;
     }
@@ -2083,8 +2048,8 @@ int LuaGetQuestTimers(lua_State *L) {
     process_timed_quest(BuildTimedQuestViewFromPlayerSlot(*session, slot, 0));
   }
 
-  if (fire_quest_watch_update) {
-    ::openwow::game::QuestLog::Get().SignalWatchUpdate();
+  if (fire_quest_log_update) {
+    ScriptEventDispatch::Get().FireQuestLogUpdate();
   }
 
   return return_count;
@@ -2156,6 +2121,11 @@ int LuaAcceptQuest(lua_State *L) {
   }
   const auto &d = session->quests().active_details();
   const auto dialog = ::openwow::game::GetActiveQuestDialogCloseState(session->quests());
+  openwow::diagnostics::Log(
+      openwow::diagnostics::LogLevel::kInfo,
+      "quest accept command source=lua quest=" + std::to_string(d.quest_id) +
+          " giver=" + std::to_string(ResolveQuestAcceptGuid(d)) +
+          " startCheat=" + std::to_string(d.accept_packet_value));
   session->interaction().SendQuestGiverAcceptQuest(ResolveQuestAcceptGuid(d), d.quest_id,
                                                    d.accept_packet_value);
   session->quests().MarkQuestDetailsAcceptSubmitted();
@@ -2231,6 +2201,16 @@ int LuaGetQuestReward(lua_State *L) {
   auto *session = GetWorldSession(L);
   if (!session || !session->quests().has_active_reward() ||
       session->quests().is_dialog_action_pending() || !HasQuestFrameActivePlayer(*session)) {
+    const char* reason = !session ? "session-unavailable"
+        : !session->quests().has_active_reward() ? "reward-dialog-unavailable"
+        : session->quests().is_dialog_action_pending() ? "dialog-action-pending"
+        : "active-player-unavailable";
+    openwow::diagnostics::Log(
+        openwow::diagnostics::LogLevel::kInfo,
+        "quest reward selection stage=request-skipped quest=" +
+            std::to_string(session && session->quests().has_active_reward()
+                               ? session->quests().active_reward().quest_id : 0u) +
+            " reason=" + reason);
     return 0;
   }
 
@@ -2248,6 +2228,11 @@ int LuaGetQuestReward(lua_State *L) {
   const auto &r = session->quests().active_reward();
   const std::uint32_t reward_index =
       choice_index <= 0 ? 0u : static_cast<std::uint32_t>(choice_index);
+  openwow::diagnostics::Log(
+      openwow::diagnostics::LogLevel::kInfo,
+      "quest reward selection stage=request quest=" + std::to_string(r.quest_id) +
+          " choice=" + std::to_string(choice_count > 0 ? reward_index + 1u : 0u) +
+          " choices=" + std::to_string(choice_count));
   session->quests().RecordPendingRewardSelection(r.quest_id, reward_index);
   TriggerQuestFrameProgressTutorial();
   session->interaction().SendQuestGiverChooseReward(r.npc_guid.GetRawValue(), r.quest_id,
@@ -2709,7 +2694,7 @@ int LuaGetQuestLogCompletionText(lua_State *L) {
   const auto &raw_text =
       (HasFlag(tmpl->flags, ::openwow::game::QuestFlags::kObjText) ||
        tmpl->completed_text.empty())
-          ? tmpl->details
+          ? tmpl->objectives
           : tmpl->completed_text;
 
   const auto expanded = ExpandQuestDialogText(*session, raw_text, false);
@@ -2805,8 +2790,8 @@ static int PushQuestLogItemInfoFromTemplate(lua_State *L,
     return PushEmptyQuestLogRewardInfo(L);
   }
 
-  const auto *item_template = session->query_cache().GetOrRequestItemTemplate(reward.item_id);
-  if (item_template == nullptr || item_template->name.empty()) {
+  const auto *item_template = GetOrRequestQuestItemTemplate(session, reward.item_id, true);
+  if (item_template == nullptr) {
     return PushEmptyQuestLogRewardInfo(L);
   }
 
@@ -2815,8 +2800,9 @@ static int PushQuestLogItemInfoFromTemplate(lua_State *L,
   lua_pushstring(L, texture_path.c_str());
   lua_pushnumber(L, static_cast<lua_Number>(reward.count));
   lua_pushnumber(
-      L, static_cast<lua_Number>(
-             static_cast<std::uint8_t>(item_template->quality)));
+      L, item_template->inventory_type != ::openwow::game::InventoryType::NonEquip
+             ? static_cast<lua_Number>(item_template->quality)
+             : -1.0);
   lua_pushwowbool(L, LocalPlayerCanUseQuestLogItem(*session, *item_template));
   return 5;
 }
@@ -2969,7 +2955,7 @@ int LuaGetQuestWorldMapAreaID(lua_State *L) {
       if (const auto *quest_template = GetOrRequestQuestTemplate(*session, quest_id);
           quest_template != nullptr) {
         const auto turn_in_ready =
-            IsQuestReadyForTurnInOnWorldMap(*session, *quest_template, *player_slot);
+            IsQuestTurnInReady(*session, quest_id);
         const auto objective_mask =
             turn_in_ready
                 ? 0u
@@ -3153,7 +3139,39 @@ int LuaIsUnitOnQuest(lua_State *L) {
 }
 
 int LuaQuestChooseRewardError(lua_State *L) {
-  (void)L;
+  auto* session = GetWorldSession(L);
+  std::string context = "quest reward selection stage=ui-rejected reason=no-choice quest=" +
+      std::to_string(session && session->quests().has_active_reward()
+                         ? session->quests().active_reward().quest_id : 0u);
+  {
+    // Retained fields only: diagnosing a rejection must not resolve layout,
+    // invoke getters or change the caller's Lua execution provenance.
+    const openwow::ui::ScopedNeutralLuaExecutionTaint neutral_taint(L);
+    const int top = lua_gettop(L);
+    lua_pushliteral(L, "QuestInfoFrame");
+    lua_rawget(L, LUA_GLOBALSINDEX);
+    if (lua_istable(L, -1)) {
+      for (const char* field : {"itemChoice", "chooseItems", "questLog"}) {
+        lua_pushstring(L, field);
+        lua_rawget(L, -2);
+        context += " ";
+        context += field;
+        context += "=";
+        if (lua_type(L, -1) == LUA_TNUMBER) {
+          context += std::to_string(lua_tonumber(L, -1));
+        } else if (lua_isboolean(L, -1)) {
+          context += lua_toboolean(L, -1) ? "true" : "false";
+        } else {
+          context += lua_typename(L, lua_type(L, -1));
+        }
+        lua_pop(L, 1);
+      }
+    } else {
+      context += " frame=missing";
+    }
+    lua_settop(L, top);
+  }
+  openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kWarn, context);
   DisplaySystemMessage(165);
   return 0;
 }
@@ -3617,35 +3635,7 @@ int LuaQuestPOIGetIconInfo(lua_State *L) {
     return 0;
   }
 
-  auto layout = poi_data.GetWorldMapIconLayout(quest_id);
-  if (!layout.has_value()) {
-    auto *session = GetWorldSession(L);
-    if (session == nullptr) {
-      return 0;
-    }
-
-    const bool turn_in_ready = IsQuestTurnInReady(*session, quest_id);
-    const auto objective_mask = BuildQuestPoiIncompleteObjectiveMask(*session, quest_id);
-    for (const auto &poi : poi_data.GetPOIsForQuest(quest_id)) {
-      if ((turn_in_ready && poi.objectiveIndex != -1) ||
-          (!turn_in_ready && !QuestPoiPassesObjectiveMask(poi, objective_mask)) ||
-          poi.points.empty()) {
-        continue;
-      }
-
-      const auto center = ::openwow::game::QuestPOIData::GetCentroid(poi);
-      layout = ::openwow::game::QuestPOIWorldMapIconLayout{
-          .turnInReady = turn_in_ready,
-          .objectiveIndex = poi.objectiveIndex,
-          .mapId = poi.mapId,
-          .worldX = static_cast<std::int32_t>(std::nearbyint(center.x)),
-          .worldY = static_cast<std::int32_t>(std::nearbyint(center.y)),
-      };
-      poi_data.SetWorldMapIconLayout(quest_id, *layout);
-      break;
-    }
-  }
-
+  const auto layout = poi_data.GetWorldMapIconLayout(quest_id);
   if (!layout.has_value()) {
     return 0;
   }
@@ -3661,7 +3651,7 @@ int LuaQuestPOIGetIconInfo(lua_State *L) {
     return 0;
   }
 
-  lua_pushwowbool(L, layout->turnInReady);
+  lua_pushwowbool(L, poi_data.GetWorldMapObjectiveMask(quest_id) == -1);
   lua_pushnumber(L, static_cast<lua_Number>(map_coord.x));
   lua_pushnumber(L, static_cast<lua_Number>(map_coord.y));
   lua_pushnumber(L, static_cast<lua_Number>(layout->objectiveIndex));
@@ -3711,6 +3701,11 @@ int LuaQuestPOIGetQuestIDByVisibleIndex(lua_State *L) {
     return luaL_error(L, "Usage: Script_QuestPOIGetQuestIDByVisibleIndex(index)");
   }
 
+  auto *session = GetWorldSession(L);
+  if (session == nullptr) {
+    return 0;
+  }
+
   const auto index = TruncateLuaNumberToSseI32(lua_tonumber(L, 1));
   if (index < 1 ||
       index > static_cast<std::int32_t>(::openwow::game::QuestPOIData::kMaxQuerySlots)) {
@@ -3723,13 +3718,13 @@ int LuaQuestPOIGetQuestIDByVisibleIndex(lua_State *L) {
     return 0;
   }
 
-  const auto visible_index = ::openwow::game::QuestLog::Get().GetVisibleIndexByQuestId(quest_id);
-  if (visible_index < 0) {
+  const auto visible_index = FindVisibleQuestIndexById(*session, quest_id);
+  if (visible_index == 0) {
     return 0;
   }
 
   lua_pushnumber(L, static_cast<lua_Number>(quest_id));
-  lua_pushnumber(L, static_cast<lua_Number>(visible_index + 1));
+  lua_pushnumber(L, static_cast<lua_Number>(visible_index));
   return 2;
 }
 

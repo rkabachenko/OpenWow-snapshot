@@ -52,6 +52,8 @@ struct CursorOverlayRenderer::Impl {
   [[nodiscard]] bool Submit(std::uint8_t view_id,
                             float screen_w,
                             float screen_h,
+                            float logical_to_drawable_x,
+                            float logical_to_drawable_y,
                             int mouse_x,
                             int mouse_y,
                             int hotspot_x,
@@ -64,10 +66,12 @@ struct CursorOverlayRenderer::Impl {
 
     ui::Quad quad{};
     quad.texture = texture;
-    quad.x = static_cast<float>(mouse_x - hotspot_x);
-    quad.y = static_cast<float>(mouse_y - hotspot_y);
-    quad.w = kSoftwareCursorSize;
-    quad.h = kSoftwareCursorSize;
+    quad.x = static_cast<float>(mouse_x) -
+             static_cast<float>(hotspot_x) * logical_to_drawable_x;
+    quad.y = static_cast<float>(mouse_y) -
+             static_cast<float>(hotspot_y) * logical_to_drawable_y;
+    quad.w = kSoftwareCursorSize * logical_to_drawable_x;
+    quad.h = kSoftwareCursorSize * logical_to_drawable_y;
     quad.blend = ui::BlendMode::kAlpha;
     quad.sampler_flags = kCursorSamplerFlags;
 
@@ -90,6 +94,8 @@ CursorOverlayRenderer::~CursorOverlayRenderer() {
 bool CursorOverlayRenderer::RenderTexturePath(std::uint8_t view_id,
                                               float screen_w,
                                               float screen_h,
+                                              float logical_to_drawable_x,
+                                              float logical_to_drawable_y,
                                               int mouse_x,
                                               int mouse_y,
                                               int hotspot_x,
@@ -101,14 +107,17 @@ bool CursorOverlayRenderer::RenderTexturePath(std::uint8_t view_id,
 
   const TextureLease texture =
       texture_manager_.AcquireCachedTexture(std::string(texture_path));
-  return impl_->Submit(view_id, screen_w, screen_h, mouse_x, mouse_y,
-                       hotspot_x, hotspot_y,
+  return impl_->Submit(view_id, screen_w, screen_h,
+                       logical_to_drawable_x, logical_to_drawable_y,
+                       mouse_x, mouse_y, hotspot_x, hotspot_y,
                        BgfxTextureLeaseAccess::Get(texture));
 }
 
 bool CursorOverlayRenderer::RenderCustomPixels(std::uint8_t view_id,
                                                float screen_w,
                                                float screen_h,
+                                               float logical_to_drawable_x,
+                                               float logical_to_drawable_y,
                                                int mouse_x,
                                                int mouse_y,
                                                int hotspot_x,
@@ -134,8 +143,10 @@ bool CursorOverlayRenderer::RenderCustomPixels(std::uint8_t view_id,
     }
   }
 
-  return impl_->Submit(view_id, screen_w, screen_h, mouse_x, mouse_y,
-                       hotspot_x, hotspot_y, impl_->custom_texture);
+  return impl_->Submit(view_id, screen_w, screen_h,
+                       logical_to_drawable_x, logical_to_drawable_y,
+                       mouse_x, mouse_y, hotspot_x, hotspot_y,
+                       impl_->custom_texture);
 }
 
 void CursorOverlayRenderer::ResetCustomTexture() {

@@ -1616,8 +1616,18 @@ bool InteractionSender::SendUseItemPacket(std::uint8_t bag, std::uint8_t slot,
 
   net::wotlk::SpellTargets targets{};
   if (target_guid != 0) {
-    targets.target_mask = net::wotlk::kTargetFlagUnit;
-    targets.unit_target = ObjectGuid(target_guid);
+    const ObjectGuid target(target_guid);
+    const auto *object = session_->objects().GetObjectByGUID(target);
+    if (object != nullptr ? object->IsGameObject() : target.IsGameObject()) {
+      targets.target_mask = net::wotlk::kTargetFlagGameObject;
+      targets.go_target = target;
+    } else if (object != nullptr ? object->IsItem() : target.IsItem()) {
+      targets.target_mask = net::wotlk::kTargetFlagItem;
+      targets.item_target = target;
+    } else {
+      targets.target_mask = net::wotlk::kTargetFlagUnit;
+      targets.unit_target = target;
+    }
   } else {
     targets.target_mask = net::wotlk::kTargetFlagSelf;
   }
@@ -1813,11 +1823,11 @@ void InteractionSender::SendClearActionButton(std::uint8_t slot) {
   }
 }
 
-void InteractionSender::SendTaxiNodeStatusQuery(std::uint64_t guid) {
+bool InteractionSender::SendTaxiNodeStatusQuery(std::uint64_t guid) {
 
   WorldPacket pkt(Opcode::CMSG_TAXINODE_STATUS_QUERY);
   pkt.AppendU64(guid);
-  Send(pkt);
+  return Send(pkt);
 }
 
 void InteractionSender::SendTaxiQueryAvailableNodes(std::uint64_t guid) {

@@ -1,6 +1,7 @@
 #include "openwow/ui/surfaces/game/bindings/world_ui_lifecycle_lua_adapter.h"
 
 #include "openwow/ui/surfaces/game/runtime/world_ui_lifecycle_command.h"
+#include "openwow/foundation/diagnostics/logging.h"
 
 #include <lua.hpp>
 
@@ -39,6 +40,9 @@ WorldUiLifecycleCommandPort* LifecycleCommands(lua_State* const state) {
 void RequestWorldUiReload(lua_State* state) {
   if (auto* commands = LifecycleCommands(state); commands != nullptr) {
     commands->RequestWorldUiReload();
+  } else {
+    openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kError,
+        "WorldUI reload rejected: source=ReloadUI reason=lifecycle-port-unbound");
   }
 }
 

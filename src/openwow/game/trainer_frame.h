@@ -47,7 +47,7 @@ struct TrainerServiceTooltipTarget {
 std::uint32_t Trainer_ParseFilterString(const char *filter_str);
 
 void Trainer_ResetFrameState();
-void Trainer_UpdateGreetingText(const WorldSession &session);
+bool Trainer_PrepareFrameState(const WorldSession &session);
 const std::string &Trainer_GetGreetingText();
 
 std::uint32_t Trainer_GetVisibleServiceCount(const WorldSession &session,

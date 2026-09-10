@@ -32,6 +32,7 @@ BlpUploadFormat SourceBlockFormat(const data::BLPTexHeader& header) noexcept {
 constexpr std::uint8_t kBc1SupportedBit = 1u << 0u;
 constexpr std::uint8_t kBc2SupportedBit = 1u << 1u;
 constexpr std::uint8_t kBc3SupportedBit = 1u << 2u;
+constexpr std::uint8_t kAstc4x4SupportedBit = 1u << 3u;
 
 std::atomic<std::uint8_t>& BlockCompressionSupportBits() noexcept {
   static std::atomic<std::uint8_t> bits{0u};
@@ -62,6 +63,7 @@ void AppendTransparentBlackBlocks(const BlpUploadFormat format,
         break;
       case BlpUploadFormat::kBc2:
       case BlpUploadFormat::kBc3:
+      case BlpUploadFormat::kAstc4x4:
         bytes.insert(bytes.end(), kTransparentBlackBc2Bc3Block.begin(),
                      kTransparentBlackBc2Bc3Block.end());
         break;
@@ -74,11 +76,14 @@ void AppendTransparentBlackBlocks(const BlpUploadFormat format,
 
 bool AppendBlockMipChain(const data::BLPTextureData& blp,
                          const BlpUploadFormat format,
+                         const std::uint8_t first_source_mip,
                          const std::uint8_t requested_mips,
                          BlpRgbaMipUpload& upload) {
   std::size_t reserved_bytes = 0;
   for (std::uint8_t level = 0;
-       level < requested_mips && level < blp.mips.size(); ++level) {
+       level < requested_mips &&
+       static_cast<std::size_t>(first_source_mip) + level < blp.mips.size();
+       ++level) {
     const auto mip_bytes =
         BlpUploadMipSize(upload.width, upload.height, level, format);
     if (!mip_bytes.has_value() ||
@@ -90,7 +95,9 @@ bool AppendBlockMipChain(const data::BLPTextureData& blp,
   upload.bytes.reserve(reserved_bytes);
 
   for (std::uint8_t level = 0; level < requested_mips; ++level) {
-    if (level >= blp.mips.size()) {
+    const std::size_t source_level =
+        static_cast<std::size_t>(first_source_mip) + level;
+    if (source_level >= blp.mips.size()) {
       break;
     }
     const auto expected_size =
@@ -104,7 +111,7 @@ bool AppendBlockMipChain(const data::BLPTextureData& blp,
 
     const std::uint32_t block_bytes = BlpUploadFormatBytesPerBlock(format);
     const std::size_t required_blocks = *expected_size / block_bytes;
-    const auto& source = blp.mips[level].data;
+    const auto& source = blp.mips[source_level].data;
     const std::size_t usable_blocks =
         std::min<std::size_t>(source.size() / block_bytes, required_blocks);
 
@@ -123,12 +130,15 @@ bool AppendBlockMipChain(const data::BLPTextureData& blp,
 }
 
 void AppendRgbaMipChain(const data::BLPTextureData& blp,
+                        const std::uint8_t first_source_mip,
                         const std::uint8_t requested_mips,
                         BlpRgbaMipUpload& upload) {
 
   std::size_t reserved_bytes = 0;
   for (std::uint8_t level = 0;
-       level < requested_mips && level < blp.mips.size(); ++level) {
+       level < requested_mips &&
+       static_cast<std::size_t>(first_source_mip) + level < blp.mips.size();
+       ++level) {
     const auto mip_bytes = BlpUploadMipSize(upload.width, upload.height, level,
                                              BlpUploadFormat::kRgba8);
     if (!mip_bytes.has_value() ||
@@ -140,7 +150,9 @@ void AppendRgbaMipChain(const data::BLPTextureData& blp,
   upload.bytes.reserve(reserved_bytes);
 
   for (std::uint8_t level = 0; level < requested_mips; ++level) {
-    if (level >= blp.mips.size()) {
+    const std::size_t source_level =
+        static_cast<std::size_t>(first_source_mip) + level;
+    if (source_level >= blp.mips.size()) {
       break;
     }
 
@@ -152,7 +164,8 @@ void AppendRgbaMipChain(const data::BLPTextureData& blp,
       break;
     }
 
-    auto rgba = data::BLPTextureLoader::DecompressMip(blp, level);
+    auto rgba = data::BLPTextureLoader::DecompressMip(
+        blp, static_cast<std::uint8_t>(source_level));
     if (rgba.size() != *expected_size) {
       break;
     }
@@ -210,6 +223,8 @@ bgfx::TextureFormat::Enum ToBgfxTextureFormat(
       return bgfx::TextureFormat::BC2;
     case BlpUploadFormat::kBc3:
       return bgfx::TextureFormat::BC3;
+    case BlpUploadFormat::kAstc4x4:
+      return bgfx::TextureFormat::ASTC4x4;
     case BlpUploadFormat::kRgba8:
       break;
   }
@@ -221,6 +236,8 @@ BlockCompressionSupport QueryBlockCompressionSupport() {
       .bc1 = CapsSupportTexture2D(ToBgfxTextureFormat(BlpUploadFormat::kBc1)),
       .bc2 = CapsSupportTexture2D(ToBgfxTextureFormat(BlpUploadFormat::kBc2)),
       .bc3 = CapsSupportTexture2D(ToBgfxTextureFormat(BlpUploadFormat::kBc3)),
+      .astc4x4 = CapsSupportTexture2D(
+          ToBgfxTextureFormat(BlpUploadFormat::kAstc4x4)),
   };
 }
 
@@ -229,7 +246,8 @@ BlockCompressionSupport RefreshBlockCompressionSupport() {
   const auto bits = static_cast<std::uint8_t>(
       (support.bc1 ? kBc1SupportedBit : 0u) |
       (support.bc2 ? kBc2SupportedBit : 0u) |
-      (support.bc3 ? kBc3SupportedBit : 0u));
+      (support.bc3 ? kBc3SupportedBit : 0u) |
+      (support.astc4x4 ? kAstc4x4SupportedBit : 0u));
   BlockCompressionSupportBits().store(bits, std::memory_order_relaxed);
   return support;
 }
@@ -241,12 +259,14 @@ BlockCompressionSupport CurrentBlockCompressionSupport() noexcept {
       .bc1 = (bits & kBc1SupportedBit) != 0u,
       .bc2 = (bits & kBc2SupportedBit) != 0u,
       .bc3 = (bits & kBc3SupportedBit) != 0u,
+      .astc4x4 = (bits & kAstc4x4SupportedBit) != 0u,
   };
 }
 
 BlpRgbaMipUpload BuildBlpRgbaMipUpload(
     const data::BLPTextureData& blp,
-    const BlockCompressionSupport gpu_support) {
+    const BlockCompressionSupport gpu_support,
+    const BlpMipUploadPolicy policy) {
   BlpRgbaMipUpload upload;
   if (!blp.isValid || blp.header.width == 0 || blp.header.height == 0 ||
       blp.header.width > std::numeric_limits<std::uint16_t>::max() ||
@@ -254,22 +274,48 @@ BlpRgbaMipUpload BuildBlpRgbaMipUpload(
     return upload;
   }
 
-  upload.width = blp.header.width;
-  upload.height = blp.header.height;
   const bool source_has_mips = (blp.header.hasMips & 0x0Fu) != 0u;
-  upload.retail_mip_count =
-      source_has_mips ? data::BLPTextureLoader::GetMipCount(upload.width, upload.height) : 1u;
-  upload.retail_mip_count = std::max<std::uint8_t>(1u, upload.retail_mip_count);
+  const std::uint8_t source_mip_count = std::max<std::uint8_t>(
+      1u, source_has_mips
+              ? data::BLPTextureLoader::GetMipCount(blp.header.width,
+                                                    blp.header.height)
+              : 1u);
+
+  const BlpUploadFormat block_format = SourceBlockFormat(blp.header);
+  std::uint8_t first_source_mip = 0u;
+  const std::size_t available_source_mips =
+      std::min<std::size_t>(source_mip_count, blp.mips.size());
+  if (block_format != BlpUploadFormat::kRgba8 &&
+      !gpu_support.Supports(block_format) &&
+      policy.max_uncompressed_dimension != 0u) {
+    while (static_cast<std::size_t>(first_source_mip) + 1u <
+           available_source_mips) {
+      const auto dimensions = data::BLPTextureLoader::GetMipDimensions(
+          blp.header.width, blp.header.height, first_source_mip);
+      if (dimensions.first <= policy.max_uncompressed_dimension &&
+          dimensions.second <= policy.max_uncompressed_dimension) {
+        break;
+      }
+      ++first_source_mip;
+    }
+  }
+
+  const auto upload_dimensions = data::BLPTextureLoader::GetMipDimensions(
+      blp.header.width, blp.header.height, first_source_mip);
+  upload.width = upload_dimensions.first;
+  upload.height = upload_dimensions.second;
+  upload.retail_mip_count = static_cast<std::uint8_t>(
+      source_mip_count - first_source_mip);
 
   const std::uint8_t requested_mips =
       std::min<std::uint8_t>(upload.retail_mip_count, 16u);
   upload.mip_offsets.reserve(requested_mips);
   upload.mip_sizes.reserve(requested_mips);
 
-  const BlpUploadFormat block_format = SourceBlockFormat(blp.header);
   if (block_format != BlpUploadFormat::kRgba8 &&
       gpu_support.Supports(block_format) &&
-      AppendBlockMipChain(blp, block_format, requested_mips, upload)) {
+      AppendBlockMipChain(blp, block_format, first_source_mip, requested_mips,
+                          upload)) {
     upload.format = block_format;
   } else {
 
@@ -278,7 +324,7 @@ BlpRgbaMipUpload BuildBlpRgbaMipUpload(
     upload.mip_sizes.clear();
     upload.decoded_mip_count = 0u;
     upload.format = BlpUploadFormat::kRgba8;
-    AppendRgbaMipChain(blp, requested_mips, upload);
+    AppendRgbaMipChain(blp, first_source_mip, requested_mips, upload);
   }
 
   upload.complete_mip_chain =

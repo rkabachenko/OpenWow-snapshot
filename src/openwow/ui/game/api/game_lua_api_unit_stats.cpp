@@ -519,9 +519,7 @@ int LuaUnitAttackBothHands(lua_State* L) {
           if (auto skill_slot = player->FindActiveSkillSlot(
                   static_cast<std::uint16_t>(skill_line_id))) {
             auto skill = player->GetSkill(*skill_slot);
-            base[slot] = skill.value;
-            if (base[slot] != 0)
-              base[slot] += static_cast<std::uint16_t>(skill.step_modifier);
+            base[slot] = static_cast<std::int32_t>(skill.EffectiveValue());
             modifier[slot] = skill.modifier;
           }
         }

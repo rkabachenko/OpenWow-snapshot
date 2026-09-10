@@ -112,7 +112,8 @@ class CEffect_C {
   CEffect_C(CEffect_C&&) = delete;
   CEffect_C& operator=(CEffect_C&&) = delete;
 
-  [[nodiscard]] bool Update(std::uint32_t frame_tick_ms);
+  [[nodiscard]] bool Update(std::uint32_t frame_tick_ms,
+                            float delta_seconds);
   void BeginTeardown();
 
   void ReleaseOwnerReference();
@@ -140,7 +141,7 @@ class CEffect_C {
       const WorldSession& session, CGObject_C& owner,
       const CEffectSnapshot& state);
 
-  static void UpdateAll(std::uint32_t frame_tick_ms);
+  static void UpdateAll(std::uint32_t frame_tick_ms, float delta_seconds);
 
   [[nodiscard]] static render::m2::M2RenderFrameResult RenderAll(
       std::uint16_t view_id, const float* view_matrix,

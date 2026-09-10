@@ -1,6 +1,7 @@
 #include "openwow/ui/game/runtime/frame_event_runtime.h"
 
 #include "openwow/foundation/diagnostics/logging.h"
+#include "openwow/ui/animation/animation_lua.h"
 #include "openwow/ui/game/framescript/core/frame_script_invocation.h"
 #include "openwow/ui/game/game_events.h"
 #include "openwow/ui/game/runtime/frame_store.h"
@@ -45,6 +46,24 @@ void FrameEventRuntime::Shutdown() {
 
 void FrameEventRuntime::Update(const float elapsed_seconds) {
   if (lua_ == nullptr) return;
+
+  // Animation owners do not need an OnUpdate handler. Include texture and
+  // font regions, and retain only handles across script callbacks: those can
+  // destroy frames or rebuild the traversal snapshot during this update.
+  std::vector<FrameStore::FrameHandle> animation_owners;
+  for (const auto& entry : dependencies_.traversal.render_snapshot()) {
+    if (entry.lua_ref == LUA_NOREF) continue;
+    lua_rawgeti(lua_, LUA_REGISTRYINDEX, entry.lua_ref);
+    if (lua_istable(lua_, -1)) {
+      lua_pushliteral(lua_, "__ow_anim_groups");
+      lua_rawget(lua_, -2);
+      if (lua_istable(lua_, -1) && lua_rawlen(lua_, -1) != 0) {
+        animation_owners.push_back(entry.handle);
+      }
+      lua_pop(lua_, 1);
+    }
+    lua_pop(lua_, 1);
+  }
 
   if (on_update_order_dirty_) {
     std::stable_sort(
@@ -97,6 +116,17 @@ void FrameEventRuntime::Update(const float elapsed_seconds) {
         std::make_move_iterator(pending_on_update_entries_.end()));
     pending_on_update_entries_.clear();
     on_update_order_dirty_ = true;
+  }
+
+  // Advance the shared animation engine in the update phase, independently
+  // of rendering. FrameXML uses animation completion callbacks to hide alerts.
+  for (const auto handle : animation_owners) {
+    const auto ref = dependencies_.frames.FindLuaRef(handle);
+    if (!ref || !dependencies_.traversal.IsEffectivelyVisible(handle)) continue;
+    const int top = lua_gettop(lua_);
+    lua_rawgeti(lua_, LUA_REGISTRYINDEX, *ref);
+    openwow::ui::anim::UpdateRegionAnimationGroups(lua_, -1, elapsed_seconds);
+    lua_settop(lua_, top);
   }
 }
 

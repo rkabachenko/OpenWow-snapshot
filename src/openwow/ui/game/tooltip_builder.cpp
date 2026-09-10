@@ -2,7 +2,9 @@
 #include "openwow/ui/game/tooltip_builder.h"
 
 #include "openwow/data/formats/dbc/dbc_loader.h"
+#include "openwow/foundation/diagnostics/logging.h"
 #include "openwow/game/inventory/player_inventory_replica.h"
+#include "openwow/game/inventory/items/item_icon_resolver.h"
 #include "openwow/game/inventory/items/item_interactions.h"
 #include "openwow/game/inventory/items/item_scaling.h"
 #include "openwow/game/inventory/items/item_trade_eligibility.h"
@@ -20,9 +22,12 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -82,6 +87,29 @@ std::string FormatLocalized(const std::string_view key,
   return localization.FormatString(
       localization.GetString(std::string(key), std::string(fallback)),
       arguments);
+}
+
+void LogTooltipDataJoinFailureOnce(const std::string_view stage,
+                                   const std::uint32_t item_id,
+                                   const std::uint32_t reference_id,
+                                   const std::string_view reason) {
+  const std::string key = std::string(stage) + ':' + std::to_string(item_id) +
+                          ':' + std::to_string(reference_id) + ':' +
+                          std::string(reason);
+  static std::mutex mutex;
+  static std::unordered_set<std::string> reported;
+  {
+    std::lock_guard lock(mutex);
+    if (!reported.insert(key).second) {
+      return;
+    }
+  }
+  openwow::diagnostics::Log(
+      openwow::diagnostics::LogLevel::kWarn,
+      "ITEMTOOLTIP|stage=" + std::string(stage) +
+          "|item=" + std::to_string(item_id) +
+          "|reference=" + std::to_string(reference_id) +
+          "|reason=" + std::string(reason));
 }
 
 std::string JoinNames(const std::vector<std::string>& names) {
@@ -201,6 +229,9 @@ std::string ItemSubclassName(const openwow::game::ItemTemplate& item,
     if (const auto* const subclass =
             dbc->item_sub_class().LookupEntry(composite_id);
         subclass != nullptr) {
+      if ((subclass->display_flags & 1u) != 0u) {
+        return {};
+      }
       const auto name = subclass->display_name.empty()
                             ? subclass->verbose_name
                             : subclass->display_name;
@@ -235,6 +266,120 @@ std::string ItemSubclassName(const openwow::game::ItemTemplate& item,
                : std::string{};
   }
   return {};
+}
+
+std::string ItemSubclassName(
+    const openwow::data::dbc::ItemSubClassEntry* const subclass) {
+  if (subclass == nullptr || (subclass->display_flags & 1u) != 0u) {
+    return {};
+  }
+  const auto name = subclass->display_name.empty()
+                        ? subclass->verbose_name
+                        : subclass->display_name;
+  return std::string(name);
+}
+
+bool ProficiencyMaskContains(const std::uint32_t mask,
+                             const std::uint32_t subclass) {
+  return (mask & (std::uint32_t{1} << (subclass & 31u))) != 0u;
+}
+
+const openwow::data::dbc::ItemSubClassEntry* FindItemSubclass(
+    const openwow::data::dbc::DbcLoader* const dbc,
+    const openwow::game::ItemClass item_class,
+    const std::uint32_t subclass) {
+  if (dbc == nullptr) {
+    return nullptr;
+  }
+  return dbc->item_sub_class().LookupEntry(
+      openwow::data::dbc::ItemSubClassEntry::ComposeKey(
+          static_cast<std::uint32_t>(item_class), subclass));
+}
+
+struct ItemTypePresentation {
+  std::string subclass;
+  bool slot_usable = true;
+  bool subclass_usable = true;
+};
+
+ItemTypePresentation ResolveItemTypePresentation(
+    const openwow::game::ItemTemplate& item,
+    const openwow::data::dbc::DbcLoader* const dbc,
+    const openwow::game::WorldSession* const session,
+    const bool has_scaling_values) {
+  ItemTypePresentation result{.subclass = ItemSubclassName(item, dbc)};
+  if (session == nullptr) {
+    return result;
+  }
+
+  const auto* const player = session->objects().GetActivePlayer();
+  if (player == nullptr) {
+    return result;
+  }
+
+  const auto item_class = static_cast<std::uint8_t>(item.item_class);
+  const auto proficiency_mask =
+      session->session().GetProficiencyMask(item_class);
+  if (proficiency_mask != 0u &&
+      !ProficiencyMaskContains(proficiency_mask, item.subclass)) {
+    bool resolved_proficiency_mismatch = false;
+    bool slot_is_the_unusable_part = false;
+    if (item.item_class == openwow::game::ItemClass::Weapon) {
+      if (const auto* const subclass = FindItemSubclass(
+              dbc, openwow::game::ItemClass::Weapon, item.subclass);
+          subclass != nullptr) {
+        constexpr auto kNoAlternative =
+            std::numeric_limits<std::uint32_t>::max();
+        resolved_proficiency_mismatch =
+            (subclass->prereq_proficiency != kNoAlternative &&
+             ProficiencyMaskContains(
+                 proficiency_mask, subclass->prereq_proficiency)) ||
+            (subclass->postreq_proficiency != kNoAlternative &&
+             ProficiencyMaskContains(
+                 proficiency_mask, subclass->postreq_proficiency));
+        slot_is_the_unusable_part = resolved_proficiency_mismatch;
+      }
+    } else if (item.item_class == openwow::game::ItemClass::Armor &&
+               has_scaling_values && dbc != nullptr) {
+      if (const auto* const player_class =
+              dbc->chr_classes().LookupEntry(player->State().GetClass());
+          player_class != nullptr) {
+        std::optional<std::uint32_t> displayed_subclass;
+        if (item.subclass == 4u &&
+            (player_class->class_flags & 0x20u) != 0u) {
+          displayed_subclass =
+              ((proficiency_mask & (std::uint32_t{1} << 3u)) |
+               (std::uint32_t{1} << 4u)) >>
+              3u;
+        } else if (item.subclass == 3u &&
+                   (player_class->class_flags & 0x10u) != 0u &&
+                   ProficiencyMaskContains(proficiency_mask, 2u)) {
+          displayed_subclass = 2u;
+        }
+        if (displayed_subclass.has_value()) {
+          const auto alternative = ItemSubclassName(FindItemSubclass(
+              dbc, openwow::game::ItemClass::Armor,
+              *displayed_subclass));
+          if (!alternative.empty()) {
+            result.subclass = alternative;
+            resolved_proficiency_mismatch = true;
+          }
+        }
+      }
+    }
+
+    if (slot_is_the_unusable_part) {
+      result.slot_usable = false;
+    } else if (!resolved_proficiency_mismatch) {
+      result.subclass_usable = false;
+    }
+  }
+
+  if (item.inventory_type == openwow::game::InventoryType::OffHand &&
+      !player->Casts().CanEquipWeaponInOffHand()) {
+    result.slot_usable = false;
+  }
+  return result;
 }
 
 std::string StatFallbackName(const std::uint32_t stat_type) {
@@ -285,24 +430,49 @@ std::string StatFallbackName(const std::uint32_t stat_type) {
   }
 }
 
-std::string FormatStat(const std::uint32_t stat_type, const std::int32_t value) {
+struct FormattedStat {
+  std::string text;
+  bool equip_effect = false;
+};
+
+std::optional<FormattedStat> FormatStat(const std::uint32_t stat_type,
+                                        const std::int32_t value) {
   std::array<char, 128> key{};
   const char* const resolved_key = openwow::ui::game::GetStatModifierGlobalStringName(
       stat_type + 11u, key.data(), key.size());
   if (resolved_key != nullptr && resolved_key[0] != '\0') {
-    const auto format = openwow::game::Localization::Get().GetString(
-        resolved_key, "");
+    std::string full_key(resolved_key);
+    constexpr std::string_view kShortSuffix = "_SHORT";
+    if (full_key.ends_with(kShortSuffix)) {
+      full_key.resize(full_key.size() - kShortSuffix.size());
+    }
+    auto& localization = openwow::game::Localization::Get();
+    const auto format = localization.GetString(full_key, "");
     if (!format.empty()) {
-      return openwow::game::Localization::Get().FormatString(
-          format, {std::to_string(value)});
+      const bool has_sign_placeholder = format.find("%c") != std::string::npos;
+      std::vector<std::string> arguments;
+      if (has_sign_placeholder) {
+        const auto magnitude = value < 0 ? -static_cast<std::int64_t>(value)
+                                         : static_cast<std::int64_t>(value);
+        arguments = {value < 0 ? "-" : "+", std::to_string(magnitude)};
+      } else {
+        arguments = {std::to_string(value)};
+      }
+      return FormattedStat{
+          .text = localization.FormatString(format, arguments),
+          .equip_effect = !has_sign_placeholder,
+      };
     }
   }
 
   const auto name = StatFallbackName(stat_type);
   if (name.empty()) {
-    return {};
+    return std::nullopt;
   }
-  return (value >= 0 ? "+" : "") + std::to_string(value) + " " + name;
+  return FormattedStat{
+      .text = (value >= 0 ? "+" : "") + std::to_string(value) + " " + name,
+      .equip_effect = stat_type > 7u,
+  };
 }
 
 struct ScaledTooltipStatLine {
@@ -459,12 +629,19 @@ void AddArmorAndBlock(std::vector<TooltipLine>& lines,
 
 void AddBaseStats(std::vector<TooltipLine>& lines,
                   const openwow::game::ItemTemplate& item) {
+  const auto equip_prefix =
+      Localized("ITEM_SPELL_TRIGGER_ONEQUIP", "Equip: ");
   for (const auto& stat : item.stats) {
     if (stat.value == 0) {
       continue;
     }
-    if (auto text = FormatStat(stat.type, stat.value); !text.empty()) {
-      lines.push_back(MakeLine(std::move(text)));
+    if (auto formatted = FormatStat(stat.type, stat.value);
+        formatted.has_value()) {
+      if (formatted->equip_effect) {
+        formatted->text.insert(0, equip_prefix);
+      }
+      lines.push_back(MakeLine(std::move(formatted->text),
+                               formatted->equip_effect ? kGreen : kWhite));
     }
   }
 
@@ -492,13 +669,20 @@ void AddScaledStats(std::vector<TooltipLine>& lines,
   const auto equip_prefix =
       Localized("ITEM_SPELL_TRIGGER_ONEQUIP", "Equip: ");
   for (const auto& stat : data.stats) {
-    if (auto text = FormatStat(stat.stat_type, stat.value); !text.empty()) {
-      lines.push_back(MakeLine(equip_prefix + text, kGreen));
+    if (auto formatted = FormatStat(stat.stat_type, stat.value);
+        formatted.has_value()) {
+      if (formatted->equip_effect) {
+        formatted->text.insert(0, equip_prefix);
+      }
+      lines.push_back(MakeLine(std::move(formatted->text),
+                               formatted->equip_effect ? kGreen : kWhite));
     }
   }
   if (data.spell_power != 0) {
-    if (auto text = FormatStat(45u, data.spell_power); !text.empty()) {
-      lines.push_back(MakeLine(equip_prefix + text, kGreen));
+    if (auto formatted = FormatStat(45u, data.spell_power);
+        formatted.has_value()) {
+      formatted->text.insert(0, equip_prefix);
+      lines.push_back(MakeLine(std::move(formatted->text), kGreen));
     }
   }
 }
@@ -591,7 +775,9 @@ void AddLimitCategory(std::vector<TooltipLine>& lines,
 
 void AddSlotAndContainer(std::vector<TooltipLine>& lines,
                          const openwow::game::ItemTemplate& item,
-                         const openwow::data::dbc::DbcLoader* const dbc) {
+                         const openwow::data::dbc::DbcLoader* const dbc,
+                         const openwow::game::WorldSession* const session,
+                         const bool has_scaling_values) {
   if (item.item_class == openwow::game::ItemClass::Container &&
       item.container_slots != 0u) {
     lines.push_back(MakeLine(FormatLocalized(
@@ -603,44 +789,124 @@ void AddSlotAndContainer(std::vector<TooltipLine>& lines,
     return;
   }
   const auto slot = InventoryTypeName(item.inventory_type);
-  const auto subclass = ItemSubclassName(item, dbc);
-  if (!slot.empty() || !subclass.empty()) {
-    lines.push_back(MakeDoubleLine(slot, subclass));
+  const auto presentation = ResolveItemTypePresentation(
+      item, dbc, session, has_scaling_values);
+  if (!slot.empty() || !presentation.subclass.empty()) {
+    lines.push_back(MakeDoubleLine(
+        slot, presentation.subclass,
+        presentation.slot_usable ? kWhite : kRed,
+        presentation.subclass_usable ? kWhite : kRed));
   }
 }
 
 struct GemPresentation {
   std::string description;
   std::uint32_t color = 0;
+  std::uint32_t enchantment_condition = 0;
+  std::string texture_path;
+  bool filled = false;
+  bool color_resolved = false;
 };
 
-std::optional<GemPresentation> ResolveGemPresentation(
-    const openwow::game::ItemDefinitions& item_definitions,
-    const std::uint32_t item_id,
-    const openwow::data::dbc::DbcLoader* const dbc) {
-  if (item_id == 0u || dbc == nullptr) {
-    return std::nullopt;
+std::optional<std::string> FormatItemEnchantmentDescription(
+    const std::string_view description, const std::int64_t instance_value) {
+  std::string formatted;
+  formatted.reserve(description.size() + 16u);
+  std::size_t cursor = 0u;
+  while (cursor < description.size()) {
+    const auto token = description.find('$', cursor);
+    if (token == std::string_view::npos) {
+      formatted.append(description.substr(cursor));
+      break;
+    }
+    formatted.append(description.substr(cursor, token - cursor));
+    if (token + 1u >= description.size() || description[token + 1u] != 'i') {
+      return std::nullopt;
+    }
+    formatted.append(std::to_string(instance_value));
+    cursor = token + 2u;
   }
-  const auto gem_item = item_definitions.GetItemSnapshot(item_id);
-  if (!gem_item.has_value() || gem_item->gem_properties == 0u) {
-    return std::nullopt;
+  return formatted;
+}
+
+std::string FormatItemEnchantmentOrPreserve(
+    const std::string_view description, const std::int64_t instance_value,
+    const std::uint32_t item_id, const std::uint32_t enchantment_id) {
+  if (const auto formatted =
+          FormatItemEnchantmentDescription(description, instance_value);
+      formatted.has_value()) {
+    return *formatted;
   }
-  const auto* const properties =
-      dbc->gem_properties().LookupEntry(gem_item->gem_properties);
-  if (properties == nullptr) {
-    return std::nullopt;
+  LogTooltipDataJoinFailureOnce("enchantment-format", item_id,
+                                enchantment_id, "unsupported-dollar-token");
+  return std::string(description);
+}
+
+std::uint32_t GemColorCount(
+    const openwow::game::EquippedGemColorCounts& counts,
+    const std::uint8_t operand_type) {
+  switch (operand_type) {
+    case 1u: return counts.meta;
+    case 2u: return counts.red;
+    case 3u: return counts.yellow;
+    case 4u: return counts.blue;
+    default: return 0u;
   }
-  GemPresentation presentation;
-  presentation.color = properties->type;
-  if (const auto* const enchant =
-          dbc->spell_item_enchantment().LookupEntry(properties->enchant_id);
-      enchant != nullptr) {
-    presentation.description.assign(enchant->description);
+}
+
+bool CompareGemConditionValues(const std::uint32_t left,
+                               const std::uint32_t right,
+                               const std::uint8_t operation) {
+  switch (operation) {
+    case 0u: return left == right;
+    case 1u: return left != right;
+    case 2u: return left < right;
+    case 3u: return left > right;
+    case 4u: return left <= right;
+    case 5u: return left >= right;
+    default: return true;
   }
-  if (presentation.description.empty()) {
-    presentation.description = gem_item->name;
+}
+
+bool IsGemEnchantmentConditionActive(
+    const std::uint32_t condition_id,
+    const openwow::data::dbc::DbcLoader* const dbc,
+    const openwow::game::WorldSession* const session,
+    const std::uint32_t item_id) {
+  if (condition_id == 0u || dbc == nullptr || session == nullptr) {
+    return true;
   }
-  return presentation;
+  const auto* const player = session->objects().GetActivePlayer();
+  if (player == nullptr) {
+    return true;
+  }
+  const auto* const condition =
+      dbc->spell_item_enchantment_condition().LookupEntry(condition_id);
+  if (condition == nullptr) {
+    LogTooltipDataJoinFailureOnce("socket-condition", item_id, condition_id,
+                                  "dbc-record-missing");
+    return true;
+  }
+
+  const auto& counts = player->GetEquippedGemColorCounts();
+  bool active = true;
+  for (std::size_t index = 0; index < condition->lt_operand_type.size(); ++index) {
+    const auto left_type = condition->lt_operand_type[index];
+    if (left_type == 0u) {
+      break;
+    }
+    const auto left = GemColorCount(counts, left_type);
+    const auto right_type = condition->rt_operand_type[index];
+    const auto right = right_type == 0u
+                           ? condition->rt_operand[index]
+                           : GemColorCount(counts, right_type);
+    active = active && CompareGemConditionValues(
+                           left, right, condition->operator_type[index]);
+    if (condition->logic[index] == 0u) {
+      break;
+    }
+  }
+  return active;
 }
 
 std::pair<std::string_view, std::string_view> EmptySocketText(
@@ -650,15 +916,114 @@ std::pair<std::string_view, std::string_view> EmptySocketText(
     case 2u: return {"EMPTY_SOCKET_RED", "Red Socket"};
     case 4u: return {"EMPTY_SOCKET_YELLOW", "Yellow Socket"};
     case 8u: return {"EMPTY_SOCKET_BLUE", "Blue Socket"};
-    default: return {"EMPTY_SOCKET_PRISMATIC", "Prismatic Socket"};
+    default: return {"EMPTY_SOCKET_NO_COLOR", "Prismatic Socket"};
   }
+}
+
+std::string EmptySocketTexturePath(const std::uint32_t color) {
+  switch (color) {
+    case 1u:
+      return "Interface\\ItemSocketingFrame\\UI-EmptySocket-Meta.blp";
+    case 2u:
+      return "Interface\\ItemSocketingFrame\\UI-EmptySocket-Red.blp";
+    case 4u:
+      return "Interface\\ItemSocketingFrame\\UI-EmptySocket-Yellow.blp";
+    case 8u:
+      return "Interface\\ItemSocketingFrame\\UI-EmptySocket-Blue.blp";
+    default:
+      return "Interface\\ItemSocketingFrame\\UI-EmptySocket.blp";
+  }
+}
+
+GemPresentation ResolveGemPresentation(
+    const openwow::game::ItemDefinitions& item_definitions,
+    const std::uint32_t owner_item_id,
+    const std::uint32_t socket_enchantment_id,
+    const std::uint32_t fallback_gem_item_id,
+    const openwow::data::dbc::DbcLoader* const dbc) {
+  GemPresentation presentation;
+  presentation.filled = socket_enchantment_id != 0u ||
+                        fallback_gem_item_id != 0u;
+  if (!presentation.filled || dbc == nullptr) {
+    return presentation;
+  }
+
+  std::uint32_t gem_item_id = fallback_gem_item_id;
+  if (socket_enchantment_id != 0u) {
+    const auto* const enchantment =
+        dbc->spell_item_enchantment().LookupEntry(socket_enchantment_id);
+    if (enchantment == nullptr) {
+      LogTooltipDataJoinFailureOnce("socket-enchantment", owner_item_id,
+                                    socket_enchantment_id,
+                                    "dbc-record-missing");
+    } else {
+      gem_item_id = enchantment->gem_id != 0u ? enchantment->gem_id
+                                              : gem_item_id;
+      presentation.enchantment_condition =
+          enchantment->enchantment_condition;
+      if (!enchantment->description.empty()) {
+        presentation.description = FormatItemEnchantmentOrPreserve(
+            enchantment->description, 0, owner_item_id,
+            socket_enchantment_id);
+      }
+    }
+  }
+
+  if (gem_item_id == 0u) {
+    return presentation;
+  }
+  const auto gem_item = item_definitions.GetItemSnapshot(gem_item_id);
+  if (!gem_item.has_value()) {
+    return presentation;
+  }
+  if (gem_item->display_id != 0u) {
+    presentation.texture_path =
+        openwow::game::ResolveItemInventoryIconTexturePath(
+            dbc, gem_item->display_id);
+  }
+  if (gem_item->gem_properties == 0u) {
+    LogTooltipDataJoinFailureOnce("socket-gem-properties", owner_item_id,
+                                  gem_item_id, "foreign-key-empty");
+    if (presentation.description.empty()) {
+      presentation.description = gem_item->name;
+    }
+    return presentation;
+  }
+  const auto* const properties =
+      dbc->gem_properties().LookupEntry(gem_item->gem_properties);
+  if (properties == nullptr) {
+    LogTooltipDataJoinFailureOnce("socket-gem-properties", owner_item_id,
+                                  gem_item->gem_properties,
+                                  "dbc-record-missing");
+    if (presentation.description.empty()) {
+      presentation.description = gem_item->name;
+    }
+    return presentation;
+  }
+  presentation.color = properties->type;
+  presentation.color_resolved = true;
+  if (presentation.description.empty()) {
+    if (const auto* const enchantment =
+            dbc->spell_item_enchantment().LookupEntry(properties->enchant_id);
+        enchantment != nullptr && !enchantment->description.empty()) {
+      presentation.description = FormatItemEnchantmentOrPreserve(
+          enchantment->description, 0, owner_item_id,
+          properties->enchant_id);
+      presentation.enchantment_condition =
+          enchantment->enchantment_condition;
+    } else {
+      presentation.description = gem_item->name;
+    }
+  }
+  return presentation;
 }
 
 void AddSockets(std::vector<TooltipLine>& lines,
                 const openwow::game::ItemTemplate& item,
                 const openwow::game::ItemDefinitions& item_definitions,
                 const openwow::data::dbc::DbcLoader* const dbc,
-                const TooltipItemInstanceData* const instance) {
+                const TooltipItemInstanceData* const instance,
+                const openwow::game::WorldSession* const session) {
   bool all_sockets_match = true;
   bool has_socket = false;
   for (std::size_t index = 0; index < item.sockets.size(); ++index) {
@@ -667,20 +1032,37 @@ void AddSockets(std::vector<TooltipLine>& lines,
       continue;
     }
     has_socket = true;
-    const auto gem_item_id = instance != nullptr
-                                 ? instance->gem_item_ids[index]
-                                 : 0u;
-    const auto gem = ResolveGemPresentation(item_definitions, gem_item_id, dbc);
-    if (!gem.has_value() || gem->description.empty()) {
+    const auto socket_enchantment_id =
+        instance != nullptr ? instance->socket_enchant_ids[index] : 0u;
+    const auto gem_item_id =
+        instance != nullptr ? instance->gem_item_ids[index] : 0u;
+    auto gem = ResolveGemPresentation(item_definitions, item.entry,
+                                      socket_enchantment_id, gem_item_id, dbc);
+    if (!gem.filled) {
       const auto [key, fallback] = EmptySocketText(socket_color);
-      lines.push_back(MakeLine(Localized(key, fallback), kGray));
+      auto line = MakeLine(Localized(key, fallback), kGray);
+      line.texture_path = EmptySocketTexturePath(socket_color);
+      lines.push_back(std::move(line));
       all_sockets_match = false;
       continue;
     }
-    lines.push_back(MakeWrappedLine(gem->description, kGreen));
-    const bool matches = socket_color == 1u
-                             ? (gem->color & 1u) != 0u
-                             : (gem->color & socket_color) != 0u;
+    if (gem.description.empty()) {
+      LogTooltipDataJoinFailureOnce("socket-description", item.entry,
+                                    socket_enchantment_id,
+                                    "description-unresolved");
+      gem.description = Localized("UNKNOWN", "Unknown");
+    }
+    const bool active = IsGemEnchantmentConditionActive(
+        gem.enchantment_condition, dbc, session, item.entry);
+    auto line = MakeWrappedLine(gem.description, active ? kWhite : kGray);
+    line.texture_path = gem.texture_path.empty()
+                            ? EmptySocketTexturePath(socket_color)
+                            : std::move(gem.texture_path);
+    lines.push_back(std::move(line));
+    const bool matches = gem.color_resolved &&
+                         (socket_color == 1u
+                              ? (gem.color & 1u) != 0u
+                              : (gem.color & socket_color) != 0u);
     all_sockets_match = all_sockets_match && matches;
   }
 
@@ -697,6 +1079,7 @@ void AddSockets(std::vector<TooltipLine>& lines,
 }
 
 void AddPermanentEnchant(std::vector<TooltipLine>& lines,
+                         const std::uint32_t item_id,
                          const openwow::data::dbc::DbcLoader* const dbc,
                          const TooltipItemInstanceData* const instance) {
   if (dbc == nullptr || instance == nullptr ||
@@ -706,8 +1089,76 @@ void AddPermanentEnchant(std::vector<TooltipLine>& lines,
   if (const auto* const enchant = dbc->spell_item_enchantment().LookupEntry(
           instance->permanent_enchant_id);
       enchant != nullptr && !enchant->description.empty()) {
-    lines.push_back(
-        MakeWrappedLine(std::string(enchant->description), kGreen));
+    lines.push_back(MakeWrappedLine(FormatItemEnchantmentOrPreserve(
+        enchant->description, 0, item_id, instance->permanent_enchant_id)));
+  } else {
+    LogTooltipDataJoinFailureOnce("permanent-enchantment", item_id,
+                                  instance->permanent_enchant_id,
+                                  "dbc-record-missing-or-empty");
+  }
+}
+
+void AddRandomPropertyEnchantments(
+    std::vector<TooltipLine>& lines, const std::uint32_t item_id,
+    const std::int32_t random_property_id, const std::uint32_t suffix_factor,
+    const openwow::data::dbc::DbcLoader* const dbc) {
+  if (random_property_id == 0 || dbc == nullptr) {
+    return;
+  }
+
+  const auto append_enchantment =
+      [&](const std::uint32_t enchantment_id,
+          const std::int64_t instance_value) {
+        if (enchantment_id == 0u) {
+          return;
+        }
+        const auto* const enchantment =
+            dbc->spell_item_enchantment().LookupEntry(enchantment_id);
+        if (enchantment == nullptr || enchantment->description.empty()) {
+          LogTooltipDataJoinFailureOnce("random-enchantment", item_id,
+                                        enchantment_id,
+                                        "dbc-record-missing-or-empty");
+          return;
+        }
+        lines.push_back(MakeWrappedLine(FormatItemEnchantmentOrPreserve(
+            enchantment->description, instance_value, item_id,
+            enchantment_id)));
+      };
+
+  if (random_property_id > 0) {
+    const auto property_id = static_cast<std::uint32_t>(random_property_id);
+    const auto* const property =
+        dbc->item_random_properties().LookupEntry(property_id);
+    if (property == nullptr) {
+      LogTooltipDataJoinFailureOnce("random-property", item_id, property_id,
+                                    "dbc-record-missing");
+      return;
+    }
+    for (const auto enchantment_id : property->enchantment) {
+      append_enchantment(enchantment_id, 0);
+    }
+    return;
+  }
+
+  const auto suffix_id_i64 = -static_cast<std::int64_t>(random_property_id);
+  if (suffix_id_i64 <= 0 ||
+      suffix_id_i64 > std::numeric_limits<std::uint32_t>::max()) {
+    LogTooltipDataJoinFailureOnce("random-suffix", item_id, 0,
+                                  "id-out-of-range");
+    return;
+  }
+  const auto suffix_id = static_cast<std::uint32_t>(suffix_id_i64);
+  const auto* const suffix = dbc->item_random_suffix().LookupEntry(suffix_id);
+  if (suffix == nullptr) {
+    LogTooltipDataJoinFailureOnce("random-suffix", item_id, suffix_id,
+                                  "dbc-record-missing");
+    return;
+  }
+  for (std::size_t index = 0; index < suffix->enchantment.size(); ++index) {
+    const auto scaled = static_cast<std::int64_t>(std::lround(
+        static_cast<double>(suffix->allocation_pct[index]) * 0.0001 *
+        static_cast<double>(suffix_factor)));
+    append_enchantment(suffix->enchantment[index], scaled);
   }
 }
 
@@ -1153,6 +1604,8 @@ std::vector<TooltipLine> TooltipBuilder::BuildItemTooltip(
     const std::uint32_t player_race_mask,
     const openwow::data::dbc::DbcLoader* const dbc,
     const std::uint32_t scaling_level,
+    const std::int32_t random_property_id,
+    const std::uint32_t suffix_factor,
     const TooltipItemInstanceData* const instance_data,
     const openwow::game::WorldSession* const session) {
   std::vector<TooltipLine> lines;
@@ -1164,11 +1617,12 @@ std::vector<TooltipLine> TooltipBuilder::BuildItemTooltip(
     lines.push_back(MakeLine(FormatLocalized(
         "ITEM_LEVEL", "Item Level %s", {std::to_string(item.item_level)})));
   }
-  AddSlotAndContainer(lines, item, dbc);
-
   const auto scaled = item.scaling_stat_distribution != 0u
                           ? BuildScaledTooltipData(item, dbc, scaling_level)
                           : std::nullopt;
+  AddSlotAndContainer(lines, item, dbc, session,
+                      item.scaling_stat_value != 0u && scaled.has_value());
+
   if (scaled.has_value() && scaled->has_scaled_damage) {
     AddScaledDamage(lines, item, scaled->weapon_dps);
   } else {
@@ -1185,8 +1639,10 @@ std::vector<TooltipLine> TooltipBuilder::BuildItemTooltip(
     AddBaseStats(lines, item);
   }
 
-  AddPermanentEnchant(lines, dbc, instance_data);
-  AddSockets(lines, item, item_definitions, dbc, instance_data);
+  AddPermanentEnchant(lines, item.entry, dbc, instance_data);
+  AddRandomPropertyEnchantments(lines, item.entry, random_property_id,
+                                suffix_factor, dbc);
+  AddSockets(lines, item, item_definitions, dbc, instance_data, session);
   AddItemSpells(lines, item, dbc, instance_data);
   AddItemSet(lines, item, item_definitions, inventory, dbc);
   AddRequirements(lines, item, player_level, player_class_mask,

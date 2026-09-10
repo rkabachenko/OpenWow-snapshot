@@ -1,0 +1,18 @@
+## Interface: 30300
+## Title: OpenWoW 地下城手册
+## Notes: 复用 MoP Classic 原版界面、由 build 12340 真实数据驱动的地下城手册
+## Author: OpenWoW
+## Version: 2.0.0
+## LoadOnDemand: 1
+## X-OpenWoW-Source-Baseline: Blizzard_EncounterJournal MoP Classic 5.5.4.68159
+
+OpenWoW_EncounterJournal_Maps.lua
+OpenWoW_EncounterJournal_Presentation.lua
+OpenWoW_EncounterJournal_Compat.lua
+OpenWoW_Mists_Shared.lua
+OpenWoW_EncounterJournal_Compat.xml
+OpenWoW_Mists_Shared.xml
+HybridScrollFrame.lua
+NavigationBar.xml
+Blizzard_EncounterJournal.lua
+Blizzard_EncounterJournal.xml

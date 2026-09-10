@@ -43,6 +43,14 @@ void WriteLE32(std::vector<std::uint8_t>& buffer, const std::uint32_t value) {
   return uppercased;
 }
 
+[[nodiscard]] bool IsCanonicalLocaleToken(const std::string_view locale) {
+  return locale.size() == 4u &&
+         std::islower(static_cast<unsigned char>(locale[0])) != 0 &&
+         std::islower(static_cast<unsigned char>(locale[1])) != 0 &&
+         std::isupper(static_cast<unsigned char>(locale[2])) != 0 &&
+         std::isupper(static_cast<unsigned char>(locale[3])) != 0;
+}
+
 }
 
 std::int32_t QueryRetailLogonChallengeTimezoneBiasMinutes() {
@@ -64,7 +72,11 @@ std::int32_t QueryRetailLogonChallengeTimezoneBiasMinutes() {
 }
 
 std::vector<std::uint8_t> BuildRetailLogonChallengePacket(
-    const std::string_view username) {
+    const std::string_view username, const std::string_view locale) {
+  if (!IsCanonicalLocaleToken(locale)) {
+    return {};
+  }
+
   const std::string uppercase_username = ToUpperAscii(username);
   const auto username_length =
       static_cast<std::uint8_t>(std::min<std::size_t>(uppercase_username.size(), 255));
@@ -97,10 +109,7 @@ std::vector<std::uint8_t> BuildRetailLogonChallengePacket(
   packet.push_back('W');
   packet.push_back(0x00);
 
-  packet.push_back('S');
-  packet.push_back('U');
-  packet.push_back('n');
-  packet.push_back('e');
+  packet.insert(packet.end(), locale.rbegin(), locale.rend());
 
   WriteLE32(packet, static_cast<std::uint32_t>(
                         QueryRetailLogonChallengeTimezoneBiasMinutes()));

@@ -78,6 +78,9 @@ struct TooltipLuaTextStyle {
 };
 
 const char *CanonicalTooltipAnchorType(const char *anchor);
+const char *StoreTooltipAnchorState(lua_State *L, int tooltip_index,
+                                    const char *anchor, float offset_x,
+                                    float offset_y);
 
 float ConvertTooltipScriptPixelsToStoredCoordinate(const float pixels) {
   return openwow::ui::PixelUiHorizontalCoordinateToStored(pixels);
@@ -772,15 +775,26 @@ void FinalizeTooltipLuaLayout(lua_State *L, int tooltip_index) {
     std::vector<int> texture_slots;
     float texture_extent{0.0F};
     float texture_height{0.0F};
+    float committed_texture_extent{0.0F};
+    float committed_texture_height{0.0F};
     bool left_visible{false};
     bool right_visible{false};
     bool constrained{false};
+    bool committed{false};
   };
 
   const int line_count = GetTooltipUsedLineCount(L, tooltip_index);
   const auto& tooltip_system = openwow::ui::game::TooltipSystem::Get();
-  const bool force_minimum_width = tooltip_system.IsForceMinWidth();
-  float common_width = tooltip_system.GetMinimumWidth();
+  const auto committed_line_count = static_cast<int>(std::min<std::size_t>(
+      tooltip_system.GetCommittedLineCount(),
+      static_cast<std::size_t>(std::max(0, line_count))));
+  const auto committed_texture_count =
+      tooltip_system.GetCommittedTextureCount();
+  // AddLine mutates its FontString immediately. Only content captured by the
+  // most recent ShowThis boundary may resize the tooltip backdrop, though.
+  const bool force_minimum_width =
+      tooltip_system.IsCommittedForceMinWidth();
+  float common_width = tooltip_system.GetCommittedMinimumWidth();
   if (!std::isfinite(common_width)) {
     common_width = 0.0F;
   }
@@ -799,6 +813,7 @@ void FinalizeTooltipLuaLayout(lua_State *L, int tooltip_index) {
 
     RowLayout row;
     row.slot = slot_index;
+    row.committed = slot_index <= committed_line_count;
     row.left_visible = left_index != 0 && TooltipFontStringIsVisible(L, left_index);
     row.right_visible = right_index != 0 && TooltipFontStringIsVisible(L, right_index);
 
@@ -840,10 +855,17 @@ void FinalizeTooltipLuaLayout(lua_State *L, int tooltip_index) {
                             kTooltipTextureTextSpacing;
       row.texture_height =
           std::max(row.texture_height, std::max(0.0F, size.height));
+      if (row.committed && texture_index < committed_texture_count) {
+        row.committed_texture_extent += std::max(0.0F, size.width) +
+                                        kTooltipTextureTextSpacing;
+        row.committed_texture_height = std::max(
+            row.committed_texture_height, std::max(0.0F, size.height));
+      }
     }
 
-    if (!row.constrained) {
-      float row_width = row.texture_extent + row.left.width + row.right.width;
+    if (row.committed && !row.constrained) {
+      float row_width =
+          row.committed_texture_extent + row.left.width + row.right.width;
       if (row.left_visible && row.right_visible) {
         row_width += kTooltipDoubleColumnSpacing;
       }
@@ -854,7 +876,7 @@ void FinalizeTooltipLuaLayout(lua_State *L, int tooltip_index) {
   }
 
   for (const auto &row : rows) {
-    if (row.left_visible && row.constrained) {
+    if (row.committed && row.left_visible && row.constrained) {
       if (PushTooltipFontStringPair(L, tooltip_index, row.slot)) {
         lua_getfield(L, -1, kTooltipPairLeftField);
         if (lua_istable(L, -1) != 0) {
@@ -865,7 +887,7 @@ void FinalizeTooltipLuaLayout(lua_State *L, int tooltip_index) {
           const auto wrapped = MeasureTooltipFontString(L, -1);
           common_width = std::max(
               common_width,
-              row.texture_extent +
+              row.committed_texture_extent +
                   std::max(wrapped.width,
                            row.right_visible ? row.right.width : 0.0F));
         }
@@ -936,7 +958,7 @@ void FinalizeTooltipLuaLayout(lua_State *L, int tooltip_index) {
         lua_pop(L, 1);
       }
     }
-    if (row.left_visible || row.right_visible) {
+    if (row.committed && (row.left_visible || row.right_visible)) {
       if (has_visible_line) {
         content_height += kTooltipLineSpacing;
       }
@@ -944,7 +966,7 @@ void FinalizeTooltipLuaLayout(lua_State *L, int tooltip_index) {
       content_height += std::max(
           {row.left_visible ? row.left.height : 0.0F,
            row.right_visible ? row.right.height : 0.0F,
-           row.texture_height});
+           row.committed_texture_height});
       has_visible_line = true;
     }
     previous_texture_extent = row.texture_extent;
@@ -952,7 +974,7 @@ void FinalizeTooltipLuaLayout(lua_State *L, int tooltip_index) {
     lua_pop(L, 3);
   }
 
-  float extra_width = tooltip_system.GetPadding();
+  float extra_width = tooltip_system.GetCommittedPadding();
   if (!std::isfinite(extra_width)) {
     extra_width = 0.0F;
   }
@@ -1006,6 +1028,11 @@ void SyncTooltipRegisteredLinesFromSystem(lua_State *L, int tooltip_index) {
     lua_setfield(L, tooltip_index, "__ow_alpha");
     (void)openwow::ui::game::detail::ShowLuaScriptFrame(L, tooltip_index);
   } else {
+    if (!tooltip_system.HasOwner()) {
+      lua_pushnil(L);
+      lua_setfield(L, tooltip_index, kTooltipOwnerFrameField);
+      StoreTooltipAnchorState(L, tooltip_index, "ANCHOR_NONE", 0.0F, 0.0F);
+    }
     (void)openwow::ui::game::detail::HideLuaScriptFrame(L, tooltip_index);
   }
 
@@ -1129,6 +1156,23 @@ const char *StoreTooltipAnchorState(lua_State *L, const int tooltip_index, const
   lua_pushnumber(L, offset_y);
   lua_setfield(L, tooltip_index, kTooltipOwnerOffsetYField);
   return canonical_anchor;
+}
+
+int LuaGameTooltip_SetItemByID(lua_State* L) {
+  const int tooltip_index = ValidateFrameObjectSelf(L, "GameTooltip");
+  if (lua_isnumber(L, 2) == 0) {
+    return luaL_error(L, "Invalid item ID in %s:SetItemByID",
+                      lua_adapter::ScriptObjectDisplayName(L, tooltip_index));
+  }
+  const auto signed_item_id =
+      openwow::ui::game::detail::TruncateLuaNumberToSseI32(lua_tonumber(L, 2));
+  if (signed_item_id <= 0) {
+    lua_pushnil(L);
+    return 1;
+  }
+  lua_pushfstring(L, "item:%d", signed_item_id);
+  lua_replace(L, 2);
+  return detail::kSetTooltipHyperlink.trampoline(L);
 }
 
 void ApplyGameTooltipMethods(lua_State *L) {
@@ -1302,6 +1346,9 @@ void ApplyGameTooltipMethods(lua_State *L) {
 
   openwow::ui::game::frame_api::RegisterTooltipContentSetter<detail::kSetTooltipHyperlink.trampoline>(
       L, f, "SetHyperlink");
+
+  openwow::ui::game::frame_api::RegisterTooltipContentSetter<
+      LuaGameTooltip_SetItemByID>(L, f, "SetItemByID");
 
   openwow::ui::game::frame_api::RegisterTooltipContentSetter<detail::kSetTooltipBagItem.trampoline>(
       L, f, "SetBagItem");

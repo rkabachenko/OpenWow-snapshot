@@ -23,6 +23,8 @@
 #include "openwow/game/query_cache.h"
 #include "openwow/game/readable_text.h"
 #include "openwow/game/spell_c_internals.h"
+#include "openwow/game/spell_action.h"
+#include "openwow/game/skill_line_ability_lookup.h"
 #include "openwow/game/spell_cast_runtime.h"
 #include "openwow/game/spell_query_bridge.h"
 #include "openwow/game/spell_target_validation.h"
@@ -183,7 +185,7 @@ LookupGameObjectDisplayInfoForModelLoad(const CGGameObject_C &game_object,
   return entry;
 }
 
-[[nodiscard]] bool IsLockActionApplicable(const CGGameObject_C &game_object,
+[[nodiscard]] bool LockActionApplies(const CGGameObject_C &game_object,
                                           const std::uint32_t action) {
   const auto state_byte = static_cast<std::uint8_t>(game_object.GetGoState());
   const auto is_locked = (game_object.GetFlags() & GO_FLAG_LOCKED) != 0u;
@@ -222,13 +224,24 @@ LookupSpellEntry(const openwow::data::dbc::DbcLoader &dbc, const std::uint32_t s
   return dbc.spell().LookupEntry(spell_id);
 }
 
-[[nodiscard]] std::uint32_t GetSpellEffectMagnitude(const openwow::data::dbc::SpellEntry &spell,
-                                                    const std::size_t effect_index) {
-  if (effect_index >= spell.effect_base_points.size()) {
-    return 0u;
+[[nodiscard]] std::uint32_t GetSpellEffectMagnitude(
+    const data::dbc::SpellEntry &spell, const std::size_t effect_index,
+    const CGPlayer_C &player, const data::dbc::DbcLoader &dbc) {
+  float value = static_cast<float>(spell.effect_base_points[effect_index]) + 1.0f;
+  const float per_level = spell.effect_real_points_per_lvl[effect_index];
+  if (per_level != 0.0f) {
+    const auto *ability = FindSkillLineAbilityForRaceClassSpell(
+        dbc.skill_line_ability().entries(), dbc.skill_race_class_info().entries(),
+        player.State().GetRace(), player.State().GetClass(), spell.id);
+    std::uint32_t skill = ability != nullptr
+        ? player.GetSkillValue(static_cast<std::uint16_t>(ability->skill_id)) +
+          player.GetSkillBonusValue(static_cast<std::uint16_t>(ability->skill_id)) : 0u;
+    if (spell.max_level != 0u) skill = std::min(skill, spell.max_level * 5u);
+    const float levels = std::max(static_cast<float>(skill) / 5.0f -
+                                  static_cast<float>(spell.spell_level), 0.0f);
+    value += per_level * levels;
   }
-
-  return static_cast<std::uint32_t>(std::max(0, spell.effect_base_points[effect_index] + 1));
+  return static_cast<std::uint32_t>(std::max(0.0f, std::floor(value + 0.5f)));
 }
 
 [[nodiscard]] bool TryResolveBlockingAuraMechanic(const CGUnit_C &player,
@@ -239,23 +252,6 @@ LookupSpellEntry(const openwow::data::dbc::DbcLoader &dbc, const std::uint32_t s
   }
 
   return CGUnit_C__HasCompatibleAuraType(player, dbc, nullptr, kAuraTypeUseBlocked, mechanic_out);
-}
-
-[[nodiscard]] bool SpellSatisfiesOpenLockRequirement(const openwow::data::dbc::SpellEntry &spell,
-                                                     const std::uint32_t lock_index,
-                                                     const std::uint32_t required_value) {
-  for (std::size_t effect_index = 0; effect_index < spell.effect.size(); ++effect_index) {
-    if (spell.effect[effect_index] != kSpellEffectOpenLock ||
-        static_cast<std::uint32_t>(spell.effect_misc_value[effect_index]) != lock_index) {
-      continue;
-    }
-
-    if (GetSpellEffectMagnitude(spell, effect_index) >= required_value) {
-      return true;
-    }
-  }
-
-  return false;
 }
 
 [[nodiscard]] bool SpellHasAnyOpenLockEffect(const openwow::data::dbc::SpellEntry &spell) {
@@ -408,132 +404,6 @@ void RefreshTransportRuntimeRegistration(CGGameObject_C &game_object) {
                                       game_object.GetDisplayId(), *path);
   const auto state = static_cast<std::uint8_t>(game_object.GetGoState());
   SyncTransportAnimationClock(game_object, state, state);
-}
-
-[[nodiscard]] bool ActivePlayerCanSatisfyOpenLockRequirement(
-    const CGGameObject_C &game_object, const openwow::data::dbc::DbcLoader &dbc,
-    const SpellTargeting &targeting, const std::uint32_t lock_index,
-    const std::uint32_t required_skill,
-    std::uint32_t *const matched_spell_id_out = nullptr) {
-  const auto required_value = required_skill != 0u ? required_skill : 5u * game_object.GetLevel();
-
-  for (const auto &known_spell : SpellbookSystem::Get().GetKnownSpellList()) {
-    const auto *const spell = LookupSpellEntry(dbc, known_spell.spell_id);
-    if (spell != nullptr && SpellSatisfiesOpenLockRequirement(*spell, lock_index, required_value)) {
-      if (matched_spell_id_out != nullptr) {
-        *matched_spell_id_out = known_spell.spell_id;
-      }
-      return true;
-    }
-  }
-
-  const auto targeting_state = targeting.GetState();
-  if (!targeting_state.isActive || targeting_state.spellId == 0u) {
-    return false;
-  }
-
-  const auto *const current_spell = LookupSpellEntry(dbc, targeting_state.spellId);
-  if (current_spell == nullptr ||
-      !SpellSatisfiesOpenLockRequirement(*current_spell, lock_index, required_value)) {
-    return false;
-  }
-  if (matched_spell_id_out != nullptr) {
-    *matched_spell_id_out = targeting_state.spellId;
-  }
-  return true;
-}
-
-[[nodiscard]] bool HasUnsatisfiedLockedRequirement(const CGGameObject_C &game_object,
-                                                   const PlayerInventoryReplica& inventory,
-                                                   const openwow::data::dbc::DbcLoader &dbc,
-                                                   const SpellTargeting &targeting) {
-  const auto *const lock_entry = game_object.GetLockEntry();
-  if (lock_entry == nullptr) {
-    return false;
-  }
-
-  bool has_known_requirement = false;
-  for (std::size_t index = 0; index < lock_entry->type.size(); ++index) {
-    switch (lock_entry->type[index]) {
-    case 1u:
-      has_known_requirement = true;
-      if (IsLockActionApplicable(game_object, lock_entry->action[index]) &&
-          inventory.FindItemByEntry(lock_entry->index[index]) >= 0) {
-        return false;
-      }
-      break;
-
-    case 2u:
-      has_known_requirement = true;
-      if (IsLockActionApplicable(game_object, lock_entry->action[index]) &&
-          ActivePlayerCanSatisfyOpenLockRequirement(game_object, dbc, targeting,
-                                                    lock_entry->index[index],
-                                                    lock_entry->skill[index])) {
-        return false;
-      }
-      break;
-
-    case 3u: {
-      has_known_requirement = true;
-      if (!IsLockActionApplicable(game_object, lock_entry->action[index])) {
-        break;
-      }
-
-      const auto *const spell = LookupSpellEntry(dbc, lock_entry->index[index]);
-      if (spell != nullptr && SpellHasAnyOpenLockEffect(*spell)) {
-        return false;
-      }
-      break;
-    }
-
-    default:
-      break;
-    }
-  }
-
-  return has_known_requirement;
-}
-
-[[nodiscard]] std::uint32_t ResolveLockOpeningSpellId(const CGGameObject_C &game_object,
-                                                      const WorldSession &session) {
-  const auto *const lock_entry = game_object.GetLockEntry();
-  const auto *const dbc = session.GetDbcLoader();
-  if (lock_entry == nullptr || dbc == nullptr) {
-    return 0u;
-  }
-
-  const auto &targeting = session.spells().GetTargeting();
-  for (std::size_t index = 0; index < lock_entry->type.size(); ++index) {
-    if (!IsLockActionApplicable(game_object, lock_entry->action[index])) {
-      continue;
-    }
-
-    switch (lock_entry->type[index]) {
-    case 2u: {
-      std::uint32_t matched_spell_id = 0u;
-      if (ActivePlayerCanSatisfyOpenLockRequirement(game_object, *dbc, targeting,
-                                                     lock_entry->index[index],
-                                                     lock_entry->skill[index],
-                                                     &matched_spell_id)) {
-        return matched_spell_id;
-      }
-      break;
-    }
-
-    case 3u: {
-      const auto *const spell = LookupSpellEntry(*dbc, lock_entry->index[index]);
-      if (spell != nullptr && SpellHasAnyOpenLockEffect(*spell)) {
-        return lock_entry->index[index];
-      }
-      break;
-    }
-
-    default:
-      break;
-    }
-  }
-
-  return 0u;
 }
 
 [[nodiscard]] bool TryResolveLockSpellMaxRange(const WorldSession &session,
@@ -1758,7 +1628,14 @@ void CGGameObject_C::OnRightClickInteract(WorldSession *session, TargetingSystem
   std::uint32_t spell = 0u;
   float interact_distance = 0.0f;
   if (mutable_object.CheckUseRange(*session, &error, &interact_distance, &spell)) {
-    mutable_object.OnActivation(*session);
+    const bool activated = mutable_object.OnActivation(*session);
+    openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kInfo,
+        "GameObject interaction: stage=activate guid=" +
+        std::to_string(GetGuid().GetRawValue()) + " entry=" +
+        std::to_string(GetEntry()) + " type=" +
+        std::to_string(static_cast<unsigned>(GetGoType())) + " lock=" +
+        std::to_string(GetLockId()) + " source=right-click result=" +
+        (activated ? "started" : "rejected"));
 
     session->interaction().SendGameObjectReportUse(
         GetGuid().IsEmpty() ? 0 : GetGuid().GetRawValue());
@@ -1771,6 +1648,10 @@ void CGGameObject_C::OnRightClickInteract(WorldSession *session, TargetingSystem
   }
 
   if (error == 0u) {
+    openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kWarn,
+        "GameObject interaction: stage=check-use guid=" +
+        std::to_string(GetGuid().GetRawValue()) + " entry=" +
+        std::to_string(GetEntry()) + " source=right-click reason=use-gate-rejected-without-error");
     return;
   }
 
@@ -2972,146 +2853,128 @@ const openwow::data::dbc::LockEntry *CGGameObject_C::GetLockEntry() const {
   return LookupLockEntry();
 }
 
-bool CGGameObject_C::GetLockInteractionInfo(SpellCastRuntime &spells,
-                                            LockInteractionInfo *info) const {
-  const auto *const objects = object_manager();
-  if (objects == nullptr) {
-    return false;
-  }
+bool CGGameObject_C::IsLockActionApplicable(const std::uint32_t action) const {
+  return LockActionApplies(*this, action);
+}
 
-  const auto *const active_player = objects->GetActivePlayer();
-  if (active_player == nullptr) {
-    return false;
-  }
-
-  const auto *const lock_entry = LookupLockEntry();
-  if (lock_entry == nullptr) {
-    return false;
-  }
-
-  const auto *const dbc = &objects->dbc_loader();
-
-  bool has_known_requirement = false;
-
-  for (std::size_t slot = 0; slot < lock_entry->type.size(); ++slot) {
-    const auto type = lock_entry->type[slot];
-    if (type == 0u) {
-      continue;
+CGGameObject_C::LockInteractionInfo CGGameObject_C::ResolveLockInteraction(
+    const SpellCastRuntime &spells) const {
+  LockInteractionInfo result;
+  const auto unavailable = [&](const char* reason, const std::uint32_t record) {
+    if (lock_resolution_failure_ != reason) {
+      openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kError,
+          "GameObject interaction: stage=resolve-lock guid=" +
+          std::to_string(GetGuid().GetRawValue()) + " entry=" +
+          std::to_string(GetEntry()) + " lock=" + std::to_string(GetLockId()) +
+          " source=template/DBC record=" + std::to_string(record) + " reason=" + reason);
+      lock_resolution_failure_ = reason;
     }
+    result.status = LockInteractionStatus::kUnavailable;
+    return result;
+  };
+  const auto *objects = object_manager();
+  const auto *player = objects != nullptr ? objects->GetActivePlayer() : nullptr;
+  if (!template_info_ || player == nullptr) {
+    return unavailable("template-or-active-player-unavailable", GetEntry());
+  }
+  const auto lock_id = GetLockId();
+  if (lock_id == 0u) {
+    lock_resolution_failure_ = nullptr;
+    return result;
+  }
+  const auto &dbc = objects->dbc_loader();
+  const auto *lock = dbc.lock().LookupEntry(lock_id);
+  if (lock == nullptr) return unavailable("Lock-record-missing", lock_id);
 
-    switch (type) {
-    case 2u: {
-
-      has_known_requirement = true;
-      if (!IsLockActionApplicable(*this, lock_entry->action[slot])) {
-        break;
+  bool incomplete = false;
+  const auto ready = [&] {
+    result.status = LockInteractionStatus::kReady;
+    if (!incomplete) lock_resolution_failure_ = nullptr;
+    return result;
+  };
+  for (std::size_t slot = 0; slot < lock->type.size(); ++slot) {
+    const auto type = lock->type[slot];
+    if (type == 0u) continue;
+    result.has_requirement = true;
+    if (!IsLockActionApplicable(lock->action[slot])) continue;
+    if (type == 1u) {
+      std::uint64_t key_guid = 0u;
+      (void)inventory_.VisitDefaultPlayerItems([&](const ItemInstance &item) {
+        if (item.entry != lock->index[slot]) return true;
+        key_guid = item.guid;
+        return false;
+      });
+      if (key_guid == 0u) continue;
+      const auto *key = objects->GetItem(ObjectGuid(key_guid));
+      if (key == nullptr || objects->query_cache().GetItemTemplate(lock->index[slot]) == nullptr) {
+        (void)unavailable("key-item-or-template-unavailable", lock->index[slot]);
+        incomplete = true;
+        continue;
       }
-
-      const auto lock_index = lock_entry->index[slot];
-      const auto required_value =
-          lock_entry->skill[slot] != 0u ? lock_entry->skill[slot] : 5u * GetLevel();
-
-      for (const auto &known_spell : SpellbookSystem::Get().GetKnownSpellList()) {
-        const auto *const spell = LookupSpellEntry(*dbc, known_spell.spell_id);
+      const auto use_spell_id = key->ResolveUseSpellId();
+      const auto *spell = use_spell_id != 0u ? LookupSpellEntry(dbc, use_spell_id) : nullptr;
+      if (use_spell_id != 0u && spell == nullptr) {
+        (void)unavailable("key-Spell-record-missing", use_spell_id);
+        incomplete = true;
+        continue;
+      }
+      result.spell_id = spell != nullptr && SpellHasAnyOpenLockEffect(*spell) ? use_spell_id : 0u;
+      result.uses_skill = false;
+      result.key_item_entry = lock->index[slot];
+      result.key_item_guid = key_guid;
+      result.lock_slot = static_cast<std::uint32_t>(slot);
+      return ready();
+    } else if (type == 2u) {
+      const auto required = lock->skill[slot] != 0u ? lock->skill[slot] : 5u * GetLevel();
+      const auto matches = [&](const std::uint32_t spell_id) {
+        const auto *spell = LookupSpellEntry(dbc, spell_id);
         if (spell == nullptr) {
-          continue;
+          (void)unavailable("learned-Spell-record-missing", spell_id);
+          incomplete = true;
+          return false;
         }
-
-        for (std::size_t ei = 0; ei < spell->effect.size(); ++ei) {
-          if (spell->effect[ei] != kSpellEffectOpenLock ||
-              static_cast<std::uint32_t>(spell->effect_misc_value[ei]) != lock_index) {
-            continue;
-          }
-
-          const auto current_value = GetSpellEffectMagnitude(*spell, ei);
-          if (info != nullptr) {
-            info->spell_id = known_spell.spell_id;
-            info->current_skill = current_value;
-            info->required_skill = required_value;
-          }
-
-          if (current_value >= required_value) {
-            if (info != nullptr) {
-              info->lock_slot = static_cast<std::uint32_t>(slot);
-            }
-            return false;
-          }
-        }
-      }
-
-      const auto targeting_state = spells.GetTargeting().GetState();
-      if (targeting_state.isActive && targeting_state.spellId != 0u) {
-        const auto *const current_spell =
-            LookupSpellEntry(*dbc, targeting_state.spellId);
-        if (current_spell != nullptr) {
-          for (std::size_t ei = 0; ei < current_spell->effect.size(); ++ei) {
-            if (current_spell->effect[ei] != kSpellEffectOpenLock ||
-                static_cast<std::uint32_t>(current_spell->effect_misc_value[ei]) != lock_index) {
-              continue;
-            }
-
-            const auto current_value = GetSpellEffectMagnitude(*current_spell, ei);
-            if (info != nullptr) {
-              info->spell_id = targeting_state.spellId;
-              info->current_skill = current_value;
-              info->required_skill = required_value;
-            }
-
-            if (current_value >= required_value) {
-              if (info != nullptr) {
-                info->lock_slot = static_cast<std::uint32_t>(slot);
-              }
-              return false;
-            }
-          }
-        }
-      }
-      break;
-    }
-
-    case 3u: {
-
-      has_known_requirement = true;
-      if (!IsLockActionApplicable(*this, lock_entry->action[slot])) {
-        break;
-      }
-
-      const auto *const spell = LookupSpellEntry(*dbc, lock_entry->index[slot]);
-      if (spell != nullptr && SpellHasAnyOpenLockEffect(*spell)) {
-        if (info != nullptr) {
-          info->spell_id = spell->id;
-          info->lock_slot = static_cast<std::uint32_t>(slot);
+        for (std::size_t effect = 0; effect < spell->effect.size(); ++effect) {
+          if (spell->effect[effect] != kSpellEffectOpenLock ||
+              static_cast<std::uint32_t>(spell->effect_misc_value[effect]) != lock->index[slot]) continue;
+          result.spell_id = spell_id;
+          result.uses_skill = true;
+          result.current_skill = GetSpellEffectMagnitude(*spell, effect, *player, dbc);
+          result.required_skill = required;
+          result.lock_slot = static_cast<std::uint32_t>(slot);
+          if (result.current_skill >= required) return true;
         }
         return false;
+      };
+      for (const auto &known : SpellbookSystem::Get().GetKnownSpellList()) {
+        if (matches(known.spell_id)) return ready();
       }
-      break;
-    }
-
-    case 1u: {
-
-      has_known_requirement = true;
-      if (!IsLockActionApplicable(*this, lock_entry->action[slot])) {
-        break;
+      const auto targeting = spells.GetTargeting().GetState();
+      if (targeting.isActive && targeting.spellId != 0u && matches(targeting.spellId)) return ready();
+    } else if (type == 3u) {
+      const auto *spell = LookupSpellEntry(dbc, lock->index[slot]);
+      if (spell == nullptr) {
+        (void)unavailable("lock-Spell-record-missing", lock->index[slot]);
+        incomplete = true;
+      } else if (SpellHasAnyOpenLockEffect(*spell)) {
+        result.spell_id = spell->id;
+        result.uses_skill = false;
+        result.current_skill = 0u;
+        result.required_skill = 0u;
+        result.lock_slot = static_cast<std::uint32_t>(slot);
+        return ready();
+      } else {
+        (void)unavailable("lock-Spell-has-no-open-lock-effect", lock->index[slot]);
+        incomplete = true;
       }
-
-      const auto bag_slot =
-          inventory_.FindItemByEntry(lock_entry->index[slot]);
-      if (bag_slot >= 0) {
-        if (info != nullptr) {
-          info->item_bag_slot = bag_slot;
-          info->lock_slot = static_cast<std::uint32_t>(slot);
-        }
-        return false;
-      }
-      break;
-    }
-
-    default:
-      break;
+    } else {
+      (void)unavailable("unsupported-Lock-requirement-type", type);
+      incomplete = true;
     }
   }
-
-  return has_known_requirement;
+  if (!incomplete) lock_resolution_failure_ = nullptr;
+  result.status = incomplete ? LockInteractionStatus::kUnavailable
+      : result.has_requirement ? LockInteractionStatus::kUnsatisfied : LockInteractionStatus::kReady;
+  return result;
 }
 
 bool CGGameObject_C::MeetsTrackedLootArtEligibilityGate(const CGPlayer_C &active_player) const {
@@ -3557,9 +3420,8 @@ bool CGGameObject_C::TryUse(const WorldSession &session,
 
   if ((GetFlags() & GO_FLAG_LOCKED) != 0u) {
     const auto *const dbc = session.GetDbcLoader();
-    if (dbc != nullptr &&
-        HasUnsatisfiedLockedRequirement(*this, inventory_, *dbc,
-                                        session.spells().GetTargeting())) {
+    if (dbc != nullptr && ResolveLockInteraction(session.spells()).status !=
+                              LockInteractionStatus::kReady) {
       if (error_out != nullptr) {
 
         *error_out = GetTypeHandlerInfo(static_cast<std::uint8_t>(GetGoType()))
@@ -3648,6 +3510,35 @@ bool CGGameObject_C::OnActivation(WorldSession &session) {
 
   if (IsMeetingStone() && !PassesMeetingStoneUseGates(session, *active_player)) {
     return false;
+  }
+
+  const auto lock = ResolveLockInteraction(session.spells());
+  if (lock.status != LockInteractionStatus::kReady) {
+    openwow::ui::game::DisplaySystemMessage(233);
+    openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kWarn,
+        "GameObject interaction: stage=activate guid=" +
+        std::to_string(GetGuid().GetRawValue()) + " entry=" +
+        std::to_string(GetEntry()) + " lock=" + std::to_string(GetLockId()) +
+        " source=lock-requirement status=" + std::to_string(static_cast<int>(lock.status)) +
+        " spell=" + std::to_string(lock.spell_id) +
+        " skill=" + std::to_string(lock.current_skill) +
+        " required=" + std::to_string(lock.required_skill));
+    return false;
+  }
+  if (lock.spell_id != 0u) {
+    const bool started = lock.key_item_guid != 0u
+        ? session.interaction().SendUseItemByGuid(lock.key_item_guid, 0, GetGuid().GetRawValue())
+        : SpellAction_ValidateAndInitiateCast(
+              session, lock.spell_id, GetGuid().GetRawValue(), -1, 0);
+    if (started && IsChest()) session.loot().ExpectServerLootResponse(GetGuid());
+    openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kInfo,
+        "GameObject interaction: stage=cast guid=" +
+        std::to_string(GetGuid().GetRawValue()) + " entry=" +
+        std::to_string(GetEntry()) + " lock=" + std::to_string(GetLockId()) +
+        " slot=" + std::to_string(lock.lock_slot) + " spell=" +
+        std::to_string(lock.spell_id) + " source=lock-requirement result=" +
+        (started ? "started" : "rejected"));
+    return started;
   }
 
   if (active_player->Mount().IsMounted(*active_player) &&
@@ -3873,10 +3764,10 @@ bool CGGameObject_C::PassesInteractionPointRangeTest(
   }
 
   float interact_dist = GetInteractDistance();
-  if (const auto lock_spell_id = ResolveLockOpeningSpellId(*this, session);
-      lock_spell_id != 0u) {
+  if (const auto lock = ResolveLockInteraction(session.spells());
+      lock.status == LockInteractionStatus::kReady && lock.spell_id != 0u) {
     if (float spell_max_range = 0.0f;
-        TryResolveLockSpellMaxRange(session, *active_player, lock_spell_id,
+        TryResolveLockSpellMaxRange(session, *active_player, lock.spell_id,
                                     spell_max_range)) {
       interact_dist = spell_max_range;
     }

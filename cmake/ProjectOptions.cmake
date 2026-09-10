@@ -1,5 +1,34 @@
 option(OPENWOW_BUILD_CLIENT "Build the retail client executable" ON)
 option(OPENWOW_ENABLE_MPQ_VFS "Enable MPQ VFS via StormLib" ON)
+set(OPENWOW_LOCAL_CONTENT_ROOT
+  "${PROJECT_SOURCE_DIR}/../LocalData/335a"
+  CACHE PATH
+  "Local build-12340 content root containing Data/ (kept outside Git)"
+)
+option(OPENWOW_EMBED_GAME_DATA
+  "Copy OPENWOW_LOCAL_CONTENT_ROOT/Data into an Apple application bundle" OFF)
+
+include("${CMAKE_CURRENT_LIST_DIR}/IOSDevelopmentSigning.cmake")
+if(NOT DEFINED OPENWOW_IOS_BUNDLE_IDENTIFIER OR
+    OPENWOW_IOS_BUNDLE_IDENTIFIER STREQUAL "org.openwow.client")
+  set(OPENWOW_IOS_BUNDLE_IDENTIFIER
+    "${OPENWOW_IOS_DEFAULT_BUNDLE_IDENTIFIER}" CACHE STRING
+    "Bundle identifier for the native iOS application" FORCE)
+endif()
+if(NOT DEFINED OPENWOW_IOS_DEVELOPMENT_TEAM OR
+    OPENWOW_IOS_DEVELOPMENT_TEAM STREQUAL "")
+  set(OPENWOW_IOS_DEVELOPMENT_TEAM
+    "${OPENWOW_IOS_DEFAULT_DEVELOPMENT_TEAM}" CACHE STRING
+    "Apple development team used for automatic iOS code signing" FORCE)
+endif()
+set(OPENWOW_IOS_DEVICE "" CACHE STRING
+  "Device name or identifier used by the incremental iOS Data sync target")
+set(OPENWOW_IOS_TEXTURE_CACHE_LOCALE "zhCN" CACHE STRING
+  "Retail locale used to resolve the offline iOS ASTC texture cache")
+set(OPENWOW_IOS_TEXTURE_CACHE_TOOL
+  "${PROJECT_SOURCE_DIR}/build/release/tools/ios_texture_cache/openwow-ios-texture-cache"
+  CACHE FILEPATH
+  "Native host tool used to prepare the iOS ASTC texture cache")
 
 option(OPENWOW_ENABLE_STREAMING_TELEMETRY
   "Send stock's streaming-install tracker announce over plaintext HTTP" OFF)

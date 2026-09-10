@@ -269,6 +269,7 @@ void QuestPOIData::ReplaceQuestQueryResult(const uint32_t questId,
                 pois_.erase(slotQuestId);
                 activeQuests_.erase(slotQuestId);
                 worldMapIconLayouts_.erase(slotQuestId);
+                worldMapObjectiveMasks_.erase(slotQuestId);
             }
             querySlots_[index] = 0;
             slotIndex = index;
@@ -358,14 +359,16 @@ uint32_t QuestPOIData::GetQuestIdByVisibleWorldMapIndex(const std::size_t oneBas
     return visibleWorldMapQuestIds_[oneBasedIndex - 1];
 }
 
-void QuestPOIData::SetWorldMapIconLayout(const uint32_t questId,
-                                         const QuestPOIWorldMapIconLayout& layout) {
-    if (questId == 0) {
-        return;
-    }
-
+void QuestPOIData::SetWorldMapObjectiveMasks(
+    std::unordered_map<uint32_t, std::int32_t> masks) {
     std::lock_guard lock(mutex_);
-    worldMapIconLayouts_[questId] = layout;
+    worldMapObjectiveMasks_ = std::move(masks);
+}
+
+std::int32_t QuestPOIData::GetWorldMapObjectiveMask(const uint32_t questId) const {
+    std::lock_guard lock(mutex_);
+    const auto it = worldMapObjectiveMasks_.find(questId);
+    return it != worldMapObjectiveMasks_.end() ? it->second : 0;
 }
 
 std::optional<QuestPOIWorldMapIconLayout> QuestPOIData::GetWorldMapIconLayout(
@@ -416,6 +419,7 @@ void QuestPOIData::RemovePOI(uint32_t questId) {
     pois_.erase(questId);
     activeQuests_.erase(questId);
     worldMapIconLayouts_.erase(questId);
+    worldMapObjectiveMasks_.erase(questId);
     for (auto& slotQuestId : querySlots_) {
         if (slotQuestId == questId) {
             slotQuestId = 0;
@@ -595,6 +599,7 @@ void QuestPOIData::Clear() {
     activeQuests_.clear();
     querySlots_.fill(0);
     visibleWorldMapQuestIds_.clear();
+    worldMapObjectiveMasks_.clear();
     worldMapIconLayouts_.clear();
     iconOverlapDistance_ = kDefaultIconOverlapDistance;
     iconOverlapPushDistance_ = kDefaultIconOverlapPushDistance;

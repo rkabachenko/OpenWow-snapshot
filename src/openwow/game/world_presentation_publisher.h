@@ -164,6 +164,9 @@ private:
     AssembledEquipment published_equipment{};
 
     bool art_kit_valid{false};
+    bool loot_art_valid{false};
+    std::uint32_t loot_art_effect_id{0};
+    std::shared_ptr<const render::WeaponAttachmentVisual> loot_art_visual;
     std::uint8_t art_kit{0};
     std::array<std::string, 3> art_kit_texture_paths{};
 
@@ -209,6 +212,8 @@ private:
   void StampEquipmentSyncSerial(render::ObjectProjection &instance,
                                 CachedProjection &cache);
   void SyncQuestOverlay(render::ObjectProjection &instance, const WorldObject &object) const;
+  void SyncGameObjectLootArt(render::ObjectProjection &instance,
+                            const CGGameObject_C &object, CachedProjection &cache);
   void SyncCharacterAppearance(render::ObjectProjection &instance, const WorldObject &object,
                                const WorldSession &world_session, CachedProjection &cache);
   void SelectAnimation(render::ObjectProjection &instance, const WorldObject &object);

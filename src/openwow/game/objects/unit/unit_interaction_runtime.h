@@ -74,6 +74,7 @@ public:
 
   void RefreshFactionDependentState(WorldSession &session,
                                     bool refresh_linked_visible_units) const;
+  void RefreshNpcInteractionStatus(WorldSession &session, const char *source) const;
   void RefreshLinkedVisibleUnitFactionState() const;
   void HandleAliveStateTransition(WorldSession &session,
                                   bool suppress_player_alive_event);
@@ -84,7 +85,7 @@ public:
 
   void DrainAttachedEffectNodesForDeath();
   void OnNPCInteractionFlagsChanged(WorldSession &session,
-                                    std::uint32_t new_flags);
+                                    std::uint32_t old_flags, std::uint32_t new_flags);
 
   [[nodiscard]] bool IsAutoAttacking() const noexcept;
   [[nodiscard]] bool IsActivePlayerAutoAttacking() const;
@@ -128,7 +129,6 @@ private:
   ObjectGuid pending_attack_target_;
   ObjectGuid cached_update_target_guid_;
   bool death_state_active_{false};
-  std::uint32_t cached_npc_interaction_flags_{0};
   static inline float cached_interact_range_{0.0f};
 };
 

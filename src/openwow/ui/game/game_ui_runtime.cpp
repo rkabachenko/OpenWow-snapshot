@@ -1,6 +1,8 @@
 #include "openwow/ui/game/game_ui_manager.h"
+#include "openwow/foundation/diagnostics/performance_logging.h"
 #include "openwow/ui/game/runtime/render/ui_compositor.h"
 #include "openwow/ui/surfaces/game/runtime/world_ui_lifecycle_command.h"
+#include "openwow/debug/diagnostics/debug_console.h"
 #include "openwow/audio/playback/audio_engine.h"
 #include "openwow/game/c_input_control.h"
 #include "openwow/game/game_misc_utils.h"
@@ -9,13 +11,17 @@
 #include "openwow/render/resources/textures/texture_manager.h"
 #include "openwow/ui/display/settings/adapters/production_display_settings_runtime.h"
 #include "openwow/ui/game/game_ui_core.h"
+#include "openwow/ui/runtime/security/protected_action_gate.h"
 #include "openwow/ui/game/game_ui_scale.h"
+#include "openwow/ui/game/framescript/core/frame_script_invocation.h"
 #include "openwow/ui/game/framescript/core/frame_types_widgets.h"
 #include "openwow/ui/game/tooltip_object_bridge.h"
 #include "openwow/ui/game/tooltip_frame_sync.h"
+#include "openwow/ui/lua_c_api_convenience.h"
 #include "openwow/foundation/diagnostics/logging.h"
 
 #include <lua.hpp>
+#include <SDL2/SDL_timer.h>
 
 #include <memory>
 #include <string>
@@ -62,6 +68,12 @@ GameUIManager::GameUIManager(
             AfterFrameIdentityRelease(name);
           },
           .hierarchy_invalidated = [this] { InvalidateFrameHierarchy(); },
+          .layout_key_invalidated = [this](const std::string_view key) {
+            // Texture ownership changes one dependency entry. Keep unrelated
+            // geometry committed when a template binds its button textures.
+            retained_layout_.QueueLuaMutation(key);
+            retained_layout_.ReindexDependencies(key);
+          },
           .layout_graph_invalidated = [this] {
             InvalidateFrameLayoutGraph();
           },
@@ -71,37 +83,48 @@ GameUIManager::GameUIManager(
                 frame_traversal_index_.InvalidateFrameOrder(
                     key, runtime::FrameTraversalIndex::OrderInvalidationKind::
                              kOrderKey);
+                frame_input_router_.MarkMouseFocusDirty();
               },
           .inherited_order_invalidated =
               [this](const std::string_view key) {
                 frame_traversal_index_.InvalidateFrameOrder(
                     key, runtime::FrameTraversalIndex::OrderInvalidationKind::
                              kInherited);
+                frame_input_router_.MarkMouseFocusDirty();
               },
           .hit_test_invalidated = [this] { InvalidateFrameHitTest(); },
       }),
       retained_layout_(frame_store_, {
           .order_invalidated = [this] {
             frame_traversal_index_.InvalidatePaintOrder();
+            frame_input_router_.MarkMouseFocusDirty();
           },
           .order_key_invalidated =
               [this](const std::string_view key) {
                 frame_traversal_index_.InvalidateFrameOrder(
                     key, runtime::FrameTraversalIndex::OrderInvalidationKind::
                              kOrderKey);
+                frame_input_router_.MarkMouseFocusDirty();
               },
           .inherited_order_invalidated =
               [this](const std::string_view key) {
                 frame_traversal_index_.InvalidateFrameOrder(
                     key, runtime::FrameTraversalIndex::OrderInvalidationKind::
                              kInherited);
+                frame_input_router_.MarkMouseFocusDirty();
               },
           .on_update_order_invalidated = [this] {
             frame_event_runtime_.MarkOnUpdateOrderDirty();
           },
           .hit_test_invalidated = [this] {
             frame_traversal_index_.InvalidateHitTest();
+            frame_input_router_.MarkMouseFocusDirty();
           },
+          .size_committed =
+              [this](const std::string_view name, const float width,
+                     const float height) {
+                PublishFrameSizeChanged(name, width, height);
+              },
       }),
       frame_traversal_index_(frame_store_, retained_layout_),
       frame_input_router_(frame_store_, frame_traversal_index_, retained_layout_),
@@ -163,7 +186,8 @@ GameUIManager::GameUIManager(
                      frame_event_runtime_.RegisterOnUpdate(name, strata, level);
                    },
            })),
-      nameplate_frames_(*frame_materializer_, frame_store_),
+      nameplate_frames_(*frame_materializer_, frame_store_, retained_layout_,
+                        frame_traversal_index_),
       world_lua_runtime_(std::make_unique<runtime::WorldLuaRuntime>(*this)),
       frame_xml_loader_(
           std::make_unique<runtime::FrameXmlRuntimeLoader>(*this)),
@@ -211,6 +235,35 @@ GameUIManager::GameUIManager(
   openwow::input::BindWorldUiInputRouter(&frame_input_router_);
 }
 
+void GameUIManager::PublishFrameSizeChanged(const std::string_view frame_name,
+                                            const float width,
+                                            const float height) {
+  if (world_lua_runtime_ == nullptr) return;
+  lua_State* const state = world_lua_runtime_->state();
+  const auto ref = frame_store_.FindLuaRef(frame_name);
+  if (state == nullptr || !ref.has_value()) return;
+
+  const int top = lua_gettop(state);
+  lua_rawgeti(state, LUA_REGISTRYINDEX, *ref);
+  if (lua_istable(state, -1) == 0) {
+    lua_settop(state, top);
+    return;
+  }
+  const int frame_index = lua_absindex(state, -1);
+  lua_pushnumber(state, width);
+  lua_pushnumber(state, height);
+  const auto invocation =
+      InvokeFrameScriptHandler(state, frame_index, "OnSizeChanged", 2);
+  if (invocation.status != LUA_OK) {
+    const char* const error = lua_tostring(state, -1);
+    openwow::diagnostics::Log(
+        openwow::diagnostics::LogLevel::kWarn,
+        "GameUIManager: OnSizeChanged error for " + std::string(frame_name) +
+            ": " + (error != nullptr ? error : "(null)"));
+  }
+  lua_settop(state, top);
+}
+
 GameUIManager::~GameUIManager() {
   openwow::input::BindWorldUiInputRouter(nullptr);
   BindRendererContext(nullptr);
@@ -255,8 +308,10 @@ void GameUIManager::ResetPerformanceCounters() noexcept {
   frame_traversal_index_.ResetMetrics();
 }
 
-void GameUIManager::SetViewportSize(const float width, const float height) {
-  if (retained_layout_.SetViewport(width, height) &&
+void GameUIManager::SetViewportSize(
+    const float width, const float height,
+    const std::optional<openwow::ui::framexml::ViewportInsets> insets) {
+  if (retained_layout_.SetViewport(width, height, insets) &&
       frame_xml_loader_->post_bootstrap_complete()) {
     SyncGameUiScaleFromCVars(*this, true);
   }
@@ -275,12 +330,34 @@ bool GameUIManager::Initialize(const openwow::vfs::VirtualFileSystem *vfs,
 
 void GameUIManager::BindWorldUiLifecycleCommands(
     WorldUiLifecycleCommandPort* commands) {
+  auto& console = openwow::debug::DebugConsole::Get();
+  if (reload_console_registration_ != 0) {
+    (void)console.UnregisterCommandIfCurrent("reloadUI",
+                                            reload_console_registration_);
+    reload_console_registration_ = 0;
+  }
   lifecycle_commands_ = commands;
+  if (commands != nullptr) {
+    reload_console_registration_ = console.RegisterRawCommand(
+        "reloadUI", "Reload the game user interface",
+        [this](std::string_view) -> std::string {
+          if (GameUI_CanPerformHardwareEventAction()) {
+            RequestWorldUiReload();
+          } else {
+            openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kWarn,
+                "WorldUI reload rejected: source=console reason=protected-action-gate");
+          }
+          return {};
+        }, {}, 1);
+  }
 }
 
 void GameUIManager::RequestWorldUiReload() {
   if (lifecycle_commands_ != nullptr) {
     lifecycle_commands_->RequestWorldUiReload();
+  } else {
+    openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kError,
+        "WorldUI reload rejected: source=console reason=lifecycle-port-unbound");
   }
 }
 
@@ -306,33 +383,54 @@ void GameUIManager::Shutdown() {
 }
 
 void GameUIManager::Update(float dt) {
+  static openwow::diagnostics::PerformanceLogSite performance_site;
+  const openwow::diagnostics::ScopedPerformanceLog performance(
+      performance_site, "ui.update");
   if (!is_initialized() || lua_state() == nullptr)
     return;
 
   GameUI_PollScreenshotCompletions();
 
-  frame_api::UpdateLuaTooltipObjects(lua_state(), dt);
-  frame_api::RefreshCursorAnchoredTooltipFrames(lua_state());
+  frame_input_router_.UpdateTouchGestures(SDL_GetTicks());
+
+  {
+    static openwow::diagnostics::PerformanceLogSite site;
+    const openwow::diagnostics::ScopedPerformanceLog phase(site, "ui.update_tooltips");
+    frame_api::UpdateLuaTooltipObjects(lua_state(), dt);
+    frame_api::RefreshCursorAnchoredTooltipFrames(lua_state());
+  }
 
   if (frame_traversal_index_.order_dirty()) {
     frame_traversal_index_.Rebuild(root_scale(), screen_height());
   }
 
-  frame_input_router_.UpdateFocusedEditBoxInputLanguage();
+  {
+    static openwow::diagnostics::PerformanceLogSite site;
+    const openwow::diagnostics::ScopedPerformanceLog phase(site, "ui.update_widgets");
+    frame_input_router_.UpdateFocusedEditBoxInputLanguage();
 
-  openwow::platform::IME_ManageContextAssociation();
+    openwow::platform::IME_ManageContextAssociation();
 
-  frame_input_router_.FlushPendingEditBoxStateUpdates();
+    frame_input_router_.FlushPendingEditBoxStateUpdates();
 
-  frame_input_router_.UpdateFocusedEditBoxCaretBlink(dt);
+    frame_input_router_.UpdateFocusedEditBoxCaretBlink(dt);
 
-  frame_api::RefreshScrollFrameWidgetState(
-      lua_state(), &published_scroll_frame_ranges_generation_);
+    frame_api::RefreshScrollFrameWidgetState(
+        lua_state(), &published_scroll_frame_ranges_generation_);
+  }
 
-  frame_event_runtime_.Update(dt);
+  {
+    static openwow::diagnostics::PerformanceLogSite site;
+    const openwow::diagnostics::ScopedPerformanceLog phase(site, "ui.update_scripts_animations");
+    frame_event_runtime_.Update(dt);
+  }
   movie_frame_runtime_.Update(dt);
 
-  nameplate_frames_.Update();
+  {
+    static openwow::diagnostics::PerformanceLogSite site;
+    const openwow::diagnostics::ScopedPerformanceLog phase(site, "ui.update_nameplates");
+    nameplate_frames_.Update();
+  }
 }
 
 void GameUIManager::DestroyNamedFrame(const std::string &name) {
@@ -347,6 +445,9 @@ void GameUIManager::Render(const std::uint8_t view_id, const float screen_w,
                            const std::uint64_t compositor_generation,
                            const std::uint8_t offscreen_view_begin,
                            const std::uint8_t offscreen_view_count) {
+  static openwow::diagnostics::PerformanceLogSite performance_site;
+  const openwow::diagnostics::ScopedPerformanceLog performance(
+      performance_site, "ui.render_prepare_submit");
   if (!is_initialized()) return;
   SetViewportSize(screen_w, screen_h);
   const auto& movie_player = movie_frame_runtime_.player();
@@ -443,19 +544,23 @@ void GameUIManager::AfterFrameIdentityRelease(const std::string_view name) {
 void GameUIManager::InvalidateFrameHierarchy() {
   retained_layout_.Invalidate();
   frame_traversal_index_.InvalidateHierarchy();
+  frame_input_router_.MarkMouseFocusDirty();
 }
 
 void GameUIManager::InvalidateFrameLayoutGraph() {
   retained_layout_.InvalidateGraph();
   frame_traversal_index_.InvalidateHierarchy();
+  frame_input_router_.MarkMouseFocusDirty();
 }
 
 void GameUIManager::InvalidateFramePaintOrder() {
   frame_traversal_index_.InvalidatePaintOrder();
+  frame_input_router_.MarkMouseFocusDirty();
 }
 
 void GameUIManager::InvalidateFrameHitTest() {
   frame_traversal_index_.InvalidateHitTest();
+  frame_input_router_.MarkMouseFocusDirty();
 }
 
 }

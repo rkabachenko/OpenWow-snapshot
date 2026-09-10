@@ -15,6 +15,9 @@
 #include "openwow/ui/lua_taint_api.h"
 #include "openwow/ui/runtime/lua/lua_binding.h"
 
+#include "openwow/game/object_guid.h"
+#include "openwow/foundation/diagnostics/logging.h"
+
 #include <lua.hpp>
 
 #include <algorithm>
@@ -50,11 +53,16 @@ struct LuaTooltipObjectState final {
     std::string anchor;
     float minimum_width{0.0F};
     float padding{0.0F};
+    std::size_t committed_line_count{0u};
+    std::size_t committed_texture_count{0u};
+    float committed_minimum_width{0.0F};
+    float committed_padding{0.0F};
     std::uint64_t layout_revision{0u};
     float status_bar_min{0.0F};
     float status_bar_max{1.0F};
     float status_bar_value{0.0F};
     bool force_minimum_width{false};
+    bool committed_force_minimum_width{false};
     bool shown{false};
     bool has_status_bar{false};
     bool operator==(const PublishedPresentation&) const = default;
@@ -71,11 +79,17 @@ LuaTooltipObjectState::PublishedPresentation CapturePresentation(
       .anchor = tooltip.GetAnchor(),
       .minimum_width = tooltip.GetMinimumWidth(),
       .padding = tooltip.GetPadding(),
+      .committed_line_count = tooltip.GetCommittedLineCount(),
+      .committed_texture_count = tooltip.GetCommittedTextureCount(),
+      .committed_minimum_width = tooltip.GetCommittedMinimumWidth(),
+      .committed_padding = tooltip.GetCommittedPadding(),
       .layout_revision = tooltip.GetLayoutRevision(),
       .status_bar_min = tooltip.GetStatusBarMin(),
       .status_bar_max = tooltip.GetStatusBarMax(),
       .status_bar_value = tooltip.GetStatusBarValue(),
       .force_minimum_width = tooltip.IsForceMinWidth(),
+      .committed_force_minimum_width =
+          tooltip.IsCommittedForceMinWidth(),
       .shown = tooltip.IsShown(),
       .has_status_bar = tooltip.HasStatusBar(),
   };
@@ -280,6 +294,40 @@ void ApplyPerObjectGameTooltipMethods(lua_State* L, int object_index) {
   RemoveFunctionFieldsFromTable(L, object_index);
   lua_setmetatable(L, object_index);
   lua_pop(L, 2);
+}
+
+void UpdateWorldMouseoverTooltip(lua_State* L, const openwow::game::ObjectGuid guid) {
+  if (L == nullptr) {
+    return;
+  }
+  const int base = lua_gettop(L);
+  lua_getglobal(L, "GameTooltip");
+  const int tooltip_index = lua_absindex(L, -1);
+  LuaTooltipObjectState* state = nullptr;
+  if (lua_istable(L, tooltip_index) != 0) {
+    const int owners_index = PushTooltipOwnerWeakTable(L);
+    lua_pushnil(L);
+    while (lua_next(L, owners_index) != 0) {
+      if (lua_rawequal(L, tooltip_index, -1) != 0) {
+        state = static_cast<LuaTooltipObjectState*>(lua_touserdata(L, -2));
+        break;
+      }
+      lua_pop(L, 1);
+    }
+  }
+  static bool reported_missing_state = false;
+  if (state == nullptr) {
+    if (!reported_missing_state) {
+      openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kWarn,
+          "Tooltip Lua bridge failed: stage=world-mouseover operation=GameTooltip cause=frame-backing-state-is-unavailable");
+      reported_missing_state = true;
+    }
+  } else {
+    reported_missing_state = false;
+    // Native world population and Lua methods must share this frame's state.
+    state->tooltip.SetWorldObject(guid);
+  }
+  lua_settop(L, base);
 }
 
 void UpdateLuaTooltipObjects(lua_State* L, const float elapsed_seconds) {

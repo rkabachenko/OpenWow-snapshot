@@ -123,7 +123,7 @@ std::optional<DisplayMode> QueryCurrentMode() {
     int drawable_width = 0;
     int drawable_height = 0;
     SDL_GetWindowSize(window, &logical_width, &logical_height);
-    SDL_GL_GetDrawableSize(window, &drawable_width, &drawable_height);
+    SDL_GetWindowSizeInPixels(window, &drawable_width, &drawable_height);
     if (logical_width > 0 && logical_height > 0 && drawable_width > 0 &&
         drawable_height > 0) {
       mode.w = static_cast<int>(std::lround(

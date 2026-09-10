@@ -9,6 +9,7 @@
 #include "openwow/game/taxi_handler.h"
 #include "openwow/game/taxi_runtime_slice.h"
 #include "openwow/game/taxi_system.h"
+#include "openwow/foundation/diagnostics/logging.h"
 #include "openwow/ui/surfaces/game/runtime/system_message_dispatch.h"
 #include "openwow/ui/lua_numeric.h"
 
@@ -225,32 +226,49 @@ void TaxiMapFrameTakeTaxiNode(lua_State* L,
                               const TaxiSliceState& state,
                               std::size_t slot_index,
                               openwow::game::WorldSession& session) {
-  constexpr std::uint32_t kTaxiActivationInternalFlag = 0x10000000u;
-
   if (slot_index >= state.nodes.size() || slot_index >= state.routes.size()) {
     return;
   }
 
   const auto* player = session.objects().GetLocalPlayerTyped();
   if (!player) {
-    return;
-  }
-
-  if (player->State().GetHealth() > 0 &&
-      (player->GetInternalFlags() & kTaxiActivationInternalFlag) == 0) {
-    DisplaySystemMessage(193);
+    openwow::diagnostics::Log(
+        openwow::diagnostics::LogLevel::kWarn,
+        "taxi activation rejected stage=TakeTaxiNode reason=missing-player slot=" +
+            std::to_string(slot_index + 1));
     return;
   }
 
   const auto& node = state.nodes[slot_index];
   const auto& route = state.routes[slot_index];
+  const auto npc_guid = session.taxi().GetFlightMasterGuid();
+  const auto log_activation = [&](const std::string& detail) {
+    openwow::diagnostics::Log(
+        openwow::diagnostics::LogLevel::kInfo,
+        "taxi activation " + detail + " stage=TakeTaxiNode guid=" +
+            std::to_string(npc_guid) +
+            " sourceNode=" + std::to_string(state.current_node_id) +
+            " destinationNode=" + std::to_string(node.id) +
+            " mountDisplay=" + std::to_string(player->Mount().DisplayId(*player)) +
+            " retainedMountDisplay=" +
+            std::to_string(player->Mount().CachedDisplayForSpell()) +
+            " spellStateFlags=" + std::to_string(player->State().GetSpellStateFlags()));
+  };
+
+  if (player->Mount().IsMountedStateActive(*player)) {
+    log_activation("rejected reason=already-mounted");
+    DisplaySystemMessage(193);
+    return;
+  }
+
   if (node.id == state.current_node_id) {
+    log_activation("rejected reason=same-node");
     DisplaySystemMessage(185);
     return;
   }
 
-  const auto npc_guid = session.taxi().GetFlightMasterGuid();
   if (!route.requires_multi_hop) {
+    log_activation("request opcode=CMSG_ACTIVATETAXI");
     session.interaction().SendActivateTaxi(npc_guid,
                                            state.current_node_id,
                                            node.id);
@@ -259,13 +277,17 @@ void TaxiMapFrameTakeTaxiNode(lua_State* L,
 
   if (route.has_route && !route.path_nodes.empty()) {
     if (CalculateTaxiNodeCost(L, state, slot_index) > player->GetMoney()) {
+      log_activation("rejected reason=not-enough-money");
       DisplaySystemMessage(188);
       return;
     }
+    log_activation("request opcode=CMSG_ACTIVATETAXIEXPRESS nodes=" +
+        std::to_string(route.path_nodes.size()));
     session.interaction().SendActivateTaxiExpress(npc_guid, route.path_nodes);
     return;
   }
 
+  log_activation("rejected reason=no-route");
   DisplaySystemMessage(186);
 }
 
@@ -386,7 +408,7 @@ int LuaTakeTaxiNode(lua_State* L) {
 
 int LuaCloseTaxiMap(lua_State* L) {
   if (auto* session = GetWorldSession(L); session != nullptr) {
-    openwow::game::TaxiMapFrame_Close(session->taxi());
+    openwow::game::TaxiMapFrame_Close(*session);
   }
   return 0;
 }

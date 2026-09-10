@@ -120,6 +120,10 @@ public:
     shadow_data_ = data;
   }
 
+  void SetPrecomputedShadowsEnabled(const bool enabled) {
+    precomputed_shadows_enabled_ = enabled;
+  }
+
   void Shutdown();
 
   void ClearTerrain();
@@ -225,9 +229,16 @@ private:
 
   bgfx::UniformHandle s_terrain_layers_ = BGFX_INVALID_HANDLE;
   bgfx::UniformHandle s_terrain_alpha_ = BGFX_INVALID_HANDLE;
+  std::array<bgfx::UniformHandle, 4u> s_shadow_maps_{{
+      BGFX_INVALID_HANDLE, BGFX_INVALID_HANDLE, BGFX_INVALID_HANDLE,
+      BGFX_INVALID_HANDLE}};
 
   bgfx::UniformHandle u_vs_params_ = BGFX_INVALID_HANDLE;
   bgfx::UniformHandle u_fs_params_ = BGFX_INVALID_HANDLE;
+  bgfx::UniformHandle u_shadow_matrices_ = BGFX_INVALID_HANDLE;
+  bgfx::UniformHandle u_shadow_parameters_ = BGFX_INVALID_HANDLE;
+
+  bgfx::TextureHandle fallback_shadow_depth_ = BGFX_INVALID_HANDLE;
 
   TextureSliceArrays slice_arrays_;
 
@@ -238,6 +249,7 @@ private:
   std::vector<TerrainTileGpu> loaded_tiles_;
   std::vector<TerrainBatchItem> batch_items_;
   bool initialized_{false};
+  bool precomputed_shadows_enabled_{true};
   uint32_t view_distance_{4};
   uint32_t texture_quality_{2};
 };

@@ -5,6 +5,7 @@
 #include "openwow/data/formats/m2/model_path.h"
 #include "openwow/data/model/m2_model.h"
 #include "openwow/data/texture_cache.h"
+#include "openwow/core/platform_runtime_policy.h"
 #include "openwow/render/backend/bgfx/renderer_context_services.h"
 
 #include <algorithm>
@@ -275,8 +276,10 @@ void M2ResourceStreamer::Schedule(Record& record) {
     if (!workers_.IsInitialized()) {
       const std::uint32_t hardware_threads =
           std::thread::hardware_concurrency();
+      constexpr auto runtime_policy =
+          openwow::core::GetPlatformRuntimePolicy();
       Start(std::clamp(hardware_threads == 0u ? 2u : hardware_threads / 2u,
-                       2u, 4u));
+                       1u, runtime_policy.resource_worker_limit));
     }
     const auto prepare = backend_.prepare;
     const auto loader = file_loader_;

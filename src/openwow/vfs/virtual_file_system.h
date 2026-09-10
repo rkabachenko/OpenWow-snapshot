@@ -27,6 +27,12 @@ struct MountPoint {
   MountKind kind{MountKind::kFilesystem};
   std::filesystem::path source_root;
 
+  // Optional normalized client-path prefix used to bypass mounts that cannot
+  // contain a lookup. The prefix may include a filename prefix for sharded
+  // archives.
+  std::string lookup_path_prefix;
+  bool prewarm{true};
+
   std::vector<std::filesystem::path> mpq_patches;
   int priority{0};
   bool enabled{true};

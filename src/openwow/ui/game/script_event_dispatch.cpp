@@ -113,9 +113,6 @@ void AppendManualSupplementalTokenMatches(
     const std::uint64_t guid,
     std::vector<std::string> &result) {
   AppendIndexedTokensIfGuidMatches(token_to_guid, guid, "boss", 16, result);
-  AppendIndexedTokensIfGuidMatches(token_to_guid, guid, "commentator", 10, result);
-  AppendTokenIfGuidMatches(token_to_guid, guid, "questnpc", result);
-  AppendTokenIfGuidMatches(token_to_guid, guid, "none", result);
 }
 
 bool IsSessionOwnedToken(const std::string &token) {
@@ -272,8 +269,6 @@ void AppendSessionSelectionTokenMatches(
                            "focus", result);
   AppendTokenIfGuidMatches(guid, objects.GetNpcGuid().GetRawValue(), "npc",
                            result);
-  AppendTokenIfGuidMatches(guid, objects.GetMouseoverGuid().GetRawValue(),
-                           "mouseover", result);
 }
 
 void AppendUniqueGuid(std::vector<std::uint64_t> &guids, const std::uint64_t guid) {
@@ -424,6 +419,10 @@ std::vector<std::string> UnitTokenRegistry::AllTokensForGuid(
     AppendSessionSelectionTokenMatches(*session, guid, result);
   } else {
     AppendManualTokenMatches(token_to_guid_, guid, result);
+  }
+
+  if (session != nullptr) {
+    return result;
   }
 
   std::vector<std::string> extras;
@@ -1560,10 +1559,16 @@ void ScriptEventDispatch::FireQuestGreeting() {
   FireGlobalEvent(QUEST_GREETING);
 }
 
-void ScriptEventDispatch::FireQuestAccepted(int quest_log_index, int quest_id) {
+void ScriptEventDispatch::FireQuestAccepted(int quest_log_index) {
   if (!dispatcher_)
     return;
-  dispatcher_->FireEvent(QUEST_ACCEPTED, quest_log_index, quest_id);
+  dispatcher_->FireEvent(QUEST_ACCEPTED, quest_log_index);
+}
+
+void ScriptEventDispatch::FireQuestWatchUpdate(int quest_log_index) {
+  if (!dispatcher_)
+    return;
+  dispatcher_->FireEvent(QUEST_WATCH_UPDATE, quest_log_index);
 }
 
 void ScriptEventDispatch::FireQuestLogUpdate() {

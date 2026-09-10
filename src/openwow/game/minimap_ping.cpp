@@ -2,7 +2,6 @@
 #include "openwow/game/minimap_ping.h"
 
 #include "openwow/game/group_system.h"
-#include "openwow/ui/ui_aspect_scales.h"
 #include "openwow/ui/game/cvar_system.h"
 #include "openwow/ui/game/game_events.h"
 #include "openwow/ui/game/minimap_system.h"
@@ -66,14 +65,9 @@ std::pair<float, float> MinimapPingSystem::ResolveWorldPositionFromFrameOffset(
     return {player_x, player_y};
   }
 
-  const float ui_script_width = openwow::ui::GetUiScriptScreenWidth();
-  const float stored_x = openwow::ui::ApplyCachedUiHorizontalStretch(
-      static_cast<float>(frame_x) / ui_script_width);
-  const float stored_y = openwow::ui::ApplyCachedUiHorizontalStretch(
-      static_cast<float>(frame_y) / ui_script_width);
   const float diameter = GetVisibleRadius() * 2.0f;
-  float delta_x = (stored_y / minimap_width) * diameter;
-  float delta_y = (-stored_x / minimap_height) * diameter;
+  float delta_x = static_cast<float>(frame_y / minimap_height) * diameter;
+  float delta_y = static_cast<float>(-frame_x / minimap_width) * diameter;
   if (ShouldRotateMinimap()) {
     const float minimap_direction =
         GetDisplayedMinimapDirection(player_facing);

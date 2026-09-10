@@ -466,24 +466,47 @@ struct ChannelClock {
   std::uint32_t time_ms{0};
   std::uint32_t animation_duration_ms{0};
 
-  bool wrap_by_animation{false};
-  std::uint32_t animation_wrapped_time_ms{0};
+  bool has_animation_sample_time{false};
+  std::uint32_t animation_sample_time_ms{0};
 
   const std::uint64_t *keyless_rows{nullptr};
 };
 
+enum class ChannelClockRole {
+  kPrimary,
+  kBlendSource,
+};
+
 [[nodiscard]] ChannelClock MakeChannelClock(const openwow::data::model::M2Model &model,
                                             const int animation_index,
-                                            const std::uint32_t time_ms) {
+                                            const std::uint32_t time_ms,
+                                            const ChannelClockRole role) {
   const std::uint32_t anim_duration = AnimationDurationMs(model, animation_index);
-  const bool wrap_by_animation = anim_duration > 0u;
+  const bool has_animation_sample_time = anim_duration > 0u;
+  bool clamp_at_end = false;
+  if (animation_index >= 0 &&
+      static_cast<std::size_t>(animation_index) < model.animation_sequences.size()) {
+    const std::uint32_t flags =
+        model.animation_sequences[static_cast<std::size_t>(animation_index)].flags;
+    // Primary and blend-source clocks use distinct authored clamp flags. Keep
+    // duration itself as a valid sample time; modulo would replay the first key
+    // while a completed one-shot pose is fading out.
+    clamp_at_end =
+        role == ChannelClockRole::kPrimary
+            ? (flags & openwow::data::model::kM2SequenceFlagPlayOnce) != 0u
+            : (flags & openwow::data::model::
+                           kM2SequenceFlagBlendSourceClampedAtEnd) != 0u;
+  }
   return ChannelClock{
       .animation_index = animation_index,
       .time_ms = time_ms,
       .animation_duration_ms = anim_duration,
-      .wrap_by_animation = wrap_by_animation,
-      .animation_wrapped_time_ms =
-          wrap_by_animation ? WrapTimeMs(time_ms, anim_duration) : 0u,
+      .has_animation_sample_time = has_animation_sample_time,
+      .animation_sample_time_ms =
+          has_animation_sample_time
+              ? (clamp_at_end ? std::min(time_ms, anim_duration)
+                              : WrapTimeMs(time_ms, anim_duration))
+              : 0u,
       .keyless_rows = model.bone_pose_index.KeylessRowsFor(animation_index),
   };
 }
@@ -528,8 +551,8 @@ BonePose SampleBonePose(const openwow::data::model::M2Model &model,
         .time_ms = clock.time_ms,
         .animation_duration_ms = clock.animation_duration_ms,
         .global_sequences_ms = &model.global_sequences_ms,
-        .has_animation_wrapped_time = clock.wrap_by_animation,
-        .animation_wrapped_time_ms = clock.animation_wrapped_time_ms,
+        .has_animation_wrapped_time = clock.has_animation_sample_time,
+        .animation_wrapped_time_ms = clock.animation_sample_time_ms,
     };
     pose.translation = SampleBoneVec3Track(t_ref, M2Float4{{0.0f, 0.0f, 0.0f, 0.0f}});
   }
@@ -540,8 +563,8 @@ BonePose SampleBonePose(const openwow::data::model::M2Model &model,
         .time_ms = clock.time_ms,
         .animation_duration_ms = clock.animation_duration_ms,
         .global_sequences_ms = &model.global_sequences_ms,
-        .has_animation_wrapped_time = clock.wrap_by_animation,
-        .animation_wrapped_time_ms = clock.animation_wrapped_time_ms,
+        .has_animation_wrapped_time = clock.has_animation_sample_time,
+        .animation_wrapped_time_ms = clock.animation_sample_time_ms,
     };
     pose.scale = SampleBoneVec3Track(s_ref, M2Float4{{1.0f, 1.0f, 1.0f, 0.0f}});
   }
@@ -552,8 +575,8 @@ BonePose SampleBonePose(const openwow::data::model::M2Model &model,
         .time_ms = clock.time_ms,
         .animation_duration_ms = clock.animation_duration_ms,
         .global_sequences_ms = &model.global_sequences_ms,
-        .has_animation_wrapped_time = clock.wrap_by_animation,
-        .animation_wrapped_time_ms = clock.animation_wrapped_time_ms,
+        .has_animation_wrapped_time = clock.has_animation_sample_time,
+        .animation_wrapped_time_ms = clock.animation_sample_time_ms,
     };
     pose.rotation = SampleQuaternionTrack(r_ref);
   }
@@ -576,13 +599,15 @@ struct BoneChannelClocks {
     const openwow::data::model::M2Model &model, const M2AnimationSlotState &slot) {
   BoneChannelClocks clocks{
       .pose = MakeChannelClock(model, static_cast<int>(slot.sequence_index),
-                               SlotTimeMs(slot.time_seconds)),
+                               SlotTimeMs(slot.time_seconds),
+                               ChannelClockRole::kPrimary),
   };
   if (slot.blend.IsBlending()) {
     clocks.has_blend_source = true;
     clocks.blend_source =
         MakeChannelClock(model, static_cast<int>(slot.blend.source_sequence_index),
-                         SlotTimeMs(slot.blend.source_time));
+                         SlotTimeMs(slot.blend.source_time),
+                         ChannelClockRole::kBlendSource);
     clocks.blend_factor = M2PoseBlendFactor(slot.blend);
   }
   return clocks;
@@ -593,11 +618,15 @@ struct BoneChannelClocks {
     const std::uint32_t time_ms,
     const std::optional<int> blend_source_animation_index,
     const std::uint32_t blend_source_time_ms, const float blend_factor) {
-  BoneChannelClocks clocks{.pose = MakeChannelClock(model, animation_index, time_ms)};
+  BoneChannelClocks clocks{
+      .pose = MakeChannelClock(model, animation_index, time_ms,
+                               ChannelClockRole::kPrimary)};
   if (blend_source_animation_index.has_value()) {
     clocks.has_blend_source = true;
     clocks.blend_source =
-        MakeChannelClock(model, *blend_source_animation_index, blend_source_time_ms);
+        MakeChannelClock(model, *blend_source_animation_index,
+                         blend_source_time_ms,
+                         ChannelClockRole::kBlendSource);
     clocks.blend_factor = blend_factor;
   }
   return clocks;

@@ -45,7 +45,7 @@ struct FontFace::Impl {
   }
 
   std::string path;
-  std::vector<std::uint8_t> bytes;
+  std::shared_ptr<const std::vector<std::uint8_t>> bytes;
   FontStyle style;
   FT_Library library{};
   FT_Face face{};
@@ -71,6 +71,17 @@ std::shared_ptr<FontFace> FontFace::LoadMemory(
     std::string path, std::vector<std::uint8_t> bytes,
     const int pixel_height, const FontStyle style) {
   if (bytes.empty() || pixel_height <= 0) return {};
+  return LoadSharedMemory(
+      std::move(path),
+      std::make_shared<const std::vector<std::uint8_t>>(std::move(bytes)),
+      pixel_height, style);
+}
+
+std::shared_ptr<FontFace> FontFace::LoadSharedMemory(
+    std::string path,
+    std::shared_ptr<const std::vector<std::uint8_t>> bytes,
+    const int pixel_height, const FontStyle style) {
+  if (!bytes || bytes->empty() || pixel_height <= 0) return {};
 
   auto impl = std::make_unique<Impl>();
   impl->path = std::move(path);
@@ -79,8 +90,8 @@ std::shared_ptr<FontFace> FontFace::LoadMemory(
   impl->pixel_height = pixel_height;
   if (FT_Init_FreeType(&impl->library) != 0 ||
       FT_New_Memory_Face(
-          impl->library, reinterpret_cast<const FT_Byte*>(impl->bytes.data()),
-          static_cast<FT_Long>(impl->bytes.size()), 0, &impl->face) != 0 ||
+          impl->library, reinterpret_cast<const FT_Byte*>(impl->bytes->data()),
+          static_cast<FT_Long>(impl->bytes->size()), 0, &impl->face) != 0 ||
       FT_Set_Pixel_Sizes(impl->face, 0,
                          static_cast<FT_UInt>(pixel_height)) != 0) {
     return {};
@@ -106,6 +117,15 @@ int FontFace::pixel_height() const noexcept { return impl_->pixel_height; }
 float FontFace::line_height() const noexcept { return impl_->line_height; }
 float FontFace::ascent() const noexcept { return impl_->ascent; }
 FontStyle FontFace::style() const noexcept { return impl_->style; }
+
+std::shared_ptr<FontFace> FontFace::WithPixelHeight(const int pixel_height) const {
+  return WithSizeAndStyle(pixel_height, impl_->style);
+}
+
+std::shared_ptr<FontFace> FontFace::WithSizeAndStyle(
+    const int pixel_height, const FontStyle style) const {
+  return LoadSharedMemory(impl_->path, impl_->bytes, pixel_height, style);
+}
 
 GlyphMetrics FontFace::Glyph(std::uint32_t codepoint) const {
   std::lock_guard lock(impl_->mutex);

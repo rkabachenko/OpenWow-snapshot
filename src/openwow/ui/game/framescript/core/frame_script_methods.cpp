@@ -54,14 +54,9 @@ static std::string FrameScriptStorageFieldName(const char* canonical_name) {
 
 static void PushLuaFrameScript(lua_State* L, const int frame_index,
                                const char* canonical_name) {
-  const int abs_index = lua_absindex(L, frame_index);
-  const std::string key = FrameScriptStorageFieldName(canonical_name);
-  lua_getfield(L, abs_index, key.c_str());
-  if (lua_isfunction(L, -1) != 0) {
-    return;
+  if (!PushFrameScriptHandler(L, frame_index, canonical_name)) {
+    lua_pushnil(L);
   }
-  lua_pop(L, 1);
-  lua_getfield(L, abs_index, canonical_name);
 }
 
 static void StoreLuaFrameScript(lua_State* L, const int frame_index,

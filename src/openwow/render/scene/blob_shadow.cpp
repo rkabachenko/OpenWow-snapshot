@@ -1,9 +1,8 @@
 
 #include "openwow/render/scene/blob_shadow.h"
 
-#include "openwow/data/formats/dbc/dbc_loader.h"
-
 #include "openwow/render/resources/shaders/shader_registry.h"
+#include "openwow/render/scene/object_renderer.h"
 #include "openwow/foundation/diagnostics/logging.h"
 
 #include <bgfx/bgfx.h>
@@ -16,6 +15,111 @@
 #include <vector>
 
 namespace openwow::render {
+
+namespace {
+
+struct BlobShadowProjection {
+  std::array<float, 6> box{};
+  std::array<float, 2> reference_xy{};
+  std::array<float, 4> uv_jacobian{};
+};
+
+[[nodiscard]] bool BuildBlobShadowProjection(
+    const ModelSpatialQueryResult& spatial,
+    BlobShadowProjection* const out) {
+  if (out == nullptr) {
+    return false;
+  }
+
+  const auto& bounds = spatial.local_bounds;
+  if (!(bounds[0] < bounds[3]) || !(bounds[1] < bounds[4]) ||
+      !(bounds[2] < bounds[5])) {
+    return false;
+  }
+  if (!std::all_of(bounds.begin(), bounds.end(),
+                   [](const float value) { return std::isfinite(value); }) ||
+      !std::all_of(spatial.world_transform.begin(),
+                   spatial.world_transform.end(),
+                   [](const float value) { return std::isfinite(value); })) {
+    return false;
+  }
+
+  const auto& matrix = spatial.world_transform;
+  const float model_scale = std::sqrt(matrix[0] * matrix[0] +
+                                      matrix[1] * matrix[1] +
+                                      matrix[2] * matrix[2]);
+  constexpr float kTransformEpsilon = 1.0e-6f;
+  if (!(model_scale > kTransformEpsilon) || !std::isfinite(model_scale)) {
+    return false;
+  }
+
+  constexpr float kHalfExtentClamp = 5.0f;
+  const float half_x = std::min((bounds[3] - bounds[0]) * 0.5f * model_scale,
+                                kHalfExtentClamp);
+  const float half_y = std::min((bounds[4] - bounds[1]) * 0.5f * model_scale,
+                                kHalfExtentClamp);
+  if (!(half_x > kTransformEpsilon) || !(half_y > kTransformEpsilon)) {
+    return false;
+  }
+
+  const float min_z =
+      std::clamp(bounds[2] * model_scale, -kHalfExtentClamp, kHalfExtentClamp);
+  const float max_z =
+      std::clamp(bounds[5] * model_scale, -kHalfExtentClamp, kHalfExtentClamp);
+  const float half_z = (max_z - min_z) * 0.5f;
+  if (!(half_z > kTransformEpsilon)) {
+    return false;
+  }
+
+  const float inv_scale = 1.0f / model_scale;
+  const std::array<float, 2> x_axis{matrix[0] * inv_scale,
+                                    matrix[1] * inv_scale};
+  const std::array<float, 2> y_axis{matrix[4] * inv_scale,
+                                    matrix[5] * inv_scale};
+  const float determinant =
+      x_axis[0] * y_axis[1] - x_axis[1] * y_axis[0];
+  if (std::fabs(determinant) <= kTransformEpsilon) {
+    return false;
+  }
+
+  const float center_x = matrix[12];
+  const float center_y = matrix[13];
+  float min_x = center_x;
+  float min_y = center_y;
+  float max_x = center_x;
+  float max_y = center_y;
+  for (const float local_x : {-half_x, half_x}) {
+    for (const float local_y : {-half_y, half_y}) {
+      const float world_x =
+          center_x + local_x * x_axis[0] + local_y * y_axis[0];
+      const float world_y =
+          center_y + local_x * x_axis[1] + local_y * y_axis[1];
+      min_x = std::min(min_x, world_x);
+      min_y = std::min(min_y, world_y);
+      max_x = std::max(max_x, world_x);
+      max_y = std::max(max_y, world_y);
+    }
+  }
+
+  constexpr float kBelowPivotFactor = 1.6666667f;
+  constexpr float kAbovePivotFactor = 1.0f;
+  out->box = {min_x, min_y, matrix[14] - half_z * kBelowPivotFactor,
+              max_x, max_y, matrix[14] + half_z * kAbovePivotFactor};
+  out->reference_xy = {center_x, center_y};
+
+  const float inverse_determinant = 1.0f / determinant;
+  const float inverse_width = 1.0f / (2.0f * half_x);
+  const float inverse_depth = 1.0f / (2.0f * half_y);
+  out->uv_jacobian = {
+      y_axis[1] * inverse_determinant * inverse_width,
+      -x_axis[1] * inverse_determinant * inverse_depth,
+      -y_axis[0] * inverse_determinant * inverse_width,
+      x_axis[0] * inverse_determinant * inverse_depth,
+  };
+  return true;
+}
+
+}
 
 bool BlobShadowRenderer::Initialize() {
   if (initialized_) return true;
@@ -111,21 +215,12 @@ void BlobShadowRenderer::CreateShadowTexture() {
 void BlobShadowRenderer::Render(std::uint8_t view_id, const float* view_mtx,
                                 const float* proj_mtx,
                                 const game::ObjectPresentationSnapshot& objects,
-                                const data::dbc::DbcLoader* dbc,
+                                const ObjectRenderer& object_renderer,
                                 const FacetGather& gather) {
-  if (!initialized_ || dbc == nullptr || !gather) return;
+  if (!initialized_ || !gather) return;
   if (!bgfx::isValid(program_) || !bgfx::isValid(shadow_tex_)) return;
 
   bgfx::setViewTransform(view_id, view_mtx, proj_mtx);
-
-  const auto& displays = dbc->creature_display_info();
-  const auto& models = dbc->creature_model_data();
-  const auto resolve_model_data =
-      [&](const std::uint32_t display_id)
-      -> const data::dbc::CreatureModelDataEntry* {
-    const auto* display = displays.LookupEntry(display_id);
-    return display != nullptr ? models.LookupEntry(display->model_id) : nullptr;
-  };
 
   for (const auto& obj : objects.active) {
 
@@ -145,63 +240,14 @@ void BlobShadowRenderer::Render(std::uint8_t view_id, const float* view_mtx,
       continue;
     }
 
-    const auto* own = resolve_model_data(obj.display_id);
-    if (own == nullptr) {
+    ModelSpatialQueryResult spatial{};
+    if (!object_renderer.QueryModelSpatialState(obj.handle.guid, &spatial)) {
       continue;
     }
-    float bmin[3] = {own->geo_box_min[0], own->geo_box_min[1],
-                     own->geo_box_min[2]};
-    float bmax[3] = {own->geo_box_max[0], own->geo_box_max[1],
-                     own->geo_box_max[2]};
-    if (obj.mount_display_id != 0u) {
-      if (const auto* mount = resolve_model_data(obj.mount_display_id);
-          mount != nullptr) {
-        const float shift =
-            -(bmax[2] - bmin[2]) * 0.5f + mount->mount_height;
-        bmin[2] += shift;
-        bmax[2] += shift;
-        bmin[0] = std::min(bmin[0], mount->geo_box_min[0]);
-        bmin[1] = std::min(bmin[1], mount->geo_box_min[1]);
-        bmin[2] = std::min(bmin[2], mount->geo_box_min[2]);
-        bmax[0] = std::max(bmax[0], mount->geo_box_max[0]);
-        bmax[1] = std::max(bmax[1], mount->geo_box_max[1]);
-        bmax[2] = std::max(bmax[2], mount->geo_box_max[2]);
-      }
-    }
-
-    const float scale = obj.scale;
-    if (scale <= 0.0f) {
+    BlobShadowProjection projection{};
+    if (!BuildBlobShadowProjection(spatial, &projection)) {
       continue;
     }
-    const float half_x = std::min((bmax[0] - bmin[0]) * 0.5f * scale,
-                                  kShadowXyHalfExtentClamp);
-    const float half_y = std::min((bmax[1] - bmin[1]) * 0.5f * scale,
-                                  kShadowXyHalfExtentClamp);
-    if (half_x <= 0.0f || half_y <= 0.0f) {
-      continue;
-    }
-    const float clamp5 = kShadowXyHalfExtentClamp;
-    const float min_z_scaled = std::clamp(bmin[2] * scale, -clamp5, clamp5);
-    const float max_z_scaled = std::clamp(bmax[2] * scale, -clamp5, clamp5);
-    const float half_z = (max_z_scaled - min_z_scaled) * 0.5f;
-    if (half_z <= 0.0f) {
-      continue;
-    }
-
-    const float cos_f = std::cos(obj.facing);
-    const float sin_f = std::sin(obj.facing);
-    const float c1x = half_x * cos_f - half_y * sin_f;
-    const float c1y = half_x * sin_f + half_y * cos_f;
-    const float c2x = half_x * cos_f + half_y * sin_f;
-    const float c2y = half_x * sin_f - half_y * cos_f;
-    const float ext_x = std::max(std::fabs(c1x), std::fabs(c2x));
-    const float ext_y = std::max(std::fabs(c1y), std::fabs(c2y));
-
-    const std::array<float, 6> box{
-        obj.x - ext_x, obj.y - ext_y,
-        obj.z - half_z * kShadowZBelowPivotFactor,
-        obj.x + ext_x, obj.y + ext_y,
-        obj.z + half_z * kShadowZAbovePivotFactor};
 
     const float opacity = std::clamp(obj.render_opacity, 0.0f, 1.0f);
     const auto vertex_alpha =
@@ -210,8 +256,9 @@ void BlobShadowRenderer::Render(std::uint8_t view_id, const float* view_mtx,
       continue;
     }
 
-    SubmitProjectedShadow(view_id, obj.handle.guid.GetRawValue(), box,
-                          vertex_alpha, gather);
+    SubmitProjectedShadow(view_id, obj.handle.guid.GetRawValue(),
+                          projection.box, projection.reference_xy,
+                          projection.uv_jacobian, vertex_alpha, gather);
   }
 
   ++shadow_frame_stamp_;
@@ -226,7 +273,10 @@ void BlobShadowRenderer::Render(std::uint8_t view_id, const float* view_mtx,
 
 void BlobShadowRenderer::SubmitProjectedShadow(
     std::uint8_t view_id, const std::uint64_t guid,
-    const std::array<float, 6>& box, const std::uint8_t vertex_alpha,
+    const std::array<float, 6>& box,
+    const std::array<float, 2>& reference_xy,
+    const std::array<float, 4>& uv_jacobian,
+    const std::uint8_t vertex_alpha,
     const FacetGather& gather) {
   const std::uint32_t shadow_color =
       (static_cast<std::uint32_t>(vertex_alpha) << 24) | 0x00000000;
@@ -238,17 +288,25 @@ void BlobShadowRenderer::SubmitProjectedShadow(
     const float d = memo.box[i] - box[i];
     box_drift_sq += d * d;
   }
+  for (std::size_t i = 0; i < reference_xy.size(); ++i) {
+    const float d = memo.reference_xy[i] - reference_xy[i];
+    box_drift_sq += d * d;
+  }
+  for (std::size_t i = 0; i < uv_jacobian.size(); ++i) {
+    const float d = memo.uv_jacobian[i] - uv_jacobian[i];
+    box_drift_sq += d * d;
+  }
 
   const bool memo_valid = !memo.vertices.empty() &&
                           memo.vertex_alpha == vertex_alpha &&
                           box_drift_sq <= kShadowCacheSlopSquared;
   if (!memo_valid) {
     memo.box = box;
+    memo.reference_xy = reference_xy;
+    memo.uv_jacobian = uv_jacobian;
     memo.vertex_alpha = vertex_alpha;
     memo.vertices.clear();
 
-    const float inv_width = 1.0f / (box[3] - box[0]);
-    const float inv_depth = 1.0f / (box[4] - box[1]);
     const float center_z = (box[2] + box[5]) * 0.5f;
     const float half_span_z = (box[5] - box[2]) * 0.5f;
     auto& vertices = memo.vertices;
@@ -278,10 +336,12 @@ void BlobShadowRenderer::SubmitProjectedShadow(
         return;
       }
       for (const auto& vertex : facet.vertices) {
+        const float dx = vertex[0] - reference_xy[0];
+        const float dy = vertex[1] - reference_xy[1];
         vertices.push_back(ShadowVertex{
             vertex[0], vertex[1], vertex[2],
-            (vertex[0] - box[0]) * inv_width,
-            (vertex[1] - box[1]) * inv_depth,
+            0.5f + uv_jacobian[0] * dx + uv_jacobian[2] * dy,
+            0.5f + uv_jacobian[1] * dx + uv_jacobian[3] * dy,
             DecalVerticalFadeCoord(vertex[2], center_z, half_span_z),
             shadow_color});
       }

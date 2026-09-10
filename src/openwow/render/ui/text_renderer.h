@@ -46,6 +46,9 @@ class TextRenderer {
   bool WarmWorldDepthProgram() { return EnsureWorldDepthProgram(); }
 
   [[nodiscard]] bool is_ready() const noexcept { return ready_; }
+  // Prepare before drawing at a framebuffer scale. Layout metrics stay at the
+  // initialized font size; only the glyph atlas changes resolution.
+  [[nodiscard]] bool PrepareGlyphRasterScale(float scale);
   void BeginFrame(std::uint8_t view_id, float screen_width,
                   float screen_height);
 

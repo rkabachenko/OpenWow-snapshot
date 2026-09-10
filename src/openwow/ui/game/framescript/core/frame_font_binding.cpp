@@ -583,7 +583,8 @@ float ResolveLuaFontStringRasterScale(lua_State *L, int font_string_index) {
 }
 
 std::optional<openwow::render::text::TextLayout>
-MeasureLuaFontStringMetrics(lua_State *L, int font_string_index) {
+MeasureLuaFontStringMetrics(lua_State *L, int font_string_index,
+                            bool constrain_height) {
   font_string_index = lua_absindex(L, font_string_index);
 
   lua_getfield(L, font_string_index, "__ow_text");
@@ -602,8 +603,11 @@ MeasureLuaFontStringMetrics(lua_State *L, int font_string_index) {
   openwow::render::text::TextLayoutRequest request;
   request.maximum_width =
       ReadLuaTableNumberField(L, font_string_index, "__ow_width").value_or(0.0f);
-  request.maximum_height =
-      ReadLuaTableNumberField(L, font_string_index, "__ow_height").value_or(0.0f);
+  request.maximum_height = constrain_height
+                               ? ReadLuaTableNumberField(
+                                     L, font_string_index, "__ow_height")
+                                     .value_or(0.0f)
+                               : 0.0f;
   request.line_spacing = openwow::ui::StoredUiHorizontalCoordinateToPixels(
       ReadLuaTableNumberField(L, font_string_index, "__ow_spacing").value_or(0.0f));
   request.line_height = openwow::ui::StoredUiHorizontalCoordinateToPixels(

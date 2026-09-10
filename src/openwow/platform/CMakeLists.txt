@@ -21,7 +21,12 @@ target_link_libraries(openwow_platform_runtime PRIVATE
   openwow_platform_filesystem
   SDL2::SDL2
 )
-if(APPLE)
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+  openwow_link_apple_framework(openwow_platform_runtime Foundation)
+  openwow_link_apple_framework(openwow_platform_runtime UIKit)
+  openwow_link_apple_framework(openwow_platform_runtime CoreFoundation)
+  openwow_link_apple_framework(openwow_platform_runtime CoreGraphics)
+elseif(APPLE)
   openwow_link_apple_framework(openwow_platform_runtime AppKit)
   openwow_link_apple_framework(openwow_platform_runtime CoreFoundation)
   openwow_link_apple_framework(openwow_platform_runtime IOKit)

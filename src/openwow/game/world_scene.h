@@ -41,6 +41,7 @@ class BowstringRenderer;
 class ChatBubblePresenter;
 struct DoodadCollisionTriangle;
 struct GameObjectM2PresentationEvent;
+struct MountM2PresentationEvent;
 class MissileTrajectoryRenderer;
 class NameplateRenderer;
 class ObjectRenderer;
@@ -85,6 +86,8 @@ struct WorldSceneRenderCamera {
   std::array<float, 3> position{};
   std::array<float, 3> forward{1.0f, 0.0f, 0.0f};
   float far_clip{350.0f};
+  float streaming_distance{350.0f};
+  float horizon_far_clip_scale{4.0f};
 };
 
 [[nodiscard]] WorldSceneRenderCamera BuildWorldSceneRenderCamera(
@@ -220,6 +223,7 @@ class WorldScene final
   [[nodiscard]] std::uint64_t DoodadCollisionRevision() const noexcept;
 
   [[nodiscard]] bool IsDoodadWorldEntryLoadDrained() const;
+  [[nodiscard]] bool IsTerrainWorldEntryLoadDrained() const;
 
   [[nodiscard]] render::ParticleSystem& particles() { return particles_; }
   [[nodiscard]] const render::ParticleSystem& particles() const { return particles_; }
@@ -310,7 +314,9 @@ class WorldScene final
 
   bool frame_prepared_{false};
   std::vector<UnitAnimationCompletionEvent> unit_animation_completions_;
+  std::vector<UnitAnimationCompletionEvent> mount_animation_completions_;
   std::vector<render::GameObjectM2PresentationEvent> game_object_m2_events_;
+  std::vector<render::MountM2PresentationEvent> mount_m2_events_;
   std::deque<render::SpellVisualM2PresentationEvent> spell_visual_m2_events_;
   std::deque<render::SpellVisualDeferredImpactCommand>
       spell_visual_deferred_impacts_;

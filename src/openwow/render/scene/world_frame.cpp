@@ -1,7 +1,6 @@
 
 #include "openwow/render/scene/world_frame.h"
 #include "openwow/game/c_input_control.h"
-#include "openwow/ui/game/nameplate_system.h"
 
 #include "openwow/foundation/diagnostics/logging.h"
 #include "openwow/foundation/math/planar_facing_angle.h"
@@ -22,6 +21,11 @@ namespace openwow::render {
 namespace {
 
 constexpr float kPickDistanceTieEpsilon = 1.0e-4f;
+
+bool SuppressNameplateHit(const world::CursorInfoContext& context) {
+  return context.has_active_targeting_spell && context.targets_terrain_and_liquid &&
+         !context.has_spell_target_mask;
+}
 
 int BuildCursorIntersectionMask(const game::ObjectPresentationSnapshot *const objects,
                                 openwow::world::CursorInfoContext context) {
@@ -120,6 +124,7 @@ void WorldFrame::Initialize(std::uint32_t width, std::uint32_t height) {
   vp_ = kRenderIdentityMatrix4x4;
 
   mouseover_guid_ = game::ObjectGuid{};
+  nameplate_hover_guid_ = game::ObjectGuid{};
   mouseover_pick_ = {};
   hover_pick_ = {};
   lmb_down_ = false;
@@ -274,6 +279,24 @@ PickResult WorldFrame::Pick(int screen_x, int screen_y) const {
   return SelectNearestPick(best, world_geometry);
 }
 
+PickResult WorldFrame::PickForInteraction(
+    const int screen_x, const int screen_y, const game::ObjectGuid current_target) const {
+  // Input supplies its own coordinates, including taps without a prior mouse move.
+  // Use the UI owner's committed widgets instead of the next projected layout.
+  if (!SuppressNameplateHit(cursor_context_) && nameplate_hit_test_cb_) {
+    const auto guid = nameplate_hit_test_cb_(screen_x, screen_y, current_target);
+    if (!guid.IsEmpty()) {
+      PickResult result{};
+      result.hit = true;
+      result.guid = guid;
+      result.type = PickResult::HitType::kUnit;
+      result.from_nameplate = true;
+      return result;
+    }
+  }
+  return Pick(screen_x, screen_y);
+}
+
 PickResult WorldFrame::RayTestTerrain(const WorldRay &ray) const {
   PickResult result{};
   if (collision_ == nullptr) {
@@ -362,17 +385,8 @@ void WorldFrame::HandleLeftClick(int x, int y) {
     return;
   }
 
-  if (!nameplate_hover_guid_.IsEmpty()) {
-    PickResult plate_pick{};
-    plate_pick.hit = true;
-    plate_pick.guid = nameplate_hover_guid_;
-    plate_pick.type = PickResult::HitType::kUnit;
-    ApplyTargetSelection(plate_pick);
-    cursor_mode_ = CursorMode::kNone;
-    return;
-  }
-
-  const PickResult result = Pick(x, y);
+  const PickResult result = PickForInteraction(
+      x, y, objects_ != nullptr ? objects_->target : game::ObjectGuid{});
   hover_pick_ = result;
 
   ApplyTargetSelection(result);
@@ -395,7 +409,8 @@ void WorldFrame::ApplyTargetSelection(const PickResult &pick) {
 
 void WorldFrame::HandleRightClick(int x, int y) {
 
-  PickResult result = Pick(x, y);
+  PickResult result = PickForInteraction(
+      x, y, objects_ != nullptr ? objects_->target : game::ObjectGuid{});
   if (result.hit && result.guid) {
     if (interact_cb_) {
       interact_cb_(result.guid);
@@ -451,42 +466,20 @@ bool WorldFrame::TryBuildTerrainClickInput(const PickResult &pick,
 
 void WorldFrame::UpdateNameplateHover(const std::uint64_t target_guid) {
 
+  if (SuppressNameplateHit(cursor_context_)) {
+    nameplate_hover_guid_ = {};
+    return;
+  }
+
   if (const auto *const input = ::openwow::game::GetInputControlSingleton();
       input != nullptr &&
       (input->GetControlFlags() & ::openwow::game::kMaskAllMouseModes) != 0) {
     return;
   }
 
-  const auto layout = openwow::ui::NameplateFrameChannel::Get().AcquireLayout();
-  if (!layout) {
-    nameplate_hover_guid_ = game::ObjectGuid{};
-    return;
-  }
-
-  const openwow::ui::NameplateScreenPlacement *best = nullptr;
-  for (const auto &plate : layout->plates) {
-
-    if (target_guid != 0 && plate.info.guid == target_guid) {
-      continue;
-    }
-
-    const float half_width = layout->geometry.frame_width * 0.5f;
-    const float min_x = plate.screen_x - half_width;
-    const float max_x = plate.screen_x + half_width;
-    const float min_y = plate.screen_y;
-    const float max_y = plate.screen_y + layout->geometry.frame_height;
-    if (static_cast<float>(mouse_x_) < min_x || static_cast<float>(mouse_x_) > max_x ||
-        static_cast<float>(mouse_y_) < min_y || static_cast<float>(mouse_y_) > max_y) {
-      continue;
-    }
-
-    if (best == nullptr || plate.view_depth < best->view_depth) {
-      best = &plate;
-    }
-  }
-
-  nameplate_hover_guid_ =
-      best != nullptr ? game::ObjectGuid{best->info.guid} : game::ObjectGuid{};
+  nameplate_hover_guid_ = nameplate_hit_test_cb_
+      ? nameplate_hit_test_cb_(mouse_x_, mouse_y_, game::ObjectGuid{target_guid})
+      : game::ObjectGuid{};
 }
 
 void WorldFrame::Update(float ) {

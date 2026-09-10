@@ -12,7 +12,7 @@ void EnsureMetalMaximumDrawableCount(
     return;
   }
 
-  if (@available(macOS 10.13, *)) {
+  if (@available(iOS 11.2, macOS 10.13, *)) {
     auto* const layer = static_cast<CAMetalLayer*>(metal_layer);
     const auto drawable_count = static_cast<NSUInteger>(
         std::clamp<std::uint8_t>(requested_count, 2, 3));

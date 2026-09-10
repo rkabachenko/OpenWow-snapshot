@@ -36,6 +36,8 @@ std::uint32_t ResolveQuestIdFromInterleavedIndex(openwow::game::WorldSession &se
                                                  int interleaved_1based);
 int FindInterleavedQuestIndexById(openwow::game::WorldSession &session,
                                   std::uint32_t quest_id);
+int FindVisibleQuestIndexById(openwow::game::WorldSession &session,
+                              std::uint32_t quest_id);
 bool IsVisibleQuestFailedById(openwow::game::WorldSession &session, std::uint32_t quest_id);
 std::optional<std::int32_t> ResolveQuestSortKeyFromInterleavedIndex(
     openwow::game::WorldSession &session, int interleaved_1based);

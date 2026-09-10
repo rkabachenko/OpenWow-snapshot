@@ -81,6 +81,7 @@ void CGUnit_C::GetWorldMatrix(float* const out_matrix) const {
 bool CGUnit_C::UpdateModelNodeTransform(float dt,
                                         const std::uint32_t current_tick_ms) {
   ClearVisualModelWorldTransform();
+  Movement().ClearModelGroundNormal();
 
   if (Vehicle().GetVehiclePassengerComponent() != nullptr) {
     auto *passenger = Vehicle().GetVehiclePassengerComponent();
@@ -175,6 +176,7 @@ void CGUnit_C::FinalizeUnitCreateState(
 
   Movement().SeedBodyFacing(GetLocalFacing());
   Animation().SeedCachedSheatheStateFromDescriptor();
+  Mount().InitializeFromDescriptor(*this);
 
   if (!upd.movement_applied_before_post_init) {
     movement_.ApplyCreateUpdate(upd.client_receive_tick_ms);

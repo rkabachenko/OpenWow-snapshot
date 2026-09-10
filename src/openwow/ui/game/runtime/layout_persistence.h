@@ -25,6 +25,8 @@ ComputeNearestMatchingFramePointPlacement(
 std::string SerializeLayoutCache(
     const std::vector<openwow::ui::framexml::UiFrame>& frames,
     int viewport_width,
-    int viewport_height);
+    int viewport_height,
+    openwow::ui::framexml::ViewportInsets insets = {},
+    float root_scale = 1.0f);
 
 }

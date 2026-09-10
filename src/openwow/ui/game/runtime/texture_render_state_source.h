@@ -10,12 +10,15 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <new>
 #include <optional>
 #include <string>
 #include <string_view>
 
 namespace openwow::ui::game::runtime {
+
+struct TexturePortraitRequest final {};
 
 struct TextureRenderStateSource {
 
@@ -25,6 +28,8 @@ struct TextureRenderStateSource {
 
   std::optional<std::string> portrait_unit;
   std::optional<std::string> portrait_guid;
+  std::optional<std::uint32_t> portrait_display_id;
+  std::shared_ptr<const TexturePortraitRequest> portrait_request;
 
   bool has_tex_coord_quad{false};
   std::array<double, 8> tex_coord_quad{};
@@ -169,6 +174,7 @@ enum class TextureRenderStateField : std::uint8_t {
   kTextureCleared,
   kPortraitUnit,
   kPortraitGuid,
+  kPortraitDisplayId,
   kHorizontalTile,
   kVerticalTile,
   kVertexColorR,
@@ -199,6 +205,8 @@ enum class TextureRenderStateField : std::uint8_t {
     case TextureRenderStateField::kTextureCleared: return "__ow_texture_cleared";
     case TextureRenderStateField::kPortraitUnit: return "__ow_portrait_unit";
     case TextureRenderStateField::kPortraitGuid: return "__ow_portrait_guid";
+    case TextureRenderStateField::kPortraitDisplayId:
+      return "__ow_portrait_display_id";
     case TextureRenderStateField::kHorizontalTile: return "__ow_horiz_tile";
     case TextureRenderStateField::kVerticalTile: return "__ow_vert_tile";
     case TextureRenderStateField::kVertexColorR: return "__ow_vc_r";
@@ -288,6 +296,7 @@ inline void SetTextureRenderStateString(
   switch (field) {
     case TextureRenderStateField::kTexture:
       source->texture = value;
+      source->portrait_request.reset();
       break;
     case TextureRenderStateField::kPortraitUnit:
       source->portrait_unit = value;

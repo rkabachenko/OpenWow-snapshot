@@ -2,6 +2,7 @@
 #include "spell_text_formatter.h"
 
 #include "openwow/core/localized_format.h"
+#include "openwow/foundation/diagnostics/logging.h"
 #include "openwow/audio/playback/sound_runtime.h"
 #include "openwow/data/formats/dbc/dbc_loader.h"
 #include "openwow/data/formats/dbc/dbc_structures.h"
@@ -25,6 +26,7 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <charconv>
 #include <cctype>
 #include <climits>
 #include <cmath>
@@ -956,12 +958,13 @@ ConditionalTextTagContext ResolveConditionalTextTagContext(
 }
 
 ObjectTextContext ResolveObjectTextContext(std::uint64_t guid,
-                                           const char* name_buf) {
+                                           const char* name_buf,
+                                           const ObjectManager* objects,
+                                           const data::dbc::DbcLoader* dbc) {
   ObjectTextContext context;
   if (guid != 0) {
     const ObjectGuid object_guid(guid);
-    if (const auto* const objects = ResolveSpellTextObjectManager();
-        objects != nullptr) {
+    if (objects != nullptr) {
       context.unit = objects->GetUnit(object_guid);
       context.name_entry = objects->GetNameEntry(object_guid);
     }
@@ -996,7 +999,7 @@ ObjectTextContext ResolveObjectTextContext(std::uint64_t guid,
     if (context.race_id == 0) {
       context.race_id = context.name_entry->race;
     }
-    if (context.gender == 0) {
+    if (context.unit == nullptr) {
       context.gender = context.name_entry->gender;
     }
   }
@@ -1005,10 +1008,10 @@ ObjectTextContext ResolveObjectTextContext(std::uint64_t guid,
   context.class_selector = context.gender_selector;
   context.race_selector = context.gender_selector;
 
-  if (g_spell_text_dbc != nullptr) {
+  if (dbc != nullptr) {
     if (context.class_id != 0) {
       if (const auto* class_entry =
-              g_spell_text_dbc->chr_classes().LookupEntry(context.class_id)) {
+              dbc->chr_classes().LookupEntry(context.class_id)) {
         context.class_name = std::string(
             class_entry->DisplayNameForSex(
                 static_cast<std::uint32_t>(context.gender_selector)));
@@ -1020,7 +1023,7 @@ ObjectTextContext ResolveObjectTextContext(std::uint64_t guid,
 
     if (context.race_id != 0) {
       if (const auto* race_entry =
-              g_spell_text_dbc->chr_races().LookupEntry(context.race_id)) {
+              dbc->chr_races().LookupEntry(context.race_id)) {
         context.race_name = std::string(
             race_entry->DisplayNameForSex(
                 static_cast<std::uint32_t>(context.gender_selector)));
@@ -1028,7 +1031,7 @@ ObjectTextContext ResolveObjectTextContext(std::uint64_t guid,
             race_entry->ResolveDisplaySex(
                 static_cast<std::uint32_t>(context.gender_selector)));
         if (const auto* faction_template =
-                g_spell_text_dbc->faction_template().LookupEntry(race_entry->faction_id)) {
+                dbc->faction_template().LookupEntry(race_entry->faction_id)) {
           if ((faction_template->faction_group & 2u) != 0u) {
             context.pvp_rank_faction_selector = 0;
           } else if ((faction_template->faction_group & 4u) != 0u) {
@@ -1039,12 +1042,6 @@ ObjectTextContext ResolveObjectTextContext(std::uint64_t guid,
     }
   }
 
-  if (context.class_name.empty() && context.class_id != 0) {
-    context.class_name = PowerLuaBridge::ClassNameFromId(context.class_id);
-  }
-  if (context.race_name.empty() && context.race_id != 0) {
-    context.race_name = PowerLuaBridge::RaceNameFromId(context.race_id);
-  }
   if (context.resolved_name.empty() && name_buf != nullptr) {
     context.resolved_name = name_buf;
   }
@@ -3794,14 +3791,19 @@ bool SpellTextFormatter::ExpandObjectTextVariables(
     std::int32_t name_size,
     const WorldStateValueResolver& resolve_world_state,
     std::int32_t current_time_seconds,
-    std::int32_t achievement_id) {
+    std::int32_t achievement_id,
+    const ObjectManager* objects,
+    const data::dbc::DbcLoader* dbc) {
   if (!format_text || !output || output_size == 0) return false;
 
   (void)name_size;
   output[0] = '\0';
-  const auto context = ResolveObjectTextContext(guid, name_buf);
+  const auto context = ResolveObjectTextContext(
+      guid, name_buf, objects != nullptr ? objects : ResolveSpellTextObjectManager(),
+      dbc != nullptr ? dbc : (objects == nullptr ? ResolveSpellTextDbc() : nullptr));
   const char* p = format_text;
   bool all_resolved = true;
+  const char* first_unresolved = nullptr;
 
   while (*p) {
     const char* dollar = std::strchr(p, '$');
@@ -3819,6 +3821,7 @@ bool SpellTextFormatter::ExpandObjectTextVariables(
     if (!*p) {
       AppendChar(output, output_size, '$');
       all_resolved = false;
+      if (first_unresolved == nullptr) first_unresolved = dollar;
       break;
     }
 
@@ -3827,8 +3830,21 @@ bool SpellTextFormatter::ExpandObjectTextVariables(
     while (*token_ptr >= '0' && *token_ptr <= '9') {
       ++token_ptr;
     }
-    const auto variable_id =
-        static_cast<std::int32_t>(std::strtol(token_body, nullptr, 10));
+    std::int32_t variable_id = 0;
+    const bool has_variable_id = token_ptr != token_body;
+    const bool valid_variable_id = !has_variable_id ||
+        std::from_chars(token_body, token_ptr, variable_id).ec == std::errc{};
+    const bool needs_world_state = *token_ptr != '\0' &&
+        std::strchr("DdEeKkWw", *token_ptr) != nullptr;
+    if (!valid_variable_id ||
+        (needs_world_state && (!has_variable_id || !resolve_world_state)) ||
+        ((*token_ptr == 'K' || *token_ptr == 'k') && current_time_seconds <= 0)) {
+      AppendChar(output, output_size, '$');
+      all_resolved = false;
+      if (first_unresolved == nullptr) first_unresolved = dollar;
+      p = token_body;
+      continue;
+    }
 
     switch (*token_ptr) {
       case 'A':
@@ -3842,6 +3858,7 @@ bool SpellTextFormatter::ExpandObjectTextVariables(
         }
         AppendChar(output, output_size, '$');
         all_resolved = false;
+        if (first_unresolved == nullptr) first_unresolved = dollar;
         p = token_body;
         break;
 
@@ -3863,6 +3880,7 @@ bool SpellTextFormatter::ExpandObjectTextVariables(
         }
         AppendChar(output, output_size, '$');
         all_resolved = false;
+        if (first_unresolved == nullptr) first_unresolved = dollar;
         p = token_body;
         break;
 
@@ -3899,6 +3917,7 @@ bool SpellTextFormatter::ExpandObjectTextVariables(
         }
         AppendChar(output, output_size, '$');
         all_resolved = false;
+        if (first_unresolved == nullptr) first_unresolved = dollar;
         p = token_body;
         break;
 
@@ -3926,6 +3945,7 @@ bool SpellTextFormatter::ExpandObjectTextVariables(
         }
         AppendChar(output, output_size, '$');
         all_resolved = false;
+        if (first_unresolved == nullptr) first_unresolved = dollar;
         p = token_body;
         break;
 
@@ -3934,6 +3954,7 @@ bool SpellTextFormatter::ExpandObjectTextVariables(
         if (!context.has_object_or_cache) {
           AppendChar(output, output_size, '$');
           all_resolved = false;
+          if (first_unresolved == nullptr) first_unresolved = dollar;
           p = token_body;
           break;
         }
@@ -3943,19 +3964,28 @@ bool SpellTextFormatter::ExpandObjectTextVariables(
           ++cursor;
         }
         if (*cursor == '\0') {
-          p = cursor;
+          AppendChar(output, output_size, '$');
+          all_resolved = false;
+          if (first_unresolved == nullptr) first_unresolved = dollar;
+          p = token_body;
           break;
         }
 
         const char* colon = std::strchr(cursor, ':');
         if (colon == nullptr) {
-          p = cursor;
+          AppendChar(output, output_size, '$');
+          all_resolved = false;
+          if (first_unresolved == nullptr) first_unresolved = dollar;
+          p = token_body;
           break;
         }
 
         const char* semicolon = std::strchr(colon, ';');
         if (semicolon == nullptr) {
-          p = cursor;
+          AppendChar(output, output_size, '$');
+          all_resolved = false;
+          if (first_unresolved == nullptr) first_unresolved = dollar;
+          p = token_body;
           break;
         }
 
@@ -3999,6 +4029,7 @@ bool SpellTextFormatter::ExpandObjectTextVariables(
         if (!context.has_object_or_cache) {
           AppendChar(output, output_size, '$');
           all_resolved = false;
+          if (first_unresolved == nullptr) first_unresolved = dollar;
           p = token_body;
           break;
         }
@@ -4013,6 +4044,7 @@ bool SpellTextFormatter::ExpandObjectTextVariables(
                                          &selection)) {
           AppendChar(output, output_size, '$');
           all_resolved = false;
+          if (first_unresolved == nullptr) first_unresolved = dollar;
           p = token_body;
           break;
         }
@@ -4026,11 +4058,24 @@ bool SpellTextFormatter::ExpandObjectTextVariables(
       default:
         AppendChar(output, output_size, '$');
         all_resolved = false;
+        if (first_unresolved == nullptr) first_unresolved = dollar;
         p = token_body;
         break;
     }
   }
 
+  if (!all_resolved) {
+    openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kWarn,
+        "Object text stage=expand source=server-authored-prose guid=" +
+            std::to_string(guid) + " locale=" + Localization::Get().GetLocaleName() +
+            " class=" + std::to_string(context.class_id) +
+            " race=" + std::to_string(context.race_id) +
+            " sex=" + std::to_string(context.gender_selector) +
+            " subject_available=" + std::to_string(context.has_object_or_cache) +
+            " reason=unsupported-or-unresolved-token fragment=" +
+            std::string(std::string_view(
+                first_unresolved != nullptr ? first_unresolved : "").substr(0, 96)));
+  }
   return all_resolved;
 }
 

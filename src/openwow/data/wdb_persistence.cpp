@@ -1,6 +1,8 @@
 
 #include "openwow/data/wdb_persistence.h"
 
+#include "openwow/foundation/diagnostics/logging.h"
+
 #include <algorithm>
 #include <cstring>
 #include <fstream>
@@ -596,6 +598,16 @@ bool WDBPersistence::LoadTypeFrom(WDBCacheType type, const std::filesystem::path
 
   const auto header = ReadHeader(buf);
   if (!ValidateHeader(header, info, client_build_, locale_)) {
+    openwow::diagnostics::Log(
+        openwow::diagnostics::LogLevel::kInfo,
+        "WDBPersistence: skipping incompatible cache path=" + path.string() +
+            " type=" + info.filename +
+            " actual_build=" + std::to_string(header.build) +
+            " expected_build=" + std::to_string(client_build_) +
+            " actual_locale=" + std::to_string(header.locale) +
+            " expected_locale=" + std::to_string(locale_) +
+            " actual_version=" + std::to_string(header.version) +
+            " expected_version=" + std::to_string(info.version));
     return false;
   }
   SetCacheVersionToken(type, header.cache_version_token);

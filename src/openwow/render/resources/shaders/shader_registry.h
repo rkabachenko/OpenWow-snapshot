@@ -19,6 +19,7 @@ enum class ShaderProgramId : std::uint8_t {
   M2Bones64,
   M2Bones128,
   Particle,
+  DetailDoodad,
   Sky,
   DistantTerrain,
   Terrain,

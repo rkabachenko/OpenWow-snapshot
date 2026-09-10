@@ -101,6 +101,15 @@ openwow_compile_shader(TYPE FRAGMENT SHADER "${_SHADER_SRC}/fs_weather.sc"
   VARYING "${_SHADER_SRC}/varying_weather.def.sc"  OUTPUT_DIR "${OPENWOW_SHADER_DIR}"
   OUT_FILES_VAR OPENWOW_WEATHER_FSH  INCLUDE_DIRS "${_SHADER_SRC}")
 
+openwow_compile_shader(TYPE VERTEX SHADER "${_SHADER_SRC}/vs_detail_doodad.sc"
+  VARYING "${_SHADER_SRC}/varying_detail_doodad.def.sc"
+  OUTPUT_DIR "${OPENWOW_SHADER_DIR}"
+  OUT_FILES_VAR OPENWOW_DETAIL_DOODAD_VSH INCLUDE_DIRS "${_SHADER_SRC}")
+openwow_compile_shader(TYPE FRAGMENT SHADER "${_SHADER_SRC}/fs_detail_doodad.sc"
+  VARYING "${_SHADER_SRC}/varying_detail_doodad.def.sc"
+  OUTPUT_DIR "${OPENWOW_SHADER_DIR}"
+  OUT_FILES_VAR OPENWOW_DETAIL_DOODAD_FSH INCLUDE_DIRS "${_SHADER_SRC}")
+
 set(OPENWOW_LIQUID_WATER_VSH)
 set(OPENWOW_LIQUID_WATER_NO_SPEC_VSH)
 foreach(_LIQUID_POINT_LIGHT_COUNT RANGE 0 3)
@@ -252,6 +261,7 @@ set(OPENWOW_ALL_SHADER_OUTPUTS
   ${OPENWOW_TERRAIN_SPLAT_ARRAY_VSH} ${OPENWOW_TERRAIN_SPLAT_ARRAY_FSH}
   ${OPENWOW_SKY_VSH}          ${OPENWOW_SKY_FSH}
   ${OPENWOW_WEATHER_VSH}      ${OPENWOW_WEATHER_FSH}
+  ${OPENWOW_DETAIL_DOODAD_VSH} ${OPENWOW_DETAIL_DOODAD_FSH}
   ${OPENWOW_LIQUID_WATER_VSH} ${OPENWOW_WATER_FSH}
   ${OPENWOW_LIQUID_WATER_NO_SPEC_VSH} ${OPENWOW_LIQUID_WATER_NO_SPEC_FSH}
   ${OPENWOW_LIQUID_MAGMA_VSH} ${OPENWOW_LIQUID_MAGMA_FSH}
@@ -305,6 +315,7 @@ add_library(openwow_render_bgfx
   ${PROJECT_SOURCE_DIR}/src/openwow/render/scene/floating_text.cpp
   ${PROJECT_SOURCE_DIR}/src/openwow/render/ui/cursor_overlay_renderer.cpp
   ${PROJECT_SOURCE_DIR}/src/openwow/render/world/doodads/doodad_renderer.cpp
+  ${PROJECT_SOURCE_DIR}/src/openwow/render/world/detail_doodads/detail_doodad_renderer.cpp
   ${PROJECT_SOURCE_DIR}/src/openwow/render/scene/projected_decal_conjugation.cpp
   ${PROJECT_SOURCE_DIR}/src/openwow/render/scene/selection_circle.cpp
   ${PROJECT_SOURCE_DIR}/src/openwow/render/scene/blob_shadow.cpp

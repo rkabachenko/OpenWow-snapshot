@@ -105,6 +105,14 @@ namespace openwow::game {
 
 namespace {
 
+void LogMalformedLootPacket(const std::string_view opcode,
+                            const std::size_t payload_size) {
+  openwow::diagnostics::Log(
+      openwow::diagnostics::LogLevel::kWarn,
+      "interaction reject malformed " + std::string(opcode) + " bytes=" +
+          std::to_string(payload_size) + " stage=loot-replication");
+}
+
 std::string BuildLootMoneyNotifyMessage(const LootMoneyNotify &notify) {
   if (notify.copper == 0) {
     return {};
@@ -234,6 +242,7 @@ void WorldSession::HandleLootResponse(const net::wotlk::WorldPacket &pkt) {
   auto loot_window =
       loot_protocol::DecodeLootResponse(pkt.payload.data(), pkt.payload.size());
   if (!loot_window.has_value()) {
+    LogMalformedLootPacket("SMSG_LOOT_RESPONSE", pkt.payload.size());
     return;
   }
   if (!loot_.ConsumeLootResponse(loot_window->source_guid)) {
@@ -293,6 +302,7 @@ void WorldSession::HandleLootReleaseResponse(const net::wotlk::WorldPacket &pkt)
   const auto response = loot_protocol::DecodeLootReleaseResponse(
       pkt.payload.data(), pkt.payload.size());
   if (!response) {
+    LogMalformedLootPacket("SMSG_LOOT_RELEASE_RESPONSE", pkt.payload.size());
     return;
   }
   const auto result =
@@ -313,6 +323,7 @@ void WorldSession::HandleLootRemoved(const net::wotlk::WorldPacket &pkt) {
   const auto wire_slot =
       loot_protocol::DecodeRemovedSlot(pkt.payload.data(), pkt.payload.size());
   if (!wire_slot) {
+    LogMalformedLootPacket("SMSG_LOOT_REMOVED", pkt.payload.size());
     return;
   }
   const bool was_looting = loot_.is_looting();
@@ -329,9 +340,13 @@ void WorldSession::HandleLootRemoved(const net::wotlk::WorldPacket &pkt) {
   if (ui_slot.has_value()) {
     ui::game::ScriptEventDispatch::Get().FireLootSlotCleared(*ui_slot);
   }
-  if (was_looting && !loot_.is_looting()) {
-    loot_.state().ClearPendingConfirmSlot();
-    ui::game::ScriptEventDispatch::Get().FireLootClosed();
+  if (was_looting && !loot_.HasLootItems()) {
+    CloseActiveLootWindow(*this, CloseLootWindowOptions{
+                                     .send_release = true,
+                                     .skip_item_check = false,
+                                     .show_interrupted = false,
+                                     .clear_dead_target = true,
+                                 });
   }
 }
 
@@ -339,6 +354,7 @@ void WorldSession::HandleLootMoneyNotify(const net::wotlk::WorldPacket &pkt) {
   auto decoded_notify =
       loot_protocol::DecodeMoneyNotify(pkt.payload.data(), pkt.payload.size());
   if (!decoded_notify) {
+    LogMalformedLootPacket("SMSG_LOOT_MONEY_NOTIFY", pkt.payload.size());
     return;
   }
   loot_.HandleLootMoneyNotify(std::move(*decoded_notify));
@@ -358,7 +374,7 @@ void WorldSession::HandleLootMoneyNotify(const net::wotlk::WorldPacket &pkt) {
                            nullptr, 0, 0, 0, 0, 0, nullptr);
 }
 
-void WorldSession::HandleLootClearMoney(const net::wotlk::WorldPacket & ) {
+void WorldSession::HandleLootClearMoney(const net::wotlk::WorldPacket &) {
   const auto result = loot_.HandleLootClearMoney();
   if (!result.cleared_gold) {
     return;
@@ -381,19 +397,24 @@ void WorldSession::HandleLootItemNotify(const net::wotlk::WorldPacket &pkt) {
   if (auto notify =
           loot_protocol::DecodeItemNotify(pkt.payload.data(), pkt.payload.size())) {
     loot_.HandleLootItemNotify(std::move(*notify));
+    return;
   }
+  LogMalformedLootPacket("SMSG_LOOT_ITEM_NOTIFY", pkt.payload.size());
 }
 
 void WorldSession::HandleLootList(const net::wotlk::WorldPacket &pkt) {
-  PacketReader reader(pkt.payload.data(), pkt.payload.size());
-  ObjectGuid creature_guid;
-  if (!reader.ReadGuid(creature_guid)) {
+  const auto list =
+      loot_protocol::DecodeLootList(pkt.payload.data(), pkt.payload.size());
+  if (!list.has_value()) {
+    LogMalformedLootPacket("SMSG_LOOT_LIST", pkt.payload.size());
     return;
   }
 
-  if (auto *const unit = map_runtime_.objects().GetMutableUnit(creature_guid);
+  if (auto *const unit =
+          map_runtime_.objects().GetMutableUnit(ObjectGuid(list->creature_guid));
       unit != nullptr) {
-    unit->Loot().StoreLootListGuids(reader);
+    unit->Loot().StoreLootListGuids(list->master_looter,
+                                    list->group_looter);
   }
 }
 
@@ -401,6 +422,7 @@ void WorldSession::HandleLootMasterList(const net::wotlk::WorldPacket &pkt) {
   auto list =
       loot_protocol::DecodeMasterList(pkt.payload.data(), pkt.payload.size());
   if (!list) {
+    LogMalformedLootPacket("SMSG_LOOT_MASTER_LIST", pkt.payload.size());
     return;
   }
   loot_.HandleLootMasterList(std::move(*list));
@@ -413,6 +435,7 @@ void WorldSession::HandleLootSlotChanged(const net::wotlk::WorldPacket &pkt) {
   auto changed =
       loot_protocol::DecodeSlotChanged(pkt.payload.data(), pkt.payload.size());
   if (!changed) {
+    LogMalformedLootPacket("SMSG_LOOT_SLOT_CHANGED", pkt.payload.size());
     return;
   }
   loot_.HandleLootSlotChanged(std::move(*changed));

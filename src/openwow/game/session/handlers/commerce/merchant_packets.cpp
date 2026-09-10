@@ -60,11 +60,6 @@ namespace {
 
 constexpr std::uint32_t kMerchantTutorialId = 0x13u;
 
-bool ReadGossipMessageNpcGuid(const net::wotlk::WorldPacket &pkt, std::uint64_t *npc_guid) {
-  PacketReader reader(pkt.payload.data(), pkt.payload.size());
-  return reader.ReadU64(*npc_guid);
-}
-
 void DisplayMerchantListFailureMessage(const ObjectManager& objects,
                                        const char* message) {
   if (message == nullptr || message[0] == '\0') {
@@ -136,16 +131,17 @@ void HandleGossipMessagePacket(
     const std::function<void(std::uint64_t)>& close_interaction,
     const std::function<bool()>& prepare_gossip_text,
     const net::wotlk::WorldPacket& pkt) {
-  std::uint64_t npc_guid = 0;
-  if (ReadGossipMessageNpcGuid(pkt, &npc_guid)) {
-    if (npc_guid != 0) {
-      ui::game::SetNpcInteractionTarget(ObjectGuid(npc_guid));
-    } else if (gossip.has_gossip() && close_interaction) {
-      close_interaction(gossip.gossip().npc_guid.GetRawValue());
-    }
-  }
-
-  if (!gossip.HandleGossipMessage(pkt.payload.data(), pkt.payload.size())) {
+  const std::uint64_t previous_gossip_guid =
+      gossip.has_gossip() ? gossip.gossip().npc_guid.GetRawValue() : 0;
+  if (!gossip.HandleGossipMessage(
+          pkt.payload.data(), pkt.payload.size(),
+          [&](const ObjectGuid npc) {
+            if (!npc.IsEmpty()) {
+              ui::game::SetNpcInteractionTarget(npc);
+            } else if (close_interaction) {
+              close_interaction(previous_gossip_guid);
+            }
+          })) {
     openwow::diagnostics::Log(
         openwow::diagnostics::LogLevel::kWarn,
         "interaction reject malformed SMSG_GOSSIP_MESSAGE bytes=" +
@@ -193,13 +189,18 @@ void HandleNpcTextUpdatePacket(
 }
 
 void HandleTrainerListPacket(
-    GossipManager& gossip, const std::function<void()>& update_greeting,
+    GossipManager& gossip, const std::function<bool()>& prepare_trainer,
     const net::wotlk::WorldPacket& pkt) {
-  if (!gossip.HandleTrainerList(pkt.payload.data(), pkt.payload.size())) {
+  if (!gossip.HandleTrainerList(pkt.payload.data(), pkt.payload.size(),
+                              ui::game::SetNpcInteractionTarget)) {
+    openwow::diagnostics::Log(
+        openwow::diagnostics::LogLevel::kWarn,
+        "interaction reject malformed SMSG_TRAINER_LIST bytes=" +
+            std::to_string(pkt.payload.size()));
     return;
   }
-  if (update_greeting) {
-    update_greeting();
+  if (!prepare_trainer()) {
+    return;
   }
   ui::game::ScriptEventDispatch::Get().FireTrainerShow();
 }
@@ -207,22 +208,31 @@ void HandleTrainerListPacket(
 void HandleMerchantListPacket(ObjectManager& objects, GossipManager& gossip,
                               QueryCache& queries,
                               const net::wotlk::WorldPacket& pkt) {
-  if (!gossip.HandleListInventory(pkt.payload.data(), pkt.payload.size())) {
+  if (!gossip.HandleListInventory(
+          pkt.payload.data(), pkt.payload.size(),
+          [&](const ObjectGuid vendor) {
+            queries.CancelItemTemplateCallbacks(
+                MerchantInteraction::ItemInfoRefreshCallbackKey());
+            TutorialSystem::Instance().TriggerTutorial(kMerchantTutorialId);
+            ui::game::SetNpcInteractionTarget(vendor);
+          })) {
+    openwow::diagnostics::Log(
+        openwow::diagnostics::LogLevel::kWarn,
+        "interaction reject malformed SMSG_LIST_INVENTORY bytes=" +
+            std::to_string(pkt.payload.size()));
     return;
   }
 
   switch (gossip.merchant().last_list_result()) {
     case VendorListResult::kItems:
     case VendorListResult::kNoInventory: {
-      queries.CancelItemTemplateCallbacks(
-          MerchantInteraction::ItemInfoRefreshCallbackKey());
       gossip.merchant().ResetItemInfoRefresh();
-      TutorialSystem::Instance().TriggerTutorial(kMerchantTutorialId);
-
-      if (gossip.merchant().active()) {
-        ui::game::SetNpcInteractionTarget(gossip.merchant().snapshot().vendor_guid);
-      }
-
+      openwow::diagnostics::Log(
+          openwow::diagnostics::LogLevel::kInfo,
+          "interaction publish SMSG_LIST_INVENTORY guid=" +
+              gossip.merchant().snapshot().vendor_guid.ToString() + " items=" +
+              std::to_string(gossip.merchant().snapshot().items.size()) +
+              " stage=MERCHANT_SHOW");
       ui::game::ScriptEventDispatch::Get().FireMerchantShow();
       return;
     }

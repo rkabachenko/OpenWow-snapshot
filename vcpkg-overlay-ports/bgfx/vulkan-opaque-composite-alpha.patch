@@ -8,10 +8,9 @@ preference chain as the fallback for surfaces that do not support OPAQUE at
 all.
 --- a/bgfx/src/renderer_vk.cpp
 +++ b/bgfx/src/renderer_vk.cpp
-@@ -7304,17 +7304,21 @@
- 
- 		VkCompositeAlphaFlagBitsKHR compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
- 
+@@ -7305,16 +7305,20 @@
+         VkCompositeAlphaFlagBitsKHR compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+-
 -		if (surfaceCapabilities.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR)
 -		{
 -			compositeAlpha = VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
@@ -21,10 +20,14 @@ all.
 -			compositeAlpha = VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR;
 -		}
 -		else if (surfaceCapabilities.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR)
+-		{
+-			compositeAlpha = VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR;
+-		}
+-
++
 +		if ( (m_resolution.reset & BGFX_RESET_TRANSPARENT_BACKBUFFER)
 +		||  !(surfaceCapabilities.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR) )
- 		{
--			compositeAlpha = VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR;
++		{
 +			if (surfaceCapabilities.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR)
 +			{
 +				compositeAlpha = VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
@@ -37,6 +40,6 @@ all.
 +			{
 +				compositeAlpha = VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR;
 +			}
- 		}
- 
- 		const VkImageUsageFlags imageUsageMask = 0
++		}
++
+         const VkImageUsageFlags imageUsageMask = 0

@@ -270,6 +270,19 @@
 #include "fs_particle.sc.dx11.bin.h"
 #endif
 
+#include "vs_detail_doodad.sc.glsl.bin.h"
+#include "vs_detail_doodad.sc.essl.bin.h"
+#include "vs_detail_doodad.sc.spv.bin.h"
+#include "vs_detail_doodad.sc.mtl.bin.h"
+#include "fs_detail_doodad.sc.glsl.bin.h"
+#include "fs_detail_doodad.sc.essl.bin.h"
+#include "fs_detail_doodad.sc.spv.bin.h"
+#include "fs_detail_doodad.sc.mtl.bin.h"
+#if defined(_WIN32)
+#include "vs_detail_doodad.sc.dx11.bin.h"
+#include "fs_detail_doodad.sc.dx11.bin.h"
+#endif
+
 #include "vs_sky.sc.glsl.bin.h"
 #include "vs_sky.sc.essl.bin.h"
 #include "vs_sky.sc.spv.bin.h"
@@ -687,6 +700,12 @@ static const bgfx::EmbeddedShader s_m2Shaders[] = {
 static const bgfx::EmbeddedShader s_particleShaders[] = {
     OPENWOW_EMBEDDED_SHADER(vs_particle),
     OPENWOW_EMBEDDED_SHADER(fs_particle),
+    OPENWOW_EMBEDDED_SHADER_END()
+};
+
+static const bgfx::EmbeddedShader s_detailDoodadShaders[] = {
+    OPENWOW_EMBEDDED_SHADER(vs_detail_doodad),
+    OPENWOW_EMBEDDED_SHADER(fs_detail_doodad),
     OPENWOW_EMBEDDED_SHADER_END()
 };
 

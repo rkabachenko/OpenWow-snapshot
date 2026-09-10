@@ -16,6 +16,7 @@ struct WorldM2SceneState {
   RenderVec3 ambient_color{1.0f, 1.0f, 1.0f};
   RenderVec3 diffuse_color{0.0f, 0.0f, 0.0f};
   RenderFogState fog{};
+  bool receives_world_shadows{false};
 };
 
 inline RenderVec3 NormalizeRetailModelLightDirection(RenderVec3 direction) {
@@ -68,6 +69,8 @@ inline void ApplyWorldM2SceneState(
   const RenderVec3 surface_to_light = WorldM2SurfaceToLightDirection(scene);
   uniforms->fog_params = scene.fog.params;
   uniforms->fog_color = scene.fog.color;
+  uniforms->world_shadow_receiver = {
+      scene.receives_world_shadows ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f};
 
   uniforms->light_ambient = {scene.ambient_color[0], scene.ambient_color[1],
                              scene.ambient_color[2], 0.0f};

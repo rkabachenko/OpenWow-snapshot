@@ -17,6 +17,7 @@
 #include <unordered_set>
 
 #include "openwow/foundation/diagnostics/logging.h"
+#include "openwow/foundation/diagnostics/performance_logging.h"
 #include "openwow/foundation/text/ascii.h"
 
 namespace openwow::vfs {
@@ -126,6 +127,19 @@ std::string DescribeArchiveOpenError(const std::uint32_t code) {
   }
 }
 
+bool MountAdmitsLookupPath(const MountPoint& mount,
+                           const std::string_view normalized_path) {
+  return mount.lookup_path_prefix.empty() ||
+         normalized_path.starts_with(mount.lookup_path_prefix);
+}
+
+bool MountOverlapsEnumerationRoot(const MountPoint& mount,
+                                  const std::string_view normalized_root) {
+  return mount.lookup_path_prefix.empty() || normalized_root == "/" ||
+         normalized_root.starts_with(mount.lookup_path_prefix) ||
+         std::string_view(mount.lookup_path_prefix).starts_with(normalized_root);
+}
+
 std::shared_ptr<mpq::MpqArchive> OpenMpqArchive(
     const MountPoint& mount) {
   auto archive = std::make_shared<mpq::MpqArchive>();
@@ -190,7 +204,12 @@ VirtualFileSystem::VirtualFileSystem()
 VirtualFileSystem::~VirtualFileSystem() = default;
 
 void VirtualFileSystem::Mount(const MountPoint& mount) {
-  mounts_.push_back(mount);
+  MountPoint normalized_mount = mount;
+  if (!normalized_mount.lookup_path_prefix.empty()) {
+    normalized_mount.lookup_path_prefix =
+        NormalizeVirtualPath(normalized_mount.lookup_path_prefix);
+  }
+  mounts_.push_back(std::move(normalized_mount));
   std::sort(mounts_.begin(), mounts_.end(), [](const MountPoint& a, const MountPoint& b) {
     if (a.priority != b.priority) {
       return a.priority > b.priority;
@@ -224,7 +243,7 @@ void VirtualFileSystem::InvalidateLookupCaches() {
 void VirtualFileSystem::PrewarmMpqArchives() const {
   for (const auto& mount : mounts_) {
     if (!mount.enabled || mount.kind != MountKind::kMpqArchive ||
-        mount.source_root.empty()) {
+        mount.source_root.empty() || !mount.prewarm) {
       continue;
     }
 
@@ -330,6 +349,9 @@ std::optional<std::vector<std::uint8_t>> VirtualFileSystem::ReadFilePrefix(
 std::optional<std::vector<std::uint8_t>> VirtualFileSystem::ReadFileBytesImpl(
     const std::string& virtual_path,
     const std::optional<std::size_t> max_bytes) const {
+  static openwow::diagnostics::PerformanceLogSite performance_site;
+  const openwow::diagnostics::ScopedPerformanceLog performance(
+      performance_site, "vfs.resolve_read", virtual_path);
   const auto normalized = NormalizeVirtualPath(virtual_path);
   if (normalized.empty()) {
     return std::nullopt;
@@ -393,7 +415,8 @@ std::optional<std::vector<std::uint8_t>> VirtualFileSystem::ReadFileBytesImpl(
   for (std::size_t mount_index = 0; mount_index < mounts_.size();
        ++mount_index) {
     const auto& mount = mounts_[mount_index];
-    if (!mount.enabled || mount.source_root.empty()) {
+    if (!mount.enabled || mount.source_root.empty() ||
+        !MountAdmitsLookupPath(mount, normalized)) {
       continue;
     }
 
@@ -528,7 +551,8 @@ std::vector<std::filesystem::path> VirtualFileSystem::EnumerateFilesUncached(
        ++mount_index) {
     const auto& mount = mounts_[mount_index];
     if (!mount.enabled || mount.source_root.empty() ||
-        (mount_kind.has_value() && mount.kind != *mount_kind)) {
+        (mount_kind.has_value() && mount.kind != *mount_kind) ||
+        !MountOverlapsEnumerationRoot(mount, normalized_root)) {
       continue;
     }
 
@@ -698,7 +722,8 @@ VirtualFileSystem::ResolvedPath VirtualFileSystem::ResolvePathUncached(
   for (std::size_t mount_index = 0; mount_index < mounts_.size();
        ++mount_index) {
     const auto& mount = mounts_[mount_index];
-    if (!mount.enabled || mount.source_root.empty()) {
+    if (!mount.enabled || mount.source_root.empty() ||
+        !MountAdmitsLookupPath(mount, normalized_virtual_path)) {
       continue;
     }
 

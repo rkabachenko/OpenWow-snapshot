@@ -66,6 +66,8 @@ struct SpellVisualModelInstance {
   bool active = true;
   bool visible = true;
   bool fading = false;
+  bool uses_authored_lifetime = false;
+  bool animation_completion_pending = false;
 };
 
 struct PersistentAreaEffect {
@@ -371,6 +373,8 @@ class SpellVisualRenderer {
   void DestroyM2Instance(std::uint32_t& instance_id);
 
   [[nodiscard]] bool BindM2EventCallback(std::uint32_t instance_id);
+  [[nodiscard]] bool BindAnimationCompletionCallback(
+      std::uint32_t instance_id);
 
   void UpdateModelInstancePosition(SpellVisualModelInstance& inst);
 

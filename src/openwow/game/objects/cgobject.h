@@ -191,6 +191,7 @@ class CGObject_C {
   void SetPrimaryM2InstanceId(std::uint32_t instance_id) {
     if (primary_m2_instance_id_ != instance_id) {
       overlay_bone_attached_ = false;
+      overlay_attachment_failure_logged_ = false;
       overlay_bone_rotation_compensated_ = false;
     }
     primary_m2_instance_id_ = instance_id;
@@ -618,6 +619,7 @@ class CGObject_C {
   bool overlay_model_visible_{false};
 
   bool overlay_bone_attached_{false};
+  bool overlay_attachment_failure_logged_{false};
 
   bool overlay_bone_rotation_compensated_{false};
 

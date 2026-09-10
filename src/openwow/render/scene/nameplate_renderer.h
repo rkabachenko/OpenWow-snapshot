@@ -24,7 +24,7 @@ struct NameplateDrawInfo {
   float screen_sort_key{0.0f};
   float camera_distance{0.0f};
 
-  float view_depth{0.0f};
+  float projected_depth{0.0f};
   std::uint8_t frame_level{10u};
 };
 
@@ -119,14 +119,15 @@ class NameplateRenderer {
   static bool WorldToScreen(float wx, float wy, float wz,
                              const float* view_mtx, const float* proj_mtx,
                              const WorldOverlayMetrics& metrics,
-                             float& sx, float& sy);
+                             float& projected_x, float& projected_y,
+                             float& projected_depth);
   [[nodiscard]] static bool ExtractCameraWorldPosition(const float* view_mtx,
                                                        float& x, float& y,
                                                        float& z);
 
   game::ObjectGuid target_guid_;
   bool show_class_color_in_nameplate_ = false;
-  bool allow_overlap_ = true;
+  bool allow_overlap_ = false;
   bool initialized_{false};
 
   static constexpr float kFrameStoredWidth = 0.1f;

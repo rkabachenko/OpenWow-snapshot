@@ -3,11 +3,28 @@
 #include "openwow/data/formats/m2/model_path.h"
 #include "openwow/foundation/diagnostics/logging.h"
 
+#include <algorithm>
+#include <string_view>
+
 namespace openwow::render {
 
 namespace {
 
 constexpr std::string_view kErrorCubeModelPath = "Spells/ErrorCube.m2";
+
+[[nodiscard]] std::string BuildCreatureDisplayTexturePath(
+    const std::string_view model_path, const std::string_view texture_name) {
+  if (texture_name.empty()) {
+    return {};
+  }
+  const auto separator = model_path.find_last_of("\\/");
+  if (separator == std::string_view::npos) {
+    return std::string(texture_name);
+  }
+  std::string path(model_path.substr(0u, separator + 1u));
+  path.append(texture_name);
+  return path;
+}
 
 }
 
@@ -15,54 +32,84 @@ void DisplayInfoResolver::BindDbc(const openwow::data::dbc::DbcLoader* dbc) {
   dbc_ = dbc;
 }
 
-std::string DisplayInfoResolver::ResolveCreatureModel(std::uint32_t display_id) const {
-  if (dbc_ == nullptr) return {};
-
-  const auto& display_store = dbc_->creature_display_info();
-  const auto* cdi = display_store.LookupEntry(display_id);
-  if (cdi == nullptr) {
-    if (openwow::diagnostics::IsLogEnabled(
-            openwow::diagnostics::LogLevel::kWarn)) {
-      openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kWarn,
-                                "DisplayInfoResolver: unknown creature display id " +
-                                    std::to_string(display_id));
-    }
-    return std::string(kErrorCubeModelPath);
+CreatureDisplayVisual DisplayInfoResolver::ResolveCreatureDisplay(
+    const std::uint32_t display_id,
+    const std::string_view effective_model_path) const {
+  CreatureDisplayVisual visual;
+  if (dbc_ == nullptr) {
+    return visual;
   }
 
-  const auto* cmd = dbc_->creature_model_data().LookupEntry(cdi->model_id);
-  if (cmd == nullptr) {
+  const auto* const display =
+      dbc_->creature_display_info().LookupEntry(display_id);
+  if (display == nullptr) {
+    if (openwow::diagnostics::IsLogEnabled(
+            openwow::diagnostics::LogLevel::kWarn)) {
+      openwow::diagnostics::Log(
+          openwow::diagnostics::LogLevel::kWarn,
+          "DisplayInfoResolver: unknown creature display id " +
+              std::to_string(display_id));
+    }
+    visual.model_path = std::string(kErrorCubeModelPath);
+    return visual;
+  }
+
+  const auto* const model =
+      dbc_->creature_model_data().LookupEntry(display->model_id);
+  if (model == nullptr) {
     if (openwow::diagnostics::IsLogEnabled(
             openwow::diagnostics::LogLevel::kWarn)) {
       openwow::diagnostics::Log(
           openwow::diagnostics::LogLevel::kWarn,
           "DisplayInfoResolver: unknown creature model data id " +
-              std::to_string(cdi->model_id) +
+              std::to_string(display->model_id) +
               " (display=" + std::to_string(display_id) + ")");
     }
-    return std::string(kErrorCubeModelPath);
+    visual.model_path = std::string(kErrorCubeModelPath);
+    return visual;
   }
 
-  auto model_path = openwow::data::m2::NormalizeModelPath(
-      std::string(cmd->model_name));
-  return model_path.empty() ? std::string(kErrorCubeModelPath)
-                            : std::move(model_path);
+  visual.resolved = true;
+  visual.model_path = openwow::data::m2::NormalizeModelPath(
+      std::string(model->model_name));
+  if (visual.model_path.empty()) {
+    visual.model_path = std::string(kErrorCubeModelPath);
+  }
+  visual.model_scale = display->scale;
+  if (model->scale > 0.0f) {
+    visual.model_scale *= model->scale;
+  }
+  if (!(visual.model_scale > 0.0f)) {
+    visual.model_scale = 1.0f;
+  }
+  visual.mount_height = model->mount_height;
+  visual.model_opacity =
+      std::clamp(static_cast<float>(display->model_alpha) *
+                     (1.0f / 255.0f),
+                 0.0f, 1.0f);
+  for (std::size_t index = 0u; index < visual.texture_paths.size(); ++index) {
+    visual.texture_paths[index] = BuildCreatureDisplayTexturePath(
+        effective_model_path.empty() ? std::string_view(visual.model_path)
+                                     : effective_model_path,
+        display->texture_variation[index]);
+  }
+  if (display->particle_color_id != 0u) {
+    if (const auto* const colors =
+            dbc_->particle_color().LookupEntry(display->particle_color_id);
+        colors != nullptr) {
+      visual.particle_colors = CreatureDisplayParticleColors{
+          .start = colors->start,
+          .mid = colors->mid,
+          .end = colors->end,
+      };
+    }
+  }
+  visual.geoset_data = display->creature_geoset_data;
+  return visual;
 }
 
-float DisplayInfoResolver::GetCreatureModelScale(std::uint32_t display_id) const {
-  if (dbc_ == nullptr || display_id == 0) return 1.0f;
-
-  const auto* cdi = dbc_->creature_display_info().LookupEntry(display_id);
-  if (cdi == nullptr) return 1.0f;
-
-  float scale = cdi->scale;
-
-  const auto* cmd = dbc_->creature_model_data().LookupEntry(cdi->model_id);
-  if (cmd != nullptr && cmd->scale > 0.0f) {
-    scale *= cmd->scale;
-  }
-
-  return (scale > 0.0f) ? scale : 1.0f;
+std::string DisplayInfoResolver::ResolveCreatureModel(std::uint32_t display_id) const {
+  return ResolveCreatureDisplay(display_id).model_path;
 }
 
 std::string DisplayInfoResolver::ResolvePlayerModel(std::uint8_t race,

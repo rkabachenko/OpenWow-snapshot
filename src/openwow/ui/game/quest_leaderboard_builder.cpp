@@ -7,6 +7,7 @@
 #include "openwow/game/objects/cgplayer.h"
 #include "openwow/game/quest_dialog_text.h"
 #include "openwow/game/quest_manager.h"
+#include "openwow/game/quest_turnin_state.h"
 #include "openwow/game/reputation_info.h"
 #include "openwow/game/template_name_variant.h"
 #include "openwow/game/world_session.h"
@@ -28,10 +29,7 @@ const openwow::game::QuestTemplate *GetOrRequestQuestTemplate(
 }
 
 bool IsQuestComplete(const openwow::game::WorldSession &session, const std::uint32_t quest_id) {
-  const auto *quest_entry = session.quests().FindQuestLogEntry(quest_id);
-  return quest_entry != nullptr &&
-         (quest_entry->status == openwow::game::QuestStatus::kComplete ||
-          quest_entry->status == openwow::game::QuestStatus::kRewarded);
+  return openwow::game::IsQuestTurnInReady(session, quest_id, true);
 }
 
 std::optional<openwow::game::CGPlayer_C::QuestLogEntry>
@@ -157,7 +155,7 @@ openwow::game::AsyncQueryChannel::Callback
 BuildQuestRequirementQueryCallback(std::string failure_message) {
   return [failure_message = std::move(failure_message)](const bool success) {
     if (success) {
-      ScriptEventDispatch::Get().FireQuestQueryComplete();
+      ScriptEventDispatch::Get().QueueGlobalEvent("QUEST_LOG_UPDATE");
       return;
     }
 

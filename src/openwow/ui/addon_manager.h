@@ -4,7 +4,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <unordered_map>
 #include <vector>
@@ -29,6 +31,7 @@ struct AddonInfo {
   bool load_on_demand = false;
   bool is_blizzard = false;
   bool is_secure = false;
+  bool is_builtin_ui = false;
   bool out_of_date = false;
 
   std::vector<std::string> dependencies;
@@ -66,6 +69,10 @@ class AddonManager {
   [[nodiscard]] static std::vector<AddonInfo> DiscoverAddons(
       const openwow::vfs::VirtualFileSystem& vfs,
       const std::string& interfacePath = "/Interface");
+
+  [[nodiscard]] static std::optional<openwow::vfs::MountPoint>
+  ResolveBuiltinUiAddonMount(const openwow::vfs::VirtualFileSystem& vfs,
+                            std::string_view addon_name);
 
   void PublishDiscoveredAddons(std::vector<AddonInfo> addons);
   [[nodiscard]] bool HasCompletedDiscovery() const;

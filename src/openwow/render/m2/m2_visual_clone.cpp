@@ -360,6 +360,19 @@ M2RenderInstanceResult M2System::RenderVisualClone(
   return result;
 }
 
+M2ResultStatus M2System::SetVisualCloneAlpha(
+    const M2VisualCloneLease& lease, const float alpha) {
+  if (!lease.valid()) {
+    return M2ResultStatus::kFailed;
+  }
+  M2ResultStatus result = M2ResultStatus::kReady;
+  for (const auto& node : lease.state_->nodes) {
+    result = MergeM2ResultStatus(
+        result, SetAlpha(node.clone_instance_id, alpha));
+  }
+  return result;
+}
+
 M2ResultStatus M2System::SetVisualCloneAnimation(
     const M2VisualCloneLease& lease, const std::uint32_t animation,
     const float speed) {

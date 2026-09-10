@@ -9,6 +9,7 @@
 #include "openwow/ui/game/script_event_dispatch.h"
 #include "openwow/foundation/diagnostics/logging.h"
 #include "openwow/input/input_manager.h"
+#include "openwow/platform/window/window_manager.h"
 
 #include <algorithm>
 #include <array>
@@ -349,6 +350,14 @@ bool CursorSurface::Initialize(SDL_Window* window) {
 
   SetActiveCursorSurface(this);
 
+#if defined(__APPLE__) && !defined(OPENWOW_PLATFORM_IOS)
+  const auto& cvars = openwow::ui::game::CVarSystem::Instance();
+  if (cvars.Exists("gxCursor") && !cvars.GetCVarBool("gxCursor")) {
+    openwow::diagnostics::Log(
+        openwow::diagnostics::LogLevel::kInfo,
+        "CursorSurface: macOS uses native Point cursor presentation with software game cursors");
+  }
+#endif
   openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kInfo, "CursorSurface: initialized");
   return true;
 }
@@ -360,6 +369,9 @@ void CursorSurface::Shutdown() {
   custom_cursor_handle_ = nullptr;
   SDL_Cursor* stale_runtime_cursor_handle = runtime_cursor_handle_;
   runtime_cursor_handle_ = nullptr;
+  SDL_Cursor* stale_suppression_handle = native_cursor_suppression_handle_;
+  native_cursor_suppression_handle_ = nullptr;
+  native_cursor_suppression_failure_logged_ = false;
 
   runtime_cursor_enabled_ = false;
   ResetRuntimeCursorTextureState();
@@ -377,10 +389,12 @@ void CursorSurface::Shutdown() {
   cached_custom_cursor_request_.clear();
   custom_cursor_rgba_.fill(0);
   visible_ = true;
-  RefreshPresentationMode();
+  SDL_SetCursor(nullptr);
+  SDL_ShowCursor(SDL_ENABLE);
   FreeCursorHandle(stale_builtin_cursor_handle);
   FreeCursorHandle(stale_custom_cursor_handle);
   FreeCursorHandle(stale_runtime_cursor_handle);
+  FreeCursorHandle(stale_suppression_handle);
   if (GetActiveCursorSurface() == this) {
     SetActiveCursorSurface(nullptr);
   }
@@ -730,8 +744,19 @@ std::pair<int, int> CursorSurface::CursorTypeToHotspot(CursorType ) {
 }
 
 bool CursorSurface::WantsHardwareCursor() const {
+  if (openwow::platform::WindowManager::Get().HasVirtualCursorPosition()) {
+    return false;
+  }
   const auto& cvars = openwow::ui::game::CVarSystem::Instance();
-  return !cvars.Exists("gxCursor") || cvars.GetCVarBool("gxCursor");
+  if (!cvars.Exists("gxCursor") || cvars.GetCVarBool("gxCursor")) {
+    return true;
+  }
+#if defined(__APPLE__) && !defined(OPENWOW_PLATFORM_IOS)
+  return !runtime_cursor_enabled_ && !custom_cursor_active_ &&
+         current_retail_type_ == 1u;
+#else
+  return false;
+#endif
 }
 
 bool CursorSurface::ShouldRenderSoftwareCursor() const {
@@ -772,12 +797,30 @@ void CursorSurface::RenderOverlay(std::uint8_t view_id, float screen_w, float sc
     return;
   }
 
-  const auto [mouse_x, mouse_y] =
-      openwow::input::InputManager::Get().GetMousePosition();
+  auto position = openwow::input::InputManager::Get().GetMousePosition();
+  auto& window_manager = openwow::platform::WindowManager::Get();
+  if (window_manager.HasVirtualCursorPosition()) {
+    const auto virtual_position = window_manager.ResolveLogicalCursorPositionInDrawablePixels();
+    if (!virtual_position) {
+      openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kError,
+          "Cursor rendering failed: source=virtual-mouse reason=position-unavailable");
+      return;
+    }
+    position = *virtual_position;
+  }
+  const auto [mouse_x, mouse_y] = position;
   if (mouse_x < 0 || mouse_y < 0 || static_cast<float>(mouse_x) >= screen_w ||
       static_cast<float>(mouse_y) >= screen_h) {
     return;
   }
+
+  int logical_width = 0;
+  int logical_height = 0;
+  SDL_GetWindowSize(window_, &logical_width, &logical_height);
+  const float logical_to_drawable_x =
+      logical_width > 0 ? screen_w / static_cast<float>(logical_width) : 1.0f;
+  const float logical_to_drawable_y =
+      logical_height > 0 ? screen_h / static_cast<float>(logical_height) : 1.0f;
 
   bool rendered = false;
   if (runtime_cursor_enabled_ && runtime_cursor_pixels_valid_) {
@@ -785,6 +828,8 @@ void CursorSurface::RenderOverlay(std::uint8_t view_id, float screen_w, float sc
         view_id,
         screen_w,
         screen_h,
+        logical_to_drawable_x,
+        logical_to_drawable_y,
         mouse_x,
         mouse_y,
         runtime_visible_hotspot_.first,
@@ -797,6 +842,8 @@ void CursorSurface::RenderOverlay(std::uint8_t view_id, float screen_w, float sc
         view_id,
         screen_w,
         screen_h,
+        logical_to_drawable_x,
+        logical_to_drawable_y,
         mouse_x,
         mouse_y,
         runtime_visible_hotspot_.first,
@@ -807,6 +854,8 @@ void CursorSurface::RenderOverlay(std::uint8_t view_id, float screen_w, float sc
         view_id,
         screen_w,
         screen_h,
+        logical_to_drawable_x,
+        logical_to_drawable_y,
         mouse_x,
         mouse_y,
         active_hotspot_.first,
@@ -819,6 +868,8 @@ void CursorSurface::RenderOverlay(std::uint8_t view_id, float screen_w, float sc
         view_id,
         screen_w,
         screen_h,
+        logical_to_drawable_x,
+        logical_to_drawable_y,
         mouse_x,
         mouse_y,
         active_hotspot_.first,
@@ -1048,12 +1099,12 @@ void CursorSurface::RefreshPresentationMode() {
   }
 
   if (!visible_ || ShouldRenderSoftwareCursor()) {
-    SDL_ShowCursor(SDL_DISABLE);
+    SuppressNativeCursor();
     return;
   }
 
-  SDL_ShowCursor(SDL_ENABLE);
   ApplyHardwareCursor();
+  SDL_ShowCursor(SDL_ENABLE);
 }
 
 void CursorSurface::ReassertPresentation() {
@@ -1062,13 +1113,34 @@ void CursorSurface::ReassertPresentation() {
   }
 
   RefreshPresentationMode();
+}
 
-  if (!visible_ || ShouldRenderSoftwareCursor()) {
-
-    return;
+void CursorSurface::SuppressNativeCursor() {
+  if (native_cursor_suppression_handle_ == nullptr) {
+    std::array<std::uint8_t, detail::kCursor32x32PixelBytes> transparent_rgba{};
+    native_cursor_suppression_handle_ =
+        CreateCursorFromPixels(transparent_rgba, 0, 0);
+    if (native_cursor_suppression_handle_ == nullptr &&
+        !native_cursor_suppression_failure_logged_) {
+      openwow::diagnostics::Log(
+          openwow::diagnostics::LogLevel::kWarn,
+          std::string("CursorSurface: failed to create native cursor suppression handle: ") +
+              SDL_GetError());
+      native_cursor_suppression_failure_logged_ = true;
+    }
   }
 
-  SDL_SetCursor(nullptr);
+  if (native_cursor_suppression_handle_ != nullptr) {
+    SDL_SetCursor(native_cursor_suppression_handle_);
+  }
+  if (SDL_ShowCursor(SDL_DISABLE) < 0 &&
+      !native_cursor_suppression_failure_logged_) {
+    openwow::diagnostics::Log(
+        openwow::diagnostics::LogLevel::kWarn,
+        std::string("CursorSurface: failed to suppress native cursor: ") +
+            SDL_GetError());
+    native_cursor_suppression_failure_logged_ = true;
+  }
 }
 
 SDL_Cursor* CursorSurface::CreateCursorFromBLP(

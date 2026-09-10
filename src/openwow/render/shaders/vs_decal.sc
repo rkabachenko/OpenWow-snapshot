@@ -7,7 +7,8 @@ uniform vec4 u_decalParams;
 
 void main()
 {
-    vec4 clip = mul(u_viewProj, vec4(a_position.xyz, 1.0) );
+    vec4 viewPosition = mul(u_view, vec4(a_position.xyz, 1.0));
+    vec4 clip = mul(u_proj, viewPosition);
     clip.z -= u_decalParams.x * clip.w;
     gl_Position = clip;
 

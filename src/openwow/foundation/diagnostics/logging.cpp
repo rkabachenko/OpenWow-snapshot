@@ -1,11 +1,16 @@
 #include "openwow/foundation/diagnostics/logging.h"
+#include "openwow/foundation/diagnostics/log_snapshot.h"
+#include "openwow/foundation/diagnostics/performance_logging.h"
 
 #include <chrono>
+#include <algorithm>
+#include <array>
 #include <condition_variable>
 #include <cstdlib>
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iomanip>
 #include <iostream>
 #include <mutex>
@@ -16,9 +21,12 @@
 namespace openwow::diagnostics {
 namespace {
 
+std::atomic<bool> g_performance_logging_enabled{false};
+
 struct LogEntry {
   LogLevel level{LogLevel::kInfo};
   std::string json_line;
+  std::shared_ptr<std::promise<LogSnapshotResult>> snapshot_boundary;
 };
 
 struct LoggerState {
@@ -138,6 +146,23 @@ void WorkerLoop() {
       state.queue.pop_front();
 
       lock.unlock();
+      if (entry.snapshot_boundary) {
+        LogSnapshotResult boundary{.source = state.log_file};
+        if (!state.out.is_open()) {
+          boundary.error = "flush: log-file-unavailable";
+        } else {
+          state.out.flush();
+          const auto position = state.out.tellp();
+          if (!state.out || position < 0) {
+            boundary.error = "flush: log-write-failed";
+          } else {
+            boundary.bytes = static_cast<std::uintmax_t>(position);
+          }
+        }
+        entry.snapshot_boundary->set_value(std::move(boundary));
+        lock.lock();
+        continue;
+      }
       if (state.out.is_open()) {
         state.out << entry.json_line << '\n';
       }
@@ -273,6 +298,138 @@ std::filesystem::path CurrentLogFile() {
   auto& state = State();
   std::lock_guard<std::mutex> lock(state.mutex);
   return state.log_file;
+}
+
+LogSnapshotResult CopyCurrentLogSnapshot(const std::filesystem::path& destination) {
+  auto& state = State();
+  auto completion = std::make_shared<std::promise<LogSnapshotResult>>();
+  auto ready = completion->get_future();
+  {
+    std::lock_guard<std::mutex> lock(state.mutex);
+    if (!state.initialized || state.stop_requested) {
+      return {.error = "flush: logger-not-running"};
+    }
+    state.queue.push_back({.snapshot_boundary = std::move(completion)});
+    state.cv.notify_one();
+  }
+  auto result = ready.get();
+  if (!result.error.empty()) return result;
+
+  std::error_code ec;
+  const bool exists = std::filesystem::exists(destination, ec);
+  if (ec || exists) {
+    result.error = ec ? "copy: destination-status-failed: " + ec.message()
+                      : "copy: destination-already-exists";
+    return result;
+  }
+  std::ifstream input(result.source, std::ios::binary);
+  if (!input) {
+    result.error = "copy: source-open-failed";
+    return result;
+  }
+  std::ofstream output(destination, std::ios::binary);
+  if (!output) {
+    result.error = "copy: destination-open-failed";
+    std::filesystem::remove(destination, ec);
+    if (ec) result.error += "; cleanup: " + ec.message();
+    return result;
+  }
+  std::array<char, 64 * 1024> buffer;
+  std::uintmax_t remaining = result.bytes;
+  while (remaining != 0) {
+    const auto count = static_cast<std::streamsize>(
+        std::min<std::uintmax_t>(remaining, buffer.size()));
+    input.read(buffer.data(), count);
+    if (input.gcount() != count || input.bad()) {
+      result.error = "copy: source-read-failed";
+      break;
+    }
+    output.write(buffer.data(), count);
+    if (!output) {
+      result.error = "copy: destination-write-failed";
+      break;
+    }
+    remaining -= static_cast<std::uintmax_t>(count);
+  }
+  output.close();
+  if (!output && result.error.empty()) result.error = "copy: destination-close-failed";
+  if (!result.error.empty()) {
+    std::filesystem::remove(destination, ec);
+    if (ec) result.error += "; cleanup: " + ec.message();
+  }
+  return result;
+}
+
+void SetPerformanceLoggingEnabled(const bool enabled) {
+  g_performance_logging_enabled.store(enabled, std::memory_order_relaxed);
+  Log(LogLevel::kInfo, std::string("Perf: configuration enabled=") +
+      (enabled ? "1" : "0") +
+      " slow_ms=20 severe_ms=250 summary_seconds=5 timing=inclusive_wall");
+}
+
+bool IsPerformanceLoggingEnabled() noexcept {
+  return g_performance_logging_enabled.load(std::memory_order_relaxed);
+}
+
+PerformanceTimer::PerformanceTimer() noexcept
+    : enabled_(IsPerformanceLoggingEnabled()),
+      start_(enabled_ ? std::chrono::steady_clock::now()
+                      : std::chrono::steady_clock::time_point{}) {}
+
+double PerformanceTimer::ElapsedMs() const noexcept {
+  return enabled_ ? std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - start_).count() : 0.0;
+}
+
+std::int64_t PerformanceTimer::StartUs() const noexcept {
+  return std::chrono::duration_cast<std::chrono::microseconds>(
+      start_.time_since_epoch()).count();
+}
+
+void LogPerformanceDuration(PerformanceLogSite& site,
+                            const std::string_view operation,
+                            const PerformanceTimer& timer,
+                            const std::string_view context,
+                            const double threshold_ms) {
+  if (!timer.enabled() || !IsPerformanceLoggingEnabled()) return;
+  const double elapsed_ms = timer.ElapsedMs();
+  if (elapsed_ms < threshold_ms) return;
+  const auto now_us = timer.StartUs() + static_cast<std::int64_t>(elapsed_ms * 1000.0);
+  if (threshold_ms > 0.0 && (elapsed_ms < 250.0 || !site.retain_severe)) {
+    auto next = site.next_log_us.load(std::memory_order_relaxed);
+    if (now_us < next || !site.next_log_us.compare_exchange_strong(
+            next, now_us + 1000000, std::memory_order_relaxed)) {
+      site.suppressed.fetch_add(1, std::memory_order_relaxed);
+      return;
+    }
+  }
+  const auto suppressed = site.suppressed.exchange(0, std::memory_order_relaxed);
+  Log(LogLevel::kInfo, "Perf: span operation=" + std::string(operation) +
+      " start_us=" + std::to_string(timer.StartUs()) +
+      " duration_ms=" + std::to_string(elapsed_ms) +
+      " suppressed=" + std::to_string(suppressed) +
+      " context=" + std::string(context.substr(0, 2048)));
+}
+
+void LogPerformanceEvent(const std::string_view operation,
+                         const std::string_view context) {
+  if (!IsPerformanceLoggingEnabled()) return;
+  Log(LogLevel::kInfo, "Perf: event operation=" + std::string(operation) +
+      " context=" + std::string(context.substr(0, 2048)));
+}
+
+ScopedPerformanceLog::ScopedPerformanceLog(
+    PerformanceLogSite& site, const std::string_view operation,
+    const std::string_view context, const double threshold_ms)
+    : site_(site), operation_(operation), context_(context),
+      threshold_ms_(threshold_ms) {
+  if (timer_.enabled() && threshold_ms_ == 0.0) {
+    LogPerformanceEvent(operation_, "begin " + std::string(context_));
+  }
+}
+
+ScopedPerformanceLog::~ScopedPerformanceLog() {
+  LogPerformanceDuration(site_, operation_, timer_, context_, threshold_ms_);
 }
 
 }

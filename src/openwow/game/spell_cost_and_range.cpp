@@ -56,18 +56,15 @@
 namespace openwow::game {
 
 std::uint32_t GetCastFailureMessageId(std::uint32_t error_code,
-                                       std::uintptr_t spell_rec,
+                                       const data::dbc::SpellEntry* spell,
                                        std::int32_t extra_param) {
   constexpr std::uint32_t kDefault = 48;
 
   constexpr std::uint32_t kSpellAttrUsesAlternateFailureMessage = 0x10u;
 
-  const auto* fields =
-      reinterpret_cast<const std::uint32_t*>(spell_rec);
-
   auto category_sub_switch = [&]() -> std::uint32_t {
-    if (!fields) return kDefault;
-    switch (fields[1]) {
+    if (!spell) return kDefault;
+    switch (spell->category) {
       case 4: case 9:   return 50;
       case 10: case 11: return 51;
       default:           return 49;
@@ -80,8 +77,8 @@ std::uint32_t GetCastFailureMessageId(std::uint32_t error_code,
     case 4:   return 432;
     case 11:  return 199;
     case 12: {
-      if (!fields) return kDefault;
-      const std::uint32_t targets = fields[16];
+      if (!spell) return kDefault;
+      const std::uint32_t targets = spell->targets;
       if (targets & 0x10)    return 335;
       if (targets & 0x20000) return 636;
       return kDefault;
@@ -94,13 +91,13 @@ std::uint32_t GetCastFailureMessageId(std::uint32_t error_code,
     case 52:  return 326;
     case 67: {
       std::uint32_t result = kDefault;
-      if (fields) {
-        switch (fields[1]) {
+      if (spell) {
+        switch (spell->category) {
           case 4: case 9:   result = 50; break;
           case 10: case 11: result = 51; break;
           default:
 
-            result = (fields[4] & kSpellAttrUsesAlternateFailureMessage) != 0u
+            result = (spell->attributes & kSpellAttrUsesAlternateFailureMessage) != 0u
                          ? 53u
                          : 52u;
             break;
@@ -178,7 +175,6 @@ void HandleCastFailure(WorldSession& session,
   if (player == nullptr) return;
 
   const auto* dbc = session.GetDbcLoader();
-  const std::uint32_t now = core::GameClock::GetTickCount32();
 
   std::uint32_t spell_id = 0;
   if (spell_entry != 0) {
@@ -195,16 +191,6 @@ void HandleCastFailure(WorldSession& session,
     }
     return;
   }
-
-  auto& runtime = SpellCastDiagnostics::Get();
-  if (error_code == runtime.last_cast_failure_reason &&
-      spell_id != 0 && spell_id == runtime.last_cast_spell_id &&
-      now - runtime.previous_cast_time < 3000) {
-    return;
-  }
-  runtime.last_cast_failure_reason = error_code;
-  runtime.last_cast_spell_id = spell_id;
-  runtime.previous_cast_time = now;
 
   if (error_code != 0) {
     const std::uint32_t fizzle_sound_id = 5400u;

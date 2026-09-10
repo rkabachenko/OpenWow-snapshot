@@ -603,6 +603,7 @@ void InstallFrameMovementMethods(lua_State* L) {
     lua_pushcfunction(L, [](lua_State *Ls) -> int {
       const int self_idx = ValidateFrameResizeSelf(Ls);
       if (LuaFrameMutationBlocked(Ls, self_idx)) {
+        LogFrameMoveSizingFailure(Ls, self_idx, "StartMoving", "protected-state");
         return 0;
       }
 
@@ -629,6 +630,7 @@ void InstallFrameMovementMethods(lua_State* L) {
     lua_pushcfunction(L, [](lua_State *Ls) -> int {
       const int self_idx = ValidateFrameResizeSelf(Ls);
       if (LuaFrameMutationBlocked(Ls, self_idx)) {
+        LogFrameMoveSizingFailure(Ls, self_idx, "StartSizing", "protected-state");
         return 0;
       }
 

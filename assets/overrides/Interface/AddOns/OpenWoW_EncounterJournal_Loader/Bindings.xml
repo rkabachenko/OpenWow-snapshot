@@ -1,0 +1,5 @@
+<Bindings>
+  <Binding name="OPENWOW_TOGGLE_ENCOUNTER_JOURNAL" header="OPENWOW_ENCOUNTER_JOURNAL">
+    OpenWoWEncounterJournalLoader_Toggle()
+  </Binding>
+</Bindings>

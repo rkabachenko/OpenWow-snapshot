@@ -1,4 +1,8 @@
 #include "glue_client.h"
+#if defined(OPENWOW_PLATFORM_IOS)
+#include "mobile/mobile_ios_platform.h"
+#include "openwow/debug/diagnostics/debug_console.h"
+#endif
 #include "glue_host/presentation_settings.h"
 #include "glue_host/settings_capability_policy.h"
 #include "scenarios/offline_world_fixture.h"
@@ -17,6 +21,7 @@
 #include "openwow/core/gxcvar.h"
 #include "openwow/core/init_subsystems.h"
 #include "openwow/core/login_state_handler.h"
+#include "openwow/core/platform_runtime_policy.h"
 #include "openwow/core/screenshot_system.h"
 #include "openwow/data/archive_system.h"
 #include "openwow/data/async_file_read.h"
@@ -29,6 +34,7 @@
 #include "openwow/debug/control/debug_control_json_codec.h"
 #include "openwow/debug/control/debug_control_server.h"
 #include "openwow/foundation/diagnostics/logging.h"
+#include "openwow/foundation/diagnostics/performance_logging.h"
 #include "openwow/game/account_msg.h"
 #include "openwow/game/activities/dance/adapters/data/dbc_dance_move_catalog.h"
 #include "openwow/game/activities/dance/application/dance_studio.h"
@@ -285,6 +291,79 @@ void RegisterTextureCacheBudget(openwow::ui::game::CVarSystem &cvars) {
     openwow::core::ida::ConsoleAddLine(result.console_message, openwow::core::ida::COLOR_DEFAULT);
     return result.accepted;
   });
+}
+
+void RegisterIosPerformanceProfile(openwow::ui::game::CVarSystem &cvars) {
+#if defined(OPENWOW_PLATFORM_IOS)
+  if (!cvars.Exists("iosPerformanceProfile")) {
+    cvars.RegisterCVar("iosPerformanceProfile", "1",
+                       openwow::ui::game::CVarFlags::Archive,
+                       "Apply the balanced iOS performance policy");
+  }
+#else
+  (void)cvars;
+#endif
+}
+
+void RegisterMobileHudPreview(openwow::ui::game::CVarSystem &cvars) {
+#if defined(__APPLE__) && !defined(OPENWOW_PLATFORM_IOS)
+  cvars.RegisterCVar("mobileHudPreview", "0",
+                     openwow::ui::game::CVarFlags::Archive,
+                     "Preview the iOS HUD on macOS (requires UI reload)");
+  cvars.RegisterNativeCVar("mobileHudPreviewSafeInset", "0",
+      openwow::ui::game::CVarFlags::Archive,
+      "Uniform safe-area inset in points for macOS mobile HUD preview (0-100)",
+      [](const std::string&, const std::string&, const std::string& text) {
+        char* end = nullptr;
+        const float value = std::strtof(text.c_str(), &end);
+        if (end != text.c_str() && *end == '\0' && value >= 0.0F && value <= 100.0F) {
+          return true;
+        }
+        openwow::core::ida::ConsoleAddLine(
+            "mobileHudPreviewSafeInset must be between 0 and 100 points.",
+            openwow::core::ida::COLOR_DEFAULT);
+        return false;
+      }, 0.0F, 100.0F);
+#else
+  (void)cvars;
+#endif
+}
+
+void ApplyIosPerformanceProfile(openwow::ui::game::CVarSystem &cvars) {
+#if defined(OPENWOW_PLATFORM_IOS)
+  if (!cvars.GetCVarBool("iosPerformanceProfile")) {
+    openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kInfo,
+                              "iOS performance profile disabled by CVar");
+    return;
+  }
+
+  constexpr auto policy = openwow::core::GetPlatformRuntimePolicy();
+  const auto set = [&cvars](const char *const name, const std::string &value) {
+    if (cvars.Exists(name)) {
+      (void)cvars.SetRegisteredCVarValueDirect(name, value);
+    }
+  };
+  set("maxFPS", std::to_string(policy.foreground_fps_limit));
+  set("maxFPSBk", std::to_string(policy.background_fps_limit));
+  set("particleDensity", std::to_string(policy.particle_density));
+  set("weatherDensity", std::to_string(policy.weather_density));
+  set("environmentDetail", std::to_string(policy.environment_detail));
+  set("farclip", std::to_string(policy.far_clip));
+  set("ffxGlow", policy.glow_enabled ? "1" : "0");
+  set("projectedTextures", "0");
+  set("extShadowQuality", "0");
+  set("gxMultisample", "1");
+  set("gxTripleBuffer", "0");
+
+  openwow::diagnostics::Log(
+      openwow::diagnostics::LogLevel::kInfo,
+      "Applied balanced iOS performance profile: maxFPS=" +
+          std::to_string(policy.foreground_fps_limit) +
+          " farclip=" + std::to_string(policy.far_clip) +
+          " particleDensity=" + std::to_string(policy.particle_density));
+#else
+  (void)cvars;
+#endif
 }
 
 struct LogoutCountdownSnapshot {
@@ -605,6 +684,11 @@ GlueClient::GlueClient(Options opts)
 }
 
 GlueClient::~GlueClient() {
+#if defined(OPENWOW_PLATFORM_IOS)
+  (void)openwow::debug::DebugConsole::Get().UnregisterCommandIfCurrent(
+      "exportlogs", mobile_log_export_command_id_);
+  game_loop_.game_ui().input_router().CancelTouchMovement("host-destroyed");
+#endif
 
   m2_system_.BindFrameJobSystem(nullptr);
   frame_job_system_.Shutdown();
@@ -788,8 +872,11 @@ void GlueClient::UpdateTextInputState() {
                                 game_loop_.game_ui().is_initialized() &&
                                 !game_loop_.game_ui().input_router().focused_frame_name().empty();
   const bool glue_accepts_text = mode_ != UiMode::kLoading && mode_ != UiMode::kInWorld;
-  const bool should_capture =
+  bool should_capture =
       window_focused_ && (in_world_editing || (glue_accepts_text && !FocusedEditbox().empty()));
+#if defined(OPENWOW_PLATFORM_IOS)
+  should_capture = should_capture && !mobile::IsLogExportActive();
+#endif
   bool platform_is_capturing = SDL_IsTextInputActive() == SDL_TRUE;
   if (should_capture && text_input_reactivation_pending_ &&
       platform_is_capturing) {
@@ -853,8 +940,13 @@ std::string GlueClient::FindPasswordWidget() const {
 
 void GlueClient::SetMode(UiMode next_mode) {
   const bool mode_changed = mode_ != next_mode;
+#if defined(OPENWOW_PLATFORM_IOS)
+  if (mode_changed) {
+    CancelMobileInput();
+  }
+#endif
   if (mode_ == UiMode::kInWorld && next_mode != UiMode::kInWorld) {
-    ReleaseInWorldMouseButtons();
+    ReleaseInWorldInput();
   }
 
   mode_ = next_mode;
@@ -873,6 +965,9 @@ void GlueClient::SetMode(UiMode next_mode) {
   UpdateWindowTitle();
 
   layout_dirty_ = true;
+#if defined(OPENWOW_PLATFORM_IOS)
+  RefreshMobileInputViewport();
+#endif
 }
 
 void GlueClient::SyncGlueViewportFromWindow() {
@@ -883,6 +978,11 @@ void GlueClient::SyncGlueViewportFromWindow() {
 }
 
 void GlueClient::RefreshLayout() {
+#if defined(OPENWOW_PLATFORM_IOS)
+  RefreshMobileInputViewport();
+#elif defined(__APPLE__)
+  RefreshMobileHudPreviewViewport();
+#endif
   int width = 0;
   int height = 0;
   GetDrawableSize(window_, &width, &height);
@@ -917,9 +1017,10 @@ void GlueClient::DispatchPendingScrollRangeChangedEvents() {
 void GlueClient::RefreshLoginConfiguration() {
   auto &cvars = openwow::ui::game::CVarSystem::Instance();
   const std::string detected_locale = openwow::data::DetectLocaleRing(
-      cvars.GetCVar("locale"), launch_context_.game_root.string(),
+      cvars.GetCVar("locale"), launch_context_.content_root.string(),
       openwow::data::GetStartupFileSystemState().retail_install_path_cache);
-  openwow::data::DefaultLoadLoginConfigs(1, detected_locale.c_str());
+  openwow::data::DefaultLoadLoginConfigs(1, detected_locale.c_str(),
+                                         &login_vfs_);
 
   const auto [host, port] = ParseRealmListEndpoint(cvars.GetCVar("realmList"));
   auth_host_ = host;
@@ -938,7 +1039,9 @@ void GlueClient::DoLoginAttempt() {
   cancel_ctx.realm_session = &realm_runtime_.session;
   CancelGlueFlowNetworkOperations(cancel_ctx, glue_flow_state_);
   glue_flow_state_.phase = GlueFlowState::Phase::kIdle;
-  glue_flow_state_.auth_protocol = std::make_shared<openwow::net::wotlk::AuthProtocol>();
+  glue_flow_state_.auth_protocol =
+      std::make_shared<openwow::net::wotlk::AuthProtocol>(
+          openwow::ui::game::CVarSystem::Instance().GetCVar("locale"));
   auto result = glue_flow_state_.auth_protocol->Login(
       auth_host_, auth_port_, login_screen_.username(), login_screen_.password());
 
@@ -986,28 +1089,51 @@ void GlueClient::DoLoginAttempt() {
   }
 }
 
-void GlueClient::BuildAndPublishLoginVfs() {
-  const auto &cvars = openwow::ui::game::CVarSystem::Instance();
-  login_vfs_ = openwow::data::BuildLoginVfs(launch_context_.game_root.string(),
-                                            launch_context_.enhanced_assets_root.string(),
-                                            cvars.GetCVar("locale"));
+bool GlueClient::BuildAndPublishLoginVfs() {
+  auto &cvars = openwow::ui::game::CVarSystem::Instance();
+  const std::string detected_locale = openwow::data::DetectLocaleRing(
+      cvars.GetCVar("locale"), launch_context_.content_root.string(),
+      openwow::data::GetStartupFileSystemState().retail_install_path_cache);
+  const std::string resolved_locale = openwow::data::ResolveWowIniArchiveLocale(
+      detected_locale,
+      openwow::data::ProbeCommonArchiveLayout(
+          launch_context_.content_root,
+          openwow::data::GetStartupFileSystemState().retail_install_path_cache));
+  if (!openwow::core::SynchronizeClientLocaleState(resolved_locale)) {
+    openwow::diagnostics::Log(
+        openwow::diagnostics::LogLevel::kError,
+        "Client locale publication failed: detected=" + detected_locale +
+            " resolved=" + resolved_locale);
+    return false;
+  }
+
+  login_vfs_ = openwow::data::BuildLoginVfs(launch_context_.content_root.string(),
+                                            launch_context_.override_content_root.string(),
+                                            resolved_locale);
 
   RealmAddonHandshakeComposition::BindContentVfs(&login_vfs_);
 
-  openwow::data::ResolveWowIniArchiveLocale(
-      cvars.GetCVar("locale"), openwow::data::ProbeCommonArchiveLayout());
-
   const std::uint8_t expansion_level = openwow::data::DetermineStartupExpansionLevel(login_vfs_);
   openwow::core::SetExpansionLevel(expansion_level);
+  openwow::diagnostics::Log(
+      openwow::diagnostics::LogLevel::kInfo,
+      "Active client locale: token=" + resolved_locale +
+          " dbc_slot=" +
+          std::to_string(openwow::data::GetCurrentLocaleInfo().locale_index) +
+          " text=" + cvars.GetCVar("textLocale") +
+          " audio=" + cvars.GetCVar("audioLocale"));
   openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kInfo,
                             "Client archive expansion level: " + std::to_string(expansion_level));
+  return true;
 }
 
 void GlueClient::ReloadLoginResources() {
 
   glue_renderer_.Shutdown();
   m2_system_.ShutdownAsyncLoading();
-  BuildAndPublishLoginVfs();
+  if (!BuildAndPublishLoginVfs()) {
+    return;
+  }
   RefreshLoginConfiguration();
 
   SyncGlueViewportFromWindow();
@@ -1289,7 +1415,7 @@ bool GlueClient::EnterOfflineScenarioWorld() {
 }
 
 void GlueClient::ReturnFromWorldToGlue(const char *screen_name, bool disconnect_realm_session) {
-  ReleaseInWorldMouseButtons();
+  ReleaseInWorldInput();
 
   if (!scenario_forward_binding_key_.empty()) {
     (void)game_loop_.binding_input().KeyUp(scenario_forward_binding_key_);
@@ -1372,6 +1498,9 @@ void GlueClient::HandleWorldTransportDisconnect() {
 }
 
 bool GlueClient::Initialize() {
+#if defined(OPENWOW_PLATFORM_IOS)
+  RefreshMobileInputViewport();
+#endif
   if (startup_trace_)
     startup_trace_->Add("glue.Initialize.begin");
   if (!InitCVars()) {
@@ -1392,6 +1521,7 @@ bool GlueClient::Initialize() {
 
   openwow::core::ida::InitializeStartupHardwareDetectionState(&login_vfs_);
   openwow::core::ida::GxCVarInitializeRuntime("World of Warcraft");
+  ApplyIosPerformanceProfile(openwow::ui::game::CVarSystem::Instance());
 
   if (!InitGraphics()) {
     glue_host_.FinishAudioDevicePrepare();
@@ -1413,6 +1543,7 @@ bool GlueClient::Initialize() {
       startup_trace_->Add("glue.Initialize.fail");
     return false;
   }
+  ApplyIosPerformanceProfile(openwow::ui::game::CVarSystem::Instance());
   if (!InitGameLoop()) {
     if (startup_trace_)
       startup_trace_->Add("glue.Initialize.fail");
@@ -1437,6 +1568,8 @@ bool GlueClient::InitCVars() {
   openwow::core::ida::CVar_LoadConfig("Config.wtf");
   openwow::core::ida::GxCVarRegister();
   cvar_sys.RegisterDefaults();
+  RegisterIosPerformanceProfile(cvar_sys);
+  RegisterMobileHudPreview(cvar_sys);
   openwow::core::MemoryStorm_RegisterConsoleCommands();
   gamma_controller_.Register(cvar_sys, window_);
   openwow::render::RegisterTextureFilteringModeCVarCallback(cvar_sys);
@@ -1480,7 +1613,7 @@ bool GlueClient::InitCVars() {
 bool GlueClient::InitVFS() {
   if (startup_trace_)
     startup_trace_->Add("glue.InitVFS.begin");
-  const std::string game_data = launch_context_.game_root.string();
+  const std::string game_data = launch_context_.content_root.string();
 
   {
     const auto mfil_path = std::filesystem::path(game_data) / "WoW.mfil";
@@ -1493,7 +1626,11 @@ bool GlueClient::InitVFS() {
 
   }
 
-  BuildAndPublishLoginVfs();
+  if (!BuildAndPublishLoginVfs()) {
+    if (startup_trace_)
+      startup_trace_->Add("glue.InitVFS.fail");
+    return false;
+  }
 
   RefreshLoginConfiguration();
 
@@ -1798,6 +1935,9 @@ void GlueClient::FireInitialScreenEventIfNeeded() {
   const int startup_level = static_cast<int>(openwow::core::GetExpansionLevel());
   const InitialGlueScreen initial_screen =
       SelectInitialGlueScreenAndConsumeMovieCvrs(cvars, startup_level);
+  if (initial_screen == InitialGlueScreen::kMovie) {
+    (void)openwow::core::ida::CVar_FlushToFile();
+  }
   const std::string screen_name = InitialGlueScreenName(initial_screen);
 
   if (screen_name == "login" && glue_runtime_.IsMoviePlaying()) {
@@ -2567,6 +2707,11 @@ void GlueClient::Render(std::uint32_t now_ms, std::uint32_t frame_delta_ms,
                                     .widescreen = cvars.GetCVarBool("widescreen"),
                                     .particle_density = cvars.GetCVarFloat("particleDensity"),
                                 });
+      if (const auto cursor_view = ResolveFrameGraphView(
+              renderer_context_.get(), openwow::render::api::FrameGraphPassId::DebugOverlay)) {
+        game_loop_.cursor_manager().RenderOverlay(
+            *cursor_view, static_cast<float>(width), static_cast<float>(height));
+      }
     }
 
     for (auto &ev : glue_widgets_.ConsumeCursorChangedEvents()) {
@@ -2908,6 +3053,15 @@ bool GlueClient::TickScenario(ScenarioRunner::Stage stage, std::uint32_t now_ms)
 
 int GlueClient::Run() {
   running_ = true;
+#if defined(OPENWOW_PLATFORM_IOS)
+  mobile_log_export_command_id_ = openwow::debug::DebugConsole::Get().RegisterCommand(
+      "exportlogs", "Share a copy of the current client log",
+      [this](const std::vector<std::string>& args) -> std::string {
+        if (args.size() != 1) return "Usage: exportlogs";
+        mobile_log_export_requested_.store(true);
+        return {};
+      });
+#endif
   present_pacer_.Reset();
   stock_window_event_state_.Reset();
   auto &clock = openwow::core::GameClock::Instance();
@@ -2920,22 +3074,63 @@ int GlueClient::Run() {
   text_input_reactivation_pending_ = true;
   UpdateTextInputState();
 
+  constexpr std::array<const char*, 9> performance_phases{
+      "events", "glue_requests", "scheduler", "layout_beginframe", "glue_scripts",
+      "glue_prepare", "render", "pacing", "endframe"};
+  std::array<double, 9> performance_totals{};
+  std::uint64_t performance_frames = 0;
+  double performance_max_work_ms = 0.0;
+  double performance_gpu_total_ms = 0.0;
+  double performance_gpu_max_ms = 0.0;
+  std::uint64_t performance_gpu_samples = 0;
+  auto performance_window = openwow::diagnostics::PerformanceTimer{};
+  UiMode performance_last_mode = mode_;
+
   while (running_) {
-
-    const double elapsed_sec = clock.Tick();
-    const std::uint32_t now_ms =
-        SDL_GetTicks();
-    const std::uint32_t frame_delta_ms = static_cast<std::uint32_t>(clock.FrameDeltaMs());
-
+    const openwow::diagnostics::PerformanceTimer performance_frame;
+    std::array<double, 9> phase_ms{};
+    double last_phase_ms = 0.0;
+    const auto mark_phase = [&](const std::size_t phase) {
+      const double elapsed_ms = performance_frame.ElapsedMs();
+      phase_ms[phase] = elapsed_ms - last_phase_ms;
+      last_phase_ms = elapsed_ms;
+    };
     PumpPendingWindowEvents();
+#if defined(OPENWOW_PLATFORM_IOS)
+    if (running_ && application_active_ && mobile_log_export_requested_.exchange(false)) {
+      // Leave the Lua/input dispatch stack before presenting native UI.
+      CancelMobileInput();
+      if (mode_ == UiMode::kInWorld) ReleaseInWorldInput();
+      mobile::PresentLogExport(openwow::platform::WindowManager::Get().GetNativeHandle());
+      UpdateTextInputState();
+    }
+#endif
+    mark_phase(0);
     if (!running_)
       break;
+    if (!application_active_) {
+      performance_frames = 0;
+      performance_totals = {};
+      performance_max_work_ms = 0.0;
+      performance_gpu_total_ms = performance_gpu_max_ms = 0.0;
+      performance_gpu_samples = 0;
+      performance_window = openwow::diagnostics::PerformanceTimer{};
+      (void)clock.Tick();
+      SDL_Delay(50);
+      continue;
+    }
+
+    const double elapsed_sec = clock.Tick();
+    const std::uint32_t now_ms = SDL_GetTicks();
+    const std::uint32_t frame_delta_ms =
+        static_cast<std::uint32_t>(clock.FrameDeltaMs());
 
     if (debug_ui_control_adapter_) {
       debug_ui_control_adapter_->Pump(game_loop_.game_ui());
     }
 
     PumpGlueRequests(static_cast<float>(elapsed_sec));
+    mark_phase(1);
     if (!running_)
       break;
 
@@ -2946,6 +3141,11 @@ int GlueClient::Run() {
     }
 
     openwow::core::FrameScheduler::Instance().RunFrame(elapsed_sec);
+    mark_phase(2);
+    if (mode_ == UiMode::kInWorld) {
+      // Deferred touch clicks and script updates can change edit-box focus.
+      UpdateTextInputState();
+    }
 
     if (!TickScenario(ScenarioRunner::Stage::kPreRender, now_ms)) {
       running_ = false;
@@ -2977,8 +3177,10 @@ int GlueClient::Run() {
                                static_cast<std::uint32_t>(std::max(1, layout_height_))};
       renderer_context_->BeginFrame(frame_info);
     }
+    mark_phase(3);
 
     UpdateOnUpdateScripts(elapsed_sec);
+    mark_phase(4);
 
     const bool glue_character_scenes_active = mode_ != UiMode::kInWorld;
     if (glue_character_scenes_active) {
@@ -3002,10 +3204,12 @@ int GlueClient::Run() {
         &glue_widgets_, login_vfs_, glue_fonts_.has_value() ? &*glue_fonts_ : nullptr,
         layout_width_, layout_height_);
     DispatchPendingScrollRangeChangedEvents();
+    mark_phase(5);
 
     Render(now_ms, frame_delta_ms, elapsed_sec);
 
     const bool scenario_should_continue = TickScenario(ScenarioRunner::Stage::kPostRender, now_ms);
+    mark_phase(6);
 
     const bool benchmarking = IsBenchmarkRun();
 
@@ -3023,11 +3227,115 @@ int GlueClient::Run() {
         std::this_thread::yield();
       }
     }
+    mark_phase(7);
 
     if (renderer_context_ != nullptr) {
       renderer_context_->EndFrame();
     }
     DrainScreenshotNotifications();
+    mark_phase(8);
+    if (performance_frame.enabled()) {
+      if (!performance_window.enabled()) {
+        performance_window = performance_frame;
+      }
+      ++performance_frames;
+      for (std::size_t index = 0; index < phase_ms.size(); ++index) {
+        performance_totals[index] += phase_ms[index];
+      }
+      const double work_ms = last_phase_ms - phase_ms[7];
+      performance_max_work_ms = std::max(performance_max_work_ms, work_ms);
+      const auto* stats = renderer_context_ != nullptr ? &renderer_context_->Stats() : nullptr;
+      const bool gpu_valid = stats != nullptr && stats->gpu_time_begin > 0 &&
+                             stats->gpu_time_end > stats->gpu_time_begin &&
+                             stats->gpu_time_ms > 0.0F;
+      if (gpu_valid) {
+        ++performance_gpu_samples;
+        performance_gpu_total_ms += stats->gpu_time_ms;
+        performance_gpu_max_ms = std::max(performance_gpu_max_ms,
+                                          static_cast<double>(stats->gpu_time_ms));
+      }
+      const double window_ms = performance_window.ElapsedMs();
+      const bool summary_due = window_ms >= 5000.0;
+      const bool mode_changed = mode_ != performance_last_mode;
+      if (work_ms >= 50.0 || summary_due || mode_changed) {
+        std::ostringstream detail;
+        detail << "frame=" << clock.FrameCount()
+               << " mode=" << static_cast<int>(mode_)
+               << " scene=" << (game_loop_.IsLoading() ? "loading" :
+                                  game_loop_.IsInWorld() ? "world" : "glue")
+               << " work_wall_ms=" << work_ms;
+        for (std::size_t index = 0; index < phase_ms.size(); ++index) {
+          detail << ' ' << performance_phases[index] << "_ms=" << phase_ms[index];
+        }
+        detail << " renderScale=" << openwow::ui::game::CVarSystem::Instance().GetCVar("renderScale")
+               << " maxFPS=" << openwow::ui::game::CVarSystem::Instance().GetCVar("maxFPS");
+        if (stats != nullptr) {
+          detail << " output=" << stats->backbuffer.width << 'x' << stats->backbuffer.height
+                 << " bgfx_gpu_ms_delayed=" << (gpu_valid ? std::to_string(stats->gpu_time_ms) : "unavailable")
+                 << " draws=" << stats->draw_calls
+                 << " texture_bytes=" << stats->texture_memory_used
+                 << " target_bytes=" << stats->render_target_memory_used;
+        }
+        const auto& ui = game_loop_.game_ui().performance_counters();
+        const auto& layout = game_loop_.game_ui().retained_layout().metrics();
+        detail << " ui_candidates=" << ui.last_render_candidates
+               << " layout_candidates=" << layout.last_resolve_candidates
+               << " layout_full_total=" << layout.full_resolves
+               << " layout_incremental_total=" << layout.incremental_resolves;
+        if (mode_changed) {
+          openwow::diagnostics::LogPerformanceEvent("frame.mode_submitted", detail.str());
+        } else if (work_ms >= 50.0) {
+          static openwow::diagnostics::PerformanceLogSite performance_site;
+          openwow::diagnostics::LogPerformanceDuration(
+              performance_site, "frame.hitch", performance_frame, detail.str(), 50.0);
+        }
+        if (summary_due) {
+          auto* world_lua = game_loop_.game_ui().lua_state();
+          detail << " world_lua_kb=" << (world_lua != nullptr
+                     ? lua_gc(world_lua, LUA_GCCOUNT, 0) : 0)
+                 << " ui_regions=" << game_loop_.game_ui().frame_store().size()
+                 << " texture_cache_count=" << texture_manager_.CachedCount()
+                 << " texture_cache_bytes=" << texture_manager_.GetMemoryUsage()
+                 << " texture_budget_bytes=" << texture_manager_.GetMemoryBudget();
+#if defined(OPENWOW_PLATFORM_IOS)
+          const auto process = openwow::client::mobile::QueryProcessPerformanceMetrics();
+          detail << " physical_footprint_bytes=" << process.physical_footprint_bytes
+                 << " memory_query_status=" << process.memory_query_status
+                 << " thermal_state=" << process.thermal_state
+                 << " low_power_mode=" << process.low_power_mode;
+#endif
+          detail << " window_ms=" << window_ms
+                 << " window_frames=" << performance_frames
+                 << " window_fps=" << static_cast<double>(performance_frames) * 1000.0 / window_ms
+                 << " window_max_work_ms=" << performance_max_work_ms;
+          for (std::size_t index = 0; index < phase_ms.size(); ++index) {
+            detail << " avg_" << performance_phases[index] << "_ms="
+                   << performance_totals[index] / static_cast<double>(performance_frames);
+          }
+          detail << " gpu_samples=" << performance_gpu_samples
+                 << " avg_gpu_ms_delayed=" << (performance_gpu_samples != 0
+                      ? std::to_string(performance_gpu_total_ms / static_cast<double>(performance_gpu_samples))
+                      : "unavailable")
+                 << " max_gpu_ms_delayed=" << (performance_gpu_samples != 0
+                      ? std::to_string(performance_gpu_max_ms) : "unavailable");
+          openwow::diagnostics::LogPerformanceEvent("frame.summary", detail.str());
+          performance_frames = 0;
+          performance_totals = {};
+          performance_max_work_ms = 0.0;
+          performance_gpu_total_ms = performance_gpu_max_ms = 0.0;
+          performance_gpu_samples = 0;
+          performance_window = openwow::diagnostics::PerformanceTimer{};
+        }
+      }
+      performance_last_mode = mode_;
+    } else {
+      performance_frames = 0;
+      performance_totals = {};
+      performance_max_work_ms = 0.0;
+      performance_gpu_total_ms = performance_gpu_max_ms = 0.0;
+      performance_gpu_samples = 0;
+      performance_window = openwow::diagnostics::PerformanceTimer{};
+    }
     if (!scenario_should_continue) {
       running_ = false;
       break;
@@ -3038,6 +3346,9 @@ int GlueClient::Run() {
 }
 
 void GlueClient::Shutdown() {
+#if defined(OPENWOW_PLATFORM_IOS)
+  CancelMobileInput();
+#endif
   if (debug_ui_control_adapter_) {
 
     debug_ui_control_adapter_->Stop();
@@ -3056,7 +3367,7 @@ void GlueClient::Shutdown() {
     debug_control_endpoint_path_.clear();
   }
   openwow::ui::glue::LatestAgreementsService::Get().AbortAndReset();
-  ReleaseInWorldMouseButtons();
+  ReleaseInWorldInput();
   pending_window_events_.Clear();
   stock_window_event_state_.Reset();
 

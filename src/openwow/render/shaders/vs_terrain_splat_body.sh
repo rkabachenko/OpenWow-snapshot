@@ -17,7 +17,9 @@ vec3 safeNormalizeTerrain(vec3 value) {
 
 void main()
 {
-    gl_Position = mul(u_modelViewProj, vec4(a_position, 1.0));
+    // Keep projection separate from the large world-to-view translation.
+    vec4 viewPosition = mul(u_modelView, vec4(a_position, 1.0));
+    gl_Position = mul(u_proj, viewPosition);
 
     vec3 worldPosition = a_position;
     vec3 normal = safeNormalizeTerrain(a_normal);
@@ -45,8 +47,7 @@ void main()
     v_alphaUV = a_texcoord1;
     v_color0 = vec4(clamp(lighting, 0.0, 1.0) * a_color0.rgb, a_color0.a);
 
-    v_viewDist = openwowWorldFogDepth(
-        mul(u_modelView, vec4(a_position, 1.0)).xyz);
+    v_viewDist = openwowWorldFogDepth(viewPosition.xyz);
     v_worldPos = worldPosition;
 
 #if OPENWOW_TERRAIN_LAYER_ARRAY

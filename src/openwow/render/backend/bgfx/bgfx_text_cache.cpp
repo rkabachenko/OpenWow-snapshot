@@ -5,6 +5,7 @@
 #include <optional>
 #include <utility>
 
+#include "openwow/foundation/diagnostics/logging.h"
 #include "openwow/render/backend/bgfx/bgfx_glyph_atlas.h"
 #include "openwow/render/resources/fonts/font_string_flags.h"
 #include "openwow/render/resources/fonts/text_layout.h"
@@ -225,7 +226,7 @@ struct BgfxTextCache::CachedLayout {
 };
 
 BgfxTextCache::BgfxTextCache(const openwow::vfs::VirtualFileSystem* vfs)
-    : vfs_(vfs) {}
+    : vfs_(vfs), vfs_revision_(vfs != nullptr ? vfs->lookup_revision() : 0) {}
 
 BgfxTextCache::~BgfxTextCache() { Shutdown(); }
 
@@ -234,6 +235,14 @@ void BgfxTextCache::Shutdown() {
   atlases_.clear();
   faces_.clear();
   normalized_font_path_cache_.clear();
+  failed_faces_.clear();
+}
+
+void BgfxTextCache::RefreshVfsRevision() {
+  const std::uint64_t revision = vfs_ != nullptr ? vfs_->lookup_revision() : 0;
+  if (revision == vfs_revision_) return;
+  Shutdown();
+  vfs_revision_ = revision;
 }
 
 const std::string& BgfxTextCache::NormalizedFontPath(
@@ -259,13 +268,53 @@ std::shared_ptr<openwow::render::text::FontFace> BgfxTextCache::LoadFace(
   if (const auto found = faces_.find(key); found != faces_.end()) {
     return found->second;
   }
-  if (vfs_ == nullptr || height_px <= 0) return {};
-  const auto bytes = vfs_->ReadFileBytes(path);
-  if (!bytes || bytes->empty()) return {};
-  auto face =
-      openwow::render::text::FontFace::LoadMemory(path, *bytes, height_px,
-                                                  style);
-  if (face) faces_.emplace(key, face);
+  if (failed_faces_.contains(key) || height_px <= 0) return {};
+  if (vfs_ == nullptr) {
+    openwow::diagnostics::Log(
+        openwow::diagnostics::LogLevel::kError,
+        "BgfxTextCache: font initialization failed path=" + path +
+            " source=no-active-vfs pixel_height=" +
+            std::to_string(height_px) + " reason=vfs-unavailable");
+    failed_faces_.insert(key);
+    return {};
+  }
+  std::shared_ptr<openwow::render::text::FontFace> face;
+  const auto source_face = std::find_if(
+      faces_.begin(), faces_.end(), [&](const auto& entry) {
+        return entry.second->path() == path;
+      });
+  if (source_face != faces_.end()) {
+    face = source_face->second->WithSizeAndStyle(height_px, style);
+  } else {
+    auto bytes = vfs_->ReadFileBytes(path);
+    if (!bytes || bytes->empty()) {
+      const auto source = vfs_->Resolve(path);
+      openwow::diagnostics::Log(
+          openwow::diagnostics::LogLevel::kError,
+          "BgfxTextCache: font initialization failed path=" + path +
+              " source=" +
+              (source.has_value() ? source->string() : "missing") +
+              " pixel_height=" + std::to_string(height_px) +
+              " reason=read-failed-or-empty");
+      failed_faces_.insert(key);
+      return {};
+    }
+    face = openwow::render::text::FontFace::LoadMemory(
+        path, std::move(*bytes), height_px, style);
+  }
+  if (face) {
+    faces_.emplace(key, face);
+  } else {
+    const auto source = vfs_->Resolve(path);
+    openwow::diagnostics::Log(
+        openwow::diagnostics::LogLevel::kError,
+        "BgfxTextCache: font initialization failed path=" + path +
+            " source=" +
+            (source.has_value() ? source->string() : "missing") +
+            " pixel_height=" + std::to_string(height_px) +
+            " reason=font-decode-failed");
+    failed_faces_.insert(key);
+  }
   return face;
 }
 
@@ -390,6 +439,7 @@ std::unique_ptr<BgfxTextCache::CachedLayout> BgfxTextCache::BuildLayout(
 }
 
 const BgfxTextLayout* BgfxTextCache::Layout(const BgfxTextKey& input) {
+  RefreshVfsRevision();
 
   const std::string& font_path = NormalizedFontPath(input.font_path);
   const int outline_px = std::clamp(input.outline_px, 0, 4);
@@ -421,6 +471,7 @@ const BgfxTextLayout* BgfxTextCache::Layout(const BgfxTextKey& input) {
 int BgfxTextCache::MeasureLineWidthPx(const std::string& font_path,
                                       const int height_px,
                                       const std::string_view text) {
+  RefreshVfsRevision();
 
   auto face = LoadFace(font_path, height_px, {});
   if (!face || text.empty()) return 0;

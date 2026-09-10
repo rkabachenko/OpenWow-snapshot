@@ -218,6 +218,16 @@ void ApplyButtonMethods(lua_State *L) {
   lua_setfield(L, f, "Disable");
 
   lua_pushcclosure(L, [](lua_State *Ls) -> int {
+    const int self = ValidateFrameObjectSelf(Ls, "Button");
+    const bool enabled = lua_toboolean(Ls, 2) != 0;
+    lua_getfield(Ls, self, enabled ? "Enable" : "Disable");
+    lua_pushvalue(Ls, self);
+    lua_call(Ls, 1, 0);
+    return 0;
+  }, 0);
+  lua_setfield(L, f, "SetEnabled");
+
+  lua_pushcclosure(L, [](lua_State *Ls) -> int {
     if (!lua_istable(Ls, 1)) {
       lua_pushnumber(Ls, 1);
       return 1;

@@ -237,6 +237,7 @@ public:
   int PlayVoiceChatToggle(std::uint32_t sound_kit_id);
   void PlayErrorSpeech(std::uint32_t sound_kit_id);
   void PlayAmbientIdleSound(std::uint64_t unit_guid);
+  void ResetNpcVoiceSelection() noexcept { ambient_idle_last_guid_ = 0u; }
   int PlayScriptSound(const std::string &path, std::uint32_t sound_type);
   bool StopActiveSoundHandle(std::uint32_t handle_id, bool immediate, float fade_seconds, bool release_handle);
 

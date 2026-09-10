@@ -119,6 +119,7 @@ class FrameMaterializer final {
   void ApplyFullFrameSetup(const openwow::ui::framexml::UiFrame& frame);
   void WireScriptHandlers(const openwow::ui::framexml::UiFrame& frame,
                           int lua_ref);
+  void InvokeOnLoad(const openwow::ui::framexml::UiFrame& frame, int lua_ref);
   void SyncRuntimeMetadata(int frame_index,
                            openwow::ui::framexml::UiFrame& frame);
 

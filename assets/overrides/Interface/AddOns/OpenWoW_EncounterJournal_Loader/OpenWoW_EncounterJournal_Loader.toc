@@ -1,0 +1,8 @@
+## Interface: 30300
+## Title: OpenWoW 地下城手册入口
+## Notes: 按需加载 OpenWoW 地下城手册
+## Author: OpenWoW
+## Version: 1.0.0
+## SavedVariables: OpenWoWEncounterJournalLauncherDB
+
+OpenWoW_EncounterJournal_Loader.lua

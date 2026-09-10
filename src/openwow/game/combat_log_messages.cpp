@@ -1,6 +1,8 @@
 
 #include "openwow/game/combat_log_messages.h"
 #include "openwow/game/chat_display.h"
+#include "openwow/game/localization.h"
+#include "openwow/foundation/diagnostics/logging.h"
 
 #include <cstdio>
 #include <iterator>
@@ -152,10 +154,17 @@ void DisplayHappinessDrain(const ObjectManager& objects,
                            bool is_active_player) {
   std::string message = FormatHappinessDrainMessage(
       source_name, target_name, amount, is_active_player);
+  if (message.empty()) {
+    diagnostics::Log(diagnostics::LogLevel::kWarn,
+        "Pet happiness chat preparation failed source=" + std::to_string(source_guid) +
+            " target=" + std::to_string(target_guid) + " amount=" + std::to_string(amount) +
+            " reason=missing localized format");
+    return;
+  }
 
   ChatFrame_DisplayMessage(
       objects, message.c_str(), ChatDisplayType::kCombatPet, nullptr, 0,
-      nullptr, nullptr, nullptr, source_guid, 0, target_guid, 0, 0, nullptr);
+      nullptr, nullptr, nullptr, 0, 0, 0, 0, 0, nullptr);
 }
 
 std::string FormatHappinessDrainMessage(
@@ -164,16 +173,18 @@ std::string FormatHappinessDrainMessage(
     std::int32_t amount,
     bool is_self) {
 
-  char buf[3000];
-
+  const auto format = Localization::Get().GetString(
+      is_self ? "SPELLHAPPINESSDRAINSELF" : "SPELLHAPPINESSDRAINOTHER", "");
+  if (format.empty()) {
+    return {};
+  }
+  char buf[3000]{};
   if (is_self) {
-
-    std::snprintf(buf, sizeof(buf), "%s loses %d Happiness.",
-                  target_name.c_str(), amount);
+    FormatRuntimeStringTemplateInto(buf, sizeof(buf), format.c_str(),
+                                    target_name.c_str(), amount);
   } else {
-
-    std::snprintf(buf, sizeof(buf), "%s causes %s to lose %d Happiness.",
-                  source_name.c_str(), target_name.c_str(), amount);
+    FormatRuntimeStringTemplateInto(buf, sizeof(buf), format.c_str(),
+                                    source_name.c_str(), target_name.c_str(), amount);
   }
 
   return std::string(buf);

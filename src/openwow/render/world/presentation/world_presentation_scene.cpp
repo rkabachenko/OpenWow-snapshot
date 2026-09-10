@@ -1,12 +1,16 @@
 #include "openwow/render/world/presentation/world_presentation_scene.h"
 
+#include "openwow/core/platform_runtime_policy.h"
+
 #include "openwow/data/formats/dbc/dbc_loader.h"
 #include "openwow/render/backend/bgfx/bgfx_encoder_ledger.h"
 #include "openwow/render/backend/bgfx/renderer_context_services.h"
 #include "openwow/render/world/terrain/distant_terrain.h"
 #include "openwow/render/world/doodads/doodad_renderer.h"
+#include "openwow/render/world/detail_doodads/detail_doodad_renderer.h"
 #include "openwow/world/coordinates/frustum.h"
 #include "openwow/render/scene/shadow_presentation_runtime.h"
+#include "openwow/render/scene/object_renderer.h"
 #include "openwow/render/world/environment/sky_renderer.h"
 #include "openwow/render/world/terrain/terrain_renderer.h"
 #include "openwow/render/resources/textures/texture_manager.h"
@@ -18,6 +22,7 @@
 #include "openwow/world/world_render_pipeline.h"
 #include "openwow/render/api/math/view_projection.h"
 #include "openwow/foundation/diagnostics/logging.h"
+#include "openwow/foundation/diagnostics/performance_logging.h"
 #include "openwow/runtime/scheduling/frame_job_system.h"
 
 #include <algorithm>
@@ -37,14 +42,42 @@ namespace {
 template <typename>
 inline constexpr bool kUnhandledWorldPresentationCommand = false;
 
+constexpr float kRetailLowDetailNearOverlap = 50.0f;
+
+void LogWmoGroupFailure(const std::string& path, const std::uint32_t group,
+                         const char* phase, const char* reason) {
+  diagnostics::Log(diagnostics::LogLevel::kWarn,
+      "WorldPresentationScene: WMO group failed phase=" + std::string(phase) +
+          " path=" + path + " group=" + std::to_string(group) +
+          " reason=" + reason);
+}
+
 }
 
 struct WorldPresentationScene::ModelResource {
+  struct DoodadGroup {
+    std::vector<std::uint16_t> refs;
+    std::uint32_t flags{};
+  };
+
   std::unique_ptr<WmoRenderer> renderer;
   std::shared_ptr<const data::wmo::WmoRoot> root;
   std::size_t group_count{};
-  std::unordered_map<std::uint32_t,
-                     std::shared_ptr<const data::wmo::WmoGroup>> groups;
+  std::unordered_map<std::uint32_t, DoodadGroup> groups;
+};
+
+struct WorldPresentationScene::PendingTerrainTile {
+  struct Prepared {
+    PreparedTerrainTile terrain;
+    PreparedTerrainMaterialTextures materials;
+    std::chrono::milliseconds preparation_time{};
+    std::int32_t tile_x{};
+    std::int32_t tile_y{};
+  };
+
+  std::future<Prepared> future;
+  world::PublishTerrainTileCommand command;
+  bool started{false};
 };
 
 struct WorldPresentationScene::PendingWmoGroup {
@@ -77,6 +110,7 @@ bool WorldPresentationScene::Initialize() {
   weather_renderer_ = std::make_unique<WeatherRenderer>(texture_manager_);
   water_ = std::make_unique<WaterRenderer>(texture_manager_);
   doodads_ = std::make_unique<DoodadRenderer>(m2_system_);
+  detail_doodads_ = std::make_unique<DetailDoodadRenderer>(texture_manager_);
   doodads_->BindWmoDoodadM2EventSink(wmo_doodad_m2_event_sink_);
   distant_ = std::make_unique<DistantTerrainRenderer>();
   portal_fills_ = std::make_unique<WmoPortalFillRenderer>();
@@ -85,7 +119,7 @@ bool WorldPresentationScene::Initialize() {
   initialized_ = terrain_->Initialize() && shadows_->Initialize() &&
                  sky_->Initialize() &&
                  weather_renderer_->Initialize() && water_->Initialize() &&
-                 doodads_->Initialize();
+                 doodads_->Initialize() && detail_doodads_->Initialize();
   static_cast<void>(distant_->Initialize());
 
   if (openwow::render::IsRendererContextActive()) {
@@ -119,6 +153,10 @@ bool WorldPresentationScene::IsDoodadWorldEntryLoadDrained() const {
   return !doodads_ || doodads_->IsWorldEntryLoadDrained();
 }
 
+bool WorldPresentationScene::IsTerrainWorldEntryLoadDrained() const {
+  return pending_terrain_tiles_.empty();
+}
+
 void WorldPresentationScene::BindWmoDoodadM2EventSink(
     std::function<void(const WmoDoodadM2PresentationEvent&)> sink) {
   wmo_doodad_m2_event_sink_ = std::move(sink);
@@ -128,6 +166,12 @@ void WorldPresentationScene::BindWmoDoodadM2EventSink(
 }
 
 void WorldPresentationScene::ResetMap() {
+  for (auto& pending : pending_terrain_tiles_) {
+    if (pending && pending->started) {
+      retired_terrain_tiles_.push_back(std::move(pending));
+    }
+  }
+  pending_terrain_tiles_.clear();
   pending_wmo_groups_.clear();
   for (auto& [key, model] : models_) {
     (void)key;
@@ -136,6 +180,7 @@ void WorldPresentationScene::ResetMap() {
   models_.clear();
   instances_.clear();
   if (doodads_) doodads_->Clear();
+  if (detail_doodads_) detail_doodads_->Clear();
   if (terrain_) terrain_->ClearTerrain();
   if (shadows_) shadows_->ResetMap();
   if (water_) water_->ClearSurfaces();
@@ -143,6 +188,177 @@ void WorldPresentationScene::ResetMap() {
   if (sky_) sky_->Reset();
   if (weather_renderer_) weather_renderer_->Reset();
   world::ResetWeather(weather_);
+}
+
+void WorldPresentationScene::QueueTerrainTilePreparation(
+    const world::PublishTerrainTileCommand& command) {
+  if (!command.adt) {
+    return;
+  }
+
+  RetireTerrainTilePreparation(command.tile_x, command.tile_y);
+  auto pending = std::make_unique<PendingTerrainTile>();
+  pending->command = command;
+  pending_terrain_tiles_.push_back(std::move(pending));
+}
+
+void WorldPresentationScene::RetireTerrainTilePreparation(
+    const std::int32_t tile_x, const std::int32_t tile_y) {
+  auto pending = std::find_if(
+      pending_terrain_tiles_.begin(), pending_terrain_tiles_.end(),
+      [tile_x, tile_y](const auto& entry) {
+        return entry && entry->command.tile_x == tile_x &&
+               entry->command.tile_y == tile_y;
+      });
+  if (pending == pending_terrain_tiles_.end()) {
+    return;
+  }
+  if ((*pending)->started) {
+    retired_terrain_tiles_.push_back(std::move(*pending));
+  }
+  pending_terrain_tiles_.erase(pending);
+}
+
+void WorldPresentationScene::DrainRetiredTerrainTilePreparations(
+    const bool wait) {
+  auto retired = retired_terrain_tiles_.begin();
+  while (retired != retired_terrain_tiles_.end()) {
+    PendingTerrainTile& pending = **retired;
+    if (!pending.future.valid()) {
+      retired = retired_terrain_tiles_.erase(retired);
+      continue;
+    }
+    if (!wait && pending.future.wait_for(std::chrono::seconds(0)) !=
+                     std::future_status::ready) {
+      ++retired;
+      continue;
+    }
+    try {
+      static_cast<void>(pending.future.get());
+    } catch (const std::exception& exception) {
+      diagnostics::Log(
+          diagnostics::LogLevel::kWarn,
+          "WorldPresentationScene: retired terrain preparation failed tile=(" +
+              std::to_string(pending.command.tile_x) + "," +
+              std::to_string(pending.command.tile_y) + ") reason=" +
+              exception.what());
+    } catch (...) {
+      diagnostics::Log(
+          diagnostics::LogLevel::kWarn,
+          "WorldPresentationScene: retired terrain preparation failed tile=(" +
+              std::to_string(pending.command.tile_x) + "," +
+              std::to_string(pending.command.tile_y) +
+              ") reason=unknown exception");
+    }
+    retired = retired_terrain_tiles_.erase(retired);
+  }
+}
+
+void WorldPresentationScene::StartQueuedTerrainTilePreparation() {
+  if (std::ranges::any_of(pending_terrain_tiles_, [](const auto& pending) {
+        return pending && pending->started;
+      }) ||
+      !retired_terrain_tiles_.empty()) {
+    return;
+  }
+
+  const auto pending = std::find_if(
+      pending_terrain_tiles_.begin(), pending_terrain_tiles_.end(),
+      [](const auto& entry) { return entry && !entry->started; });
+  if (pending == pending_terrain_tiles_.end()) {
+    return;
+  }
+
+  PendingTerrainTile& entry = **pending;
+  const auto adt = entry.command.adt;
+  const auto tile_x = entry.command.tile_x;
+  const auto tile_y = entry.command.tile_y;
+  const auto big_alpha = entry.command.big_alpha;
+  const auto loader = load_file_;
+  try {
+    entry.future = std::async(
+        std::launch::async,
+        [adt, tile_x, tile_y, big_alpha, loader]() mutable {
+          const auto started = std::chrono::steady_clock::now();
+          PendingTerrainTile::Prepared prepared{
+              .tile_x = tile_x,
+              .tile_y = tile_y,
+          };
+          prepared.terrain = PrepareAdtTerrainTile(
+              *adt, static_cast<std::uint32_t>(tile_x),
+              static_cast<std::uint32_t>(tile_y), big_alpha,
+              openwow::core::GetPlatformRuntimePolicy()
+                  .terrain_alpha_map_dimension);
+          prepared.materials =
+              PrepareTerrainMaterialTextures(prepared.terrain, loader);
+          prepared.preparation_time =
+              std::chrono::duration_cast<std::chrono::milliseconds>(
+                  std::chrono::steady_clock::now() - started);
+          return prepared;
+        });
+    entry.started = true;
+  } catch (const std::exception& exception) {
+    diagnostics::Log(
+        diagnostics::LogLevel::kWarn,
+        "WorldPresentationScene: terrain preparation scheduling failed tile=(" +
+            std::to_string(tile_x) + "," + std::to_string(tile_y) +
+            ") reason=" + exception.what());
+  } catch (...) {
+    diagnostics::Log(
+        diagnostics::LogLevel::kWarn,
+        "WorldPresentationScene: terrain preparation scheduling failed tile=(" +
+            std::to_string(tile_x) + "," + std::to_string(tile_y) +
+            ") reason=unknown exception");
+  }
+}
+
+void WorldPresentationScene::PumpPreparedTerrainTiles() {
+  auto pending = std::find_if(
+      pending_terrain_tiles_.begin(), pending_terrain_tiles_.end(),
+      [](const auto& entry) { return entry && entry->started; });
+  if (pending == pending_terrain_tiles_.end() ||
+      !(*pending)->future.valid() ||
+      (*pending)->future.wait_for(std::chrono::seconds(0)) !=
+          std::future_status::ready) {
+    return;
+  }
+
+  const auto tile_x = (*pending)->command.tile_x;
+  const auto tile_y = (*pending)->command.tile_y;
+  try {
+    auto prepared = (*pending)->future.get();
+    const auto commit_started = std::chrono::steady_clock::now();
+    if (terrain_) {
+      terrain_->UploadPreparedAdt(prepared.terrain, prepared.materials,
+                                  prepared.tile_x, prepared.tile_y);
+    }
+    const auto commit_time =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - commit_started);
+    if (prepared.preparation_time >= std::chrono::milliseconds(100) ||
+        commit_time >= std::chrono::milliseconds(16)) {
+      diagnostics::Log(
+          diagnostics::LogLevel::kWarn,
+          "WorldPresentationScene: slow terrain pipeline tile=(" +
+              std::to_string(prepared.tile_x) + "," +
+              std::to_string(prepared.tile_y) + ") preparation_ms=" +
+              std::to_string(prepared.preparation_time.count()) +
+              " commit_ms=" + std::to_string(commit_time.count()));
+    }
+  } catch (const std::exception& exception) {
+    diagnostics::Log(
+        diagnostics::LogLevel::kWarn,
+        "WorldPresentationScene: terrain preparation failed tile=(" +
+            std::to_string(tile_x) + "," + std::to_string(tile_y) +
+            ") reason=" + exception.what());
+  } catch (...) {
+    diagnostics::Log(
+        diagnostics::LogLevel::kWarn,
+        "WorldPresentationScene: terrain preparation failed tile=(" +
+            std::to_string(tile_x) + "," + std::to_string(tile_y) +
+            ") reason=unknown exception");
+  }
+  pending_terrain_tiles_.erase(pending);
 }
 
 void WorldPresentationScene::QueueWmoGroupPreparation(
@@ -157,7 +373,12 @@ void WorldPresentationScene::QueueWmoGroupPreparation(
 }
 
 void WorldPresentationScene::StartQueuedWmoGroupPreparations() {
-  constexpr std::size_t kMaxConcurrentWmoGroupPreparations = 4u;
+  constexpr std::size_t kMaxConcurrentWmoGroupPreparations =
+#if defined(OPENWOW_PLATFORM_IOS)
+      1u;
+#else
+      4u;
+#endif
   std::size_t active = 0u;
   std::unordered_set<std::string> renderer_attempted;
   for (const auto& [_, pending] : pending_wmo_groups_) {
@@ -182,14 +403,27 @@ void WorldPresentationScene::StartQueuedWmoGroupPreparations() {
     const auto command = pending->command;
     const auto root = model->second->root;
     const auto loader = load_file_;
+    // Groups in the same WMO commonly share materials. Their GPU leases are
+    // already owned by the renderer; decoding them again for every group
+    // wastes worker time and temporary memory without changing publication.
+    std::vector<std::uint32_t> missing_materials;
+    for (const auto material : command.material_indices) {
+      if (!model->second->renderer ||
+          !model->second->renderer->IsMaterialResident(material)) {
+        missing_materials.push_back(material);
+      }
+    }
     try {
       pending->future = std::async(
-          std::launch::async, [command, root, loader]() mutable {
+          std::launch::async,
+          [command, root, loader,
+           missing_materials = std::move(missing_materials)]() mutable {
+          const openwow::diagnostics::PerformanceTimer performance;
           PendingWmoGroup::Prepared prepared{.command = std::move(command)};
           prepared.mesh = GenerateWmoGroupMesh(
               *root, *prepared.command.group);
           prepared.textures = WmoRenderer::PrepareMaterialTextures(
-              *root, prepared.command.material_indices, loader);
+              *root, missing_materials, loader);
           prepared.publication_bytes =
               prepared.mesh.vertices.size() * sizeof(WmoVertex) +
               prepared.mesh.composite_vertices.size() *
@@ -200,11 +434,26 @@ void WorldPresentationScene::StartQueuedWmoGroupPreparations() {
               prepared.publication_bytes += upload->upload_size;
             }
           }
+          if (performance.enabled() && performance.ElapsedMs() >= 20.0) {
+            static openwow::diagnostics::PerformanceLogSite performance_site;
+            openwow::diagnostics::LogPerformanceDuration(
+                performance_site, "world.wmo_prepare", performance,
+                "path=" + prepared.command.resource_key + " group=" +
+                    std::to_string(prepared.command.group_index) +
+                    " materials=" +
+                    std::to_string(prepared.command.material_indices.size()) +
+                    " missing_materials=" + std::to_string(missing_materials.size()) +
+                    " upload_bytes=" + std::to_string(prepared.publication_bytes));
+          }
           return prepared;
         });
       pending->started = true;
       ++active;
+    } catch (const std::exception& exception) {
+      LogWmoGroupFailure(key.first, key.second, "schedule", exception.what());
+      pending->started = false;
     } catch (...) {
+      LogWmoGroupFailure(key.first, key.second, "schedule", "unknown exception");
       pending->started = false;
     }
   }
@@ -246,7 +495,18 @@ void WorldPresentationScene::PumpPreparedWmoGroups(
       }
       try {
         pending.prepared = pending.future.get();
+      } catch (const std::exception& exception) {
+        LogWmoGroupFailure(it->first.first, it->first.second,
+                           "prepare", exception.what());
+        acknowledgment.wmo_groups.push_back({
+            .resource_key = it->first.first,
+            .group_index = it->first.second,
+            .status = world::WmoGroupPublicationStatus::kRetryableFailure});
+        it = pending_wmo_groups_.erase(it);
+        continue;
       } catch (...) {
+        LogWmoGroupFailure(it->first.first, it->first.second,
+                           "prepare", "unknown exception");
         acknowledgment.wmo_groups.push_back({
             .resource_key = it->first.first,
             .group_index = it->first.second,
@@ -267,6 +527,8 @@ void WorldPresentationScene::PumpPreparedWmoGroups(
     }
     const auto model = models_.find(prepared.command.resource_key);
     if (model == models_.end() || !model->second->root) {
+      LogWmoGroupFailure(it->first.first, it->first.second,
+                         "publish", "missing model root");
       acknowledgment.wmo_groups.push_back({
           .resource_key = it->first.first,
           .group_index = it->first.second,
@@ -274,19 +536,26 @@ void WorldPresentationScene::PumpPreparedWmoGroups(
       it = pending_wmo_groups_.erase(it);
       continue;
     }
-    model->second->groups[prepared.command.group_index] =
-        prepared.command.group;
+    ModelResource::DoodadGroup doodad_group{
+        .refs = prepared.command.group->doodadRefs,
+        .flags = prepared.command.group->header.flags,
+    };
+    model->second->groups.insert_or_assign(
+        prepared.command.group_index, std::move(doodad_group));
     for (auto& [id, instance] : instances_) {
       (void)id;
       if (instance.resource_key == prepared.command.resource_key) {
         doodads_->PublishStreamingWmoGroup(
             instance.doodad_owner, *model->second->root,
-            *prepared.command.group,
+            prepared.command.group->doodadRefs,
+            prepared.command.group->header.flags,
             static_cast<std::uint16_t>(prepared.command.group_index),
             instance.transform);
       }
     }
     if (!model->second->renderer) {
+      LogWmoGroupFailure(it->first.first, it->first.second,
+                         "publish", "renderer unavailable");
       acknowledgment.wmo_groups.push_back({
           .resource_key = it->first.first,
           .group_index = it->first.second,
@@ -321,7 +590,13 @@ void WorldPresentationScene::PumpPreparedWmoGroups(
               prepared.mesh);
         }
       }
+    } catch (const std::exception& exception) {
+      LogWmoGroupFailure(it->first.first, it->first.second,
+                         "publish", exception.what());
+      publication_status = world::WmoGroupPublicationStatus::kRetryableFailure;
     } catch (...) {
+      LogWmoGroupFailure(it->first.first, it->first.second,
+                         "publish", "unknown exception");
       publication_status = world::WmoGroupPublicationStatus::kRetryableFailure;
     }
     if (publication_status == world::WmoGroupPublicationStatus::kFailed ||
@@ -350,6 +625,7 @@ void WorldPresentationScene::PumpPreparedWmoGroups(
 void WorldPresentationScene::Shutdown() {
   if (!terrain_) return;
   ResetMap();
+  DrainRetiredTerrainTilePreparations(true);
 
   if (wmo_shader_warm_up_) {
     wmo_shader_warm_up_->Shutdown();
@@ -359,12 +635,13 @@ void WorldPresentationScene::Shutdown() {
   distant_->Shutdown();
   if (portal_fills_) portal_fills_->Shutdown();
   doodads_->Shutdown();
+  detail_doodads_->Shutdown();
   water_->Shutdown();
   weather_renderer_->Shutdown();
   sky_->Shutdown();
   shadows_->Shutdown();
   terrain_->Shutdown();
-  distant_.reset(); doodads_.reset(); water_.reset();
+  distant_.reset(); detail_doodads_.reset(); doodads_.reset(); water_.reset();
   weather_renderer_.reset(); sky_.reset(); shadows_.reset(); terrain_.reset();
   portal_fills_.reset();
   initialized_ = false;
@@ -374,6 +651,7 @@ void WorldPresentationScene::SetFileLoader(LoadFileCallback callback) {
   load_file_ = std::move(callback);
   if (sky_) sky_->SetFileLoader(load_file_);
   if (doodads_) doodads_->SetFileLoader(load_file_);
+  if (detail_doodads_) detail_doodads_->SetFileLoader(load_file_);
 }
 
 void WorldPresentationScene::SetPrefixFileLoader(
@@ -385,6 +663,9 @@ void WorldPresentationScene::SetPrefixFileLoader(
 
 void WorldPresentationScene::BindDbc(const data::dbc::DbcLoader* dbc) {
   dbc_ = dbc;
+  if (detail_doodads_) {
+    detail_doodads_->BindDbc(dbc_);
+  }
   if (water_) {
     water_->SetLiquidStores(
         [this](const std::uint32_t id) {
@@ -431,6 +712,8 @@ world::WorldPresentationAcknowledgment WorldPresentationScene::Consume(
     ResetMap();
   }
   generation_ = batch.generation;
+  DrainRetiredTerrainTilePreparations(false);
+  PumpPreparedTerrainTiles();
   PumpPreparedWmoGroups(acknowledgment);
   for (auto& command : batch.commands) {
     std::visit([this, &acknowledgment,
@@ -443,23 +726,34 @@ world::WorldPresentationAcknowledgment WorldPresentationScene::Consume(
         if (distant_ && value.wdl) distant_->LoadWdl(*value.wdl);
       } else if constexpr (std::is_same_v<T, world::PublishTerrainTileCommand>) {
         if (terrain_ && value.adt) {
-
-          const auto prepared = PrepareAdtTerrainTile(
-              *value.adt, static_cast<std::uint32_t>(value.tile_x),
-              static_cast<std::uint32_t>(value.tile_y), value.big_alpha);
-          const auto materials =
-              PrepareTerrainMaterialTextures(prepared, load_file_);
-          terrain_->UploadPreparedAdt(prepared, materials, value.tile_x,
-                                      value.tile_y);
+          if (openwow::core::GetPlatformRuntimePolicy()
+                  .constrained_mobile_runtime) {
+            QueueTerrainTilePreparation(value);
+          } else {
+            const auto prepared = PrepareAdtTerrainTile(
+                *value.adt, static_cast<std::uint32_t>(value.tile_x),
+                static_cast<std::uint32_t>(value.tile_y), value.big_alpha,
+                openwow::core::GetPlatformRuntimePolicy()
+                    .terrain_alpha_map_dimension);
+            const auto materials =
+                PrepareTerrainMaterialTextures(prepared, load_file_);
+            terrain_->UploadPreparedAdt(prepared, materials, value.tile_x,
+                                        value.tile_y);
+          }
         }
         if (doodads_ && value.adt)
           doodads_->LoadFromAdt(*value.adt, value.tile_x, value.tile_y);
+        if (detail_doodads_ && value.adt)
+          detail_doodads_->LoadFromAdt(value.adt, value.tile_x, value.tile_y);
         if (water_ && value.liquids)
           water_->ReplaceOwnedWaterHeightfields(value.owner, *value.liquids);
         if (distant_) distant_->SetDetailedTile(value.tile_x, value.tile_y, true);
       } else if constexpr (std::is_same_v<T, world::RemoveTerrainTileCommand>) {
+        RetireTerrainTilePreparation(value.tile_x, value.tile_y);
         if (terrain_) terrain_->RemoveAdt(value.tile_x, value.tile_y);
         if (doodads_) doodads_->UnloadTile(value.tile_x, value.tile_y);
+        if (detail_doodads_)
+          detail_doodads_->UnloadTile(value.tile_x, value.tile_y);
         if (water_) water_->RemoveOwnedWaterHeightfields(value.owner);
         if (distant_) distant_->SetDetailedTile(value.tile_x, value.tile_y, false);
       } else if constexpr (std::is_same_v<T, world::BeginWorldModelCommand>) {
@@ -514,10 +808,10 @@ world::WorldPresentationAcknowledgment WorldPresentationScene::Consume(
           doodads_->SetWmoInstanceTransferDestinationGroups(
               published->second.doodad_owner, *model->second->root);
           for (const auto& [group_index, group] : model->second->groups) {
-            if (group && group_index <=
-                             std::numeric_limits<std::uint16_t>::max()) {
+            if (group_index <= std::numeric_limits<std::uint16_t>::max()) {
               doodads_->PublishStreamingWmoGroup(
-                  published->second.doodad_owner, *model->second->root, *group,
+                  published->second.doodad_owner, *model->second->root,
+                  group.refs, group.flags,
                   static_cast<std::uint16_t>(group_index),
                   published->second.transform);
             }
@@ -557,7 +851,7 @@ world::WorldPresentationAcknowledgment WorldPresentationScene::Consume(
 
         world::SetWeather(weather_, value.type, value.density,
                           value.row ? &*value.row : nullptr, value.smooth,
-                          value.row ? value.row->effect_color_r : 1.0f,
+                          value.row ? value.row->transition_value : 1.0f,
                           weather_clock_);
       } else if constexpr (std::is_same_v<T, world::SpawnWaterRippleCommand>) {
         if (water_) water_->SpawnWaterRipple(value);
@@ -567,6 +861,7 @@ world::WorldPresentationAcknowledgment WorldPresentationScene::Consume(
       }
     }, command);
   }
+  StartQueuedTerrainTilePreparation();
   StartQueuedWmoGroupPreparations();
   return acknowledgment;
 }
@@ -578,18 +873,27 @@ void WorldPresentationScene::SetWeatherGroundHeightSampler(
   }
 }
 
+void WorldPresentationScene::SetWeatherCollisionSampler(
+    WeatherRenderer::CollisionSampler sampler) {
+  if (weather_renderer_) {
+    weather_renderer_->SetCollisionSampler(std::move(sampler));
+  }
+}
+
 void WorldPresentationScene::Update(const float dt,
                                     const RenderVec3& position,
                                     const float environment_detail,
                                     const float weather_particle_density,
                                     const bool use_weather_shaders,
-                                    const bool indoors) {
+                                    const bool indoors,
+                                    const float facing) {
   if (!initialized_) return;
   SetEnvironmentDetail(environment_detail);
   weather_clock_ += static_cast<std::uint32_t>(std::max(0.0f, dt) * 1000.0f);
   world::UpdateWeather(
       weather_, {.now = weather_clock_,
                   .position = position,
+                  .facing = facing,
                   .movement_speed = 0.0f,
                   .indoors = indoors});
   weather_renderer_->Update(dt, position, weather_,
@@ -599,6 +903,7 @@ void WorldPresentationScene::Update(const float dt,
 
   doodads_->UpdateLoading();
   doodads_->Update(dt);
+  detail_doodads_->Update(position);
 }
 
 void WorldPresentationScene::Render(
@@ -625,6 +930,8 @@ void WorldPresentationScene::Render(
   env.models.ambient_color = snapshot.environment.model_ambient;
   env.models.diffuse_color = snapshot.environment.model_diffuse;
   env.models.fog = env.fog;
+  env.models.receives_world_shadows =
+      snapshot.shadows.enabled && snapshot.shadows.quality >= 3u;
   env.surface_to_light = snapshot.environment.light_direction;
   env.ambient = snapshot.environment.ambient;
   env.diffuse = snapshot.environment.diffuse;
@@ -648,6 +955,22 @@ void WorldPresentationScene::Render(
   env.sky = sky_colors;
   const auto& pos = snapshot.camera.position;
 
+  const float low_detail_near_clip =
+      snapshot.camera.far_clip - kRetailLowDetailNearOverlap;
+  RenderMatrix4x4 low_detail_projection = snapshot.camera.projection;
+  const float low_detail_depth_range =
+      snapshot.camera.low_detail_far_clip - low_detail_near_clip;
+  low_detail_projection[10] =
+      (low_detail_near_clip + snapshot.camera.low_detail_far_clip) /
+      low_detail_depth_range;
+  low_detail_projection[14] =
+      (-2.0f * low_detail_near_clip * snapshot.camera.low_detail_far_clip) /
+      low_detail_depth_range;
+  const ViewProjection low_detail_matrices = ViewProjection::CopyOf(
+      snapshot.camera.view.data(), low_detail_projection.data(),
+      matrices.homogeneous_depth());
+  const auto low_detail_gpu = low_detail_matrices.AsBgfxColumnMajor();
+
   bgfx::setViewMode(views.scene, bgfx::ViewMode::Default);
 
   bgfx::setViewTransform(views.scene, gpu.view.data(), gpu.projection.data());
@@ -658,11 +981,46 @@ void WorldPresentationScene::Render(
                          matrices.bgfx_projection().data());
   bgfx::setViewClear(views.wmo, BGFX_CLEAR_NONE);
 
+  bgfx::setViewMode(views.low_detail, bgfx::ViewMode::Sequential);
+  bgfx::setViewRect(views.low_detail, 0, 0, screen_width, screen_height);
+  bgfx::setViewTransform(views.low_detail, low_detail_gpu.view.data(),
+                         low_detail_gpu.projection.data());
+  // bgfx does not expose the viewport minZ/maxZ interval used by the retail
+  // client. Preserve the real low-detail projection so clipping remains
+  // correct, then isolate its depth from the foreground with depth-only view
+  // boundaries. Color is retained, so the low-detail world remains behind the
+  // normal world without admitting geometry outside either projection.
+  bgfx::setViewClear(views.low_detail, BGFX_CLEAR_DEPTH, 0x00000000u,
+                     1.0f, 0u);
+  bgfx::touch(views.low_detail);
+
+  bgfx::setViewMode(views.foreground_depth_reset,
+                    bgfx::ViewMode::Sequential);
+  bgfx::setViewRect(views.foreground_depth_reset, 0, 0, screen_width,
+                    screen_height);
+  bgfx::setViewTransform(views.foreground_depth_reset, gpu.view.data(),
+                         gpu.projection.data());
+  bgfx::setViewClear(views.foreground_depth_reset, BGFX_CLEAR_DEPTH,
+                     0x00000000u, 1.0f, 0u);
+  bgfx::touch(views.foreground_depth_reset);
+
+  bgfx::setViewMode(views.doodads, bgfx::ViewMode::Sequential);
+  bgfx::setViewRect(views.doodads, 0, 0, screen_width, screen_height);
+  bgfx::setViewTransform(views.doodads, matrices.bgfx_view().data(),
+                         matrices.bgfx_projection().data());
+  bgfx::setViewClear(views.doodads, BGFX_CLEAR_NONE);
+
   bgfx::setViewMode(views.alpha, bgfx::ViewMode::DepthAscending);
   bgfx::setViewRect(views.alpha, 0, 0, screen_width, screen_height);
   bgfx::setViewTransform(views.alpha, matrices.bgfx_view().data(),
                          matrices.bgfx_projection().data());
   bgfx::setViewClear(views.alpha, BGFX_CLEAR_NONE);
+
+  bgfx::setViewMode(views.detail_doodads, bgfx::ViewMode::Sequential);
+  bgfx::setViewRect(views.detail_doodads, 0, 0, screen_width, screen_height);
+  bgfx::setViewTransform(views.detail_doodads, matrices.bgfx_view().data(),
+                         matrices.bgfx_projection().data());
+  bgfx::setViewClear(views.detail_doodads, BGFX_CLEAR_NONE);
 
   const auto& sky_rect = snapshot.environment.sky_clip_rect;
   const float capture_w = static_cast<float>(screen_width);
@@ -693,8 +1051,12 @@ void WorldPresentationScene::Render(
         static_cast<std::uint16_t>(sky_scissor_bottom - sky_scissor_y));
   }
 
-  const DrawSortDepth terrain_sort_depth{.camera_position = snapshot.camera.position,
-                                         .far_clip = snapshot.camera.far_clip};
+  const DrawSortDepth terrain_sort_depth{
+      .camera_position = snapshot.camera.position,
+      .far_clip = snapshot.camera.far_clip};
+  const DrawSortDepth low_detail_sort_depth{
+      .camera_position = snapshot.camera.position,
+      .far_clip = snapshot.camera.low_detail_far_clip};
   sky_->Update(0.0f, snapshot.time_of_day_hours);
   sky_->SetTimeOfDay(snapshot.time_of_day_hours);
   sky_->SetColors(sky_colors);
@@ -704,13 +1066,22 @@ void WorldPresentationScene::Render(
     .spell_visual_tint_blend = static_cast<std::uint8_t>(
         std::clamp(snapshot.spell_visual_tint_blend, 0.0f, 255.0f))});
 
-  const bool render_distant_terrain =
-      snapshot.distant_terrain_enabled &&
+  const bool render_low_detail_world =
       openwow::world::CWorld_HasRenderFlag(
           openwow::world::WorldRenderFlag::kTerrainLowDetail);
+  const bool render_distant_terrain =
+      snapshot.distant_terrain_enabled && render_low_detail_world;
 
   const bool render_terrain = snapshot.environment.terrain_visible;
   world::Frustum terrain_frustum = frustum;
+  world::Frustum low_detail_frustum{};
+  world::Frustum low_detail_terrain_frustum{};
+  const world::Matrix4 low_detail_view_projection = world::Multiply(
+      std::span<const float, 16>{snapshot.camera.view},
+      std::span<const float, 16>{low_detail_projection});
+  low_detail_frustum.ExtractFromViewProj(
+      std::span<const float, 16>{low_detail_view_projection});
+  low_detail_terrain_frustum = low_detail_frustum;
   if (render_terrain) {
     const auto& terrain_rect = snapshot.environment.terrain_clip_rect;
     const bool full_window = terrain_rect.min_x <= -1.0f &&
@@ -725,10 +1096,14 @@ void WorldPresentationScene::Render(
       terrain_frustum.ExtractFromViewProjWindow(
           std::span<const float, 16>{view_projection}, terrain_rect.min_x,
           terrain_rect.min_y, terrain_rect.max_x, terrain_rect.max_y);
+      low_detail_terrain_frustum.ExtractFromViewProjWindow(
+          std::span<const float, 16>{low_detail_view_projection},
+          terrain_rect.min_x, terrain_rect.min_y, terrain_rect.max_x,
+          terrain_rect.max_y);
     }
   }
   if (render_distant_terrain) {
-    distant_->SetFrustum(&terrain_frustum);
+    distant_->SetFrustum(&low_detail_terrain_frustum);
   }
   terrain_->SetFrustum(&terrain_frustum);
 
@@ -752,13 +1127,14 @@ void WorldPresentationScene::Render(
     sky_->Render(views.sky, gpu.view.data(), gpu.projection.data(),
                  pos[0], pos[1], pos[2]);
 
-    sky_->RenderZoneSkybox(views.sky, gpu.view.data(), gpu.projection.data(),
+    sky_->RenderZoneSkybox(views.sky, gpu.view.data(),
+                           gpu.projection.data(),
                            pos[0], pos[1], pos[2]);
   };
 
   const auto encode_distant_terrain = [&](bgfx::Encoder* const encoder) {
     if (render_terrain && render_distant_terrain) {
-      distant_->Render(views.scene, env, terrain_sort_depth, encoder);
+      distant_->Render(views.low_detail, env, low_detail_sort_depth, encoder);
     }
   };
   const auto encode_detailed_terrain = [&](bgfx::Encoder* const encoder) {
@@ -821,9 +1197,31 @@ void WorldPresentationScene::Render(
     }
   };
 
+  const auto encode_low_detail_world = [&](bgfx::Encoder* const encoder) {
+    if (!render_low_detail_world) {
+      return;
+    }
+    encode_distant_terrain(encoder);
+    for (const ResolvedWmoPlacement& placement : wmo_placement_scratch_) {
+      const auto& item = *placement.item;
+      auto& renderer = *placement.renderer;
+      renderer.SetFogParams(env.fog);
+      renderer.SetSunDirection(env.surface_to_light[0], env.surface_to_light[1],
+                               env.surface_to_light[2]);
+      renderer.SetLightingPalette(env.wmo);
+      renderer.SetNightGlowIntensity(snapshot.wmo_night_glow);
+      renderer.SetFrustum(&low_detail_frustum);
+      static_cast<void>(renderer.Render(
+          views.low_detail, low_detail_gpu.view.data(),
+          low_detail_gpu.projection.data(), item.transform, nullptr, {},
+          screen_width, screen_height, nullptr, encoder, false,
+          WmoGroupRenderFilter::kExteriorOnly));
+    }
+  };
+
   const auto encode_doodad_opaque = [&] {
     doodads_->SetWorldM2SceneState(env.models);
-    doodads_->Render(views.scene, gpu.view.data(), gpu.projection.data(), &frustum,
+    doodads_->Render(views.doodads, gpu.view.data(), gpu.projection.data(), &frustum,
       pos[0], pos[1], pos[2], snapshot.camera.forward,
       m2::M2RenderPassScope::kOpaqueOnly);
   };
@@ -834,6 +1232,14 @@ void WorldPresentationScene::Render(
                      m2::M2RenderPassScope::kTransparentOnly, &alpha_draw_order);
   };
 
+  const auto encode_detail_doodads = [&] {
+    if (render_terrain) {
+      detail_doodads_->Render(
+          views.detail_doodads, gpu.view.data(), gpu.projection.data(),
+          &terrain_frustum, pos, env.models);
+    }
+  };
+
   const auto encode_water_and_weather = [&] {
 
     water_->SetTransientWaterHeightfields(visible_wmo_liquids_scratch_);
@@ -842,7 +1248,7 @@ void WorldPresentationScene::Render(
                    pos, env);
 
     weather_renderer_->Render(views.weather, matrices.bgfx_view(),
-      matrices.bgfx_projection(), {pos[0], pos[1], pos[2]}, weather_, env.fog.color);
+      matrices.bgfx_projection(), {pos[0], pos[1], pos[2]}, env.fog.color);
   };
 
   visible_wmo_liquids_scratch_.clear();
@@ -850,18 +1256,17 @@ void WorldPresentationScene::Render(
   if constexpr (!kParallelWorldEncode) {
 
     render_sky();
-    encode_distant_terrain(nullptr);
-    shadows_->Render(snapshot, views.shadow, *doodads_, *terrain_);
     encode_detailed_terrain(nullptr);
     resolve_wmo_placements();
     encode_wmo(nullptr);
+    encode_low_detail_world(nullptr);
     encode_doodad_opaque();
+    encode_detail_doodads();
     encode_doodad_alpha();
     encode_water_and_weather();
     return;
   }
 
-  shadows_->Render(snapshot, views.shadow, *doodads_, *terrain_);
   resolve_wmo_placements();
 
   core::FrameJobSystem* const jobs = m2_system_.frame_job_system();
@@ -906,18 +1311,18 @@ void WorldPresentationScene::Render(
             terrain_encoder_exhausted = true;
             return;
           }
-          encode_distant_terrain(encoder);
           encode_detailed_terrain(encoder);
           bgfx::end(encoder);
         });
   }
 
   if (!dispatch_terrain_job) {
-    encode_distant_terrain(nullptr);
     encode_detailed_terrain(nullptr);
   }
   render_sky();
   encode_doodad_opaque();
+
+  encode_detail_doodads();
 
   encode_doodad_alpha();
 
@@ -930,15 +1335,71 @@ void WorldPresentationScene::Render(
     encode_wmo(nullptr);
   }
 
-  encode_water_and_weather();
-
   if (terrain_wait_group) {
     terrain_wait_group->Wait();
     if (terrain_encoder_exhausted) {
-      encode_distant_terrain(nullptr);
       encode_detailed_terrain(nullptr);
     }
   }
+
+  encode_low_detail_world(nullptr);
+  encode_water_and_weather();
+}
+
+void WorldPresentationScene::RenderShadows(
+    const world::WorldPresentationSnapshot& snapshot,
+    const std::uint8_t first_shadow_view, ObjectRenderer& objects,
+    const game::ObjectPresentationSnapshot& object_snapshot) {
+  if (!initialized_ || snapshot.map_generation != generation_) {
+    return;
+  }
+
+  WorldM2SceneState model_state{};
+  model_state.light_direction = snapshot.environment.model_light_direction;
+  model_state.ambient_color = snapshot.environment.model_ambient;
+  model_state.diffuse_color = snapshot.environment.model_diffuse;
+  model_state.fog.params = {snapshot.environment.fog_start,
+                            snapshot.environment.fog_end,
+                            snapshot.environment.fog_density, 0.0f};
+  model_state.fog.color = snapshot.environment.fog_color;
+  model_state.receives_world_shadows =
+      snapshot.shadows.enabled && snapshot.shadows.quality >= 3u;
+  doodads_->SetWorldM2SceneState(model_state);
+
+  wmo_placement_scratch_.clear();
+  wmo_placement_scratch_.reserve(snapshot.world_models.size());
+  for (const auto& item : snapshot.world_models) {
+    const auto resource = models_.find(item.resource_key);
+    const auto instance = instances_.find(item.stable_id);
+    if (resource == models_.end() || instance == instances_.end() ||
+        !resource->second->renderer || !item.visible ||
+        !instance->second.visible) {
+      continue;
+    }
+    wmo_placement_scratch_.push_back(
+        ResolvedWmoPlacement{.renderer = resource->second->renderer.get(),
+                             .item = &item,
+                             .instance = &instance->second});
+  }
+
+  shadows_->Render(
+      snapshot, first_shadow_view, *doodads_, *terrain_, objects,
+      object_snapshot,
+      [&](const std::uint8_t view_id, const float* const view_mtx,
+          const float* const projection_mtx,
+          const world::Frustum& frustum, const RenderVec3& target,
+          const std::uint16_t resolution) {
+        for (const ResolvedWmoPlacement& placement :
+             wmo_placement_scratch_) {
+          auto& renderer = *placement.renderer;
+          renderer.SetFrustum(&frustum);
+          static_cast<void>(renderer.Render(
+              view_id, view_mtx, projection_mtx, placement.item->transform,
+              nullptr, {}, resolution, resolution, nullptr, nullptr, true));
+        }
+        detail_doodads_->Render(view_id, view_mtx, projection_mtx, &frustum,
+                                target, model_state, nullptr, true);
+      });
 }
 
 }

@@ -86,6 +86,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Audit compatibility contracts
+        shell: bash
+        run: cmake -DOPENWOW_SOURCE_DIR:PATH="$PWD" -P cmake/CompatibilityAudit.cmake
+
       - name: Read vcpkg baseline
         id: baseline
         shell: bash

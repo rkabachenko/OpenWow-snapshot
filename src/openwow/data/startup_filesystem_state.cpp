@@ -355,6 +355,57 @@ void SetStartupExecutableBasePath(const std::string& path) {
   ForwardStormBasePath(path);
 }
 
+std::filesystem::path ResolveStartupContentPath(
+    const std::filesystem::path& relative_path) {
+  const auto native_relative_path =
+      StartupStatePathToNative(relative_path.string());
+  if (native_relative_path.is_absolute()) {
+    return native_relative_path.lexically_normal();
+  }
+
+  const auto& state = MutableStartupFileSystemState();
+  std::filesystem::path root;
+  if (!state.executable_base_path.empty()) {
+    root = StartupStatePathToNative(state.executable_base_path);
+  } else {
+    std::error_code ec;
+    root = std::filesystem::current_path(ec);
+    if (ec) {
+      return native_relative_path;
+    }
+  }
+  return (root / native_relative_path).lexically_normal();
+}
+
+void SetStartupWritableBasePath(const std::string& path) {
+  StorePathWithTrailingBackslash(
+      &MutableStartupFileSystemState().writable_base_path, path);
+}
+
+std::filesystem::path ResolveStartupWritablePath(
+    const std::filesystem::path& relative_path) {
+  const auto native_relative_path =
+      StartupStatePathToNative(relative_path.string());
+  if (native_relative_path.is_absolute()) {
+    return native_relative_path.lexically_normal();
+  }
+
+  const auto& state = MutableStartupFileSystemState();
+  std::filesystem::path root;
+  if (!state.writable_base_path.empty()) {
+    root = StartupStatePathToNative(state.writable_base_path);
+  } else if (!state.executable_base_path.empty()) {
+    root = StartupStatePathToNative(state.executable_base_path);
+  } else {
+    std::error_code ec;
+    root = std::filesystem::current_path(ec);
+    if (ec) {
+      return native_relative_path;
+    }
+  }
+  return (root / native_relative_path).lexically_normal();
+}
+
 void SetStartupArchiveDataPath(const std::string& path) {
   StorePathWithTrailingBackslash(
       &MutableStartupFileSystemState().archive_data_path, path);
@@ -405,13 +456,17 @@ InitFileSystemResult InitializeStartupFileSystem(
   result.selected_base_path = inputs.command_line_base_path.empty()
                                   ? inputs.module_directory
                                   : inputs.command_line_base_path;
+  const std::string& writable_base_path = inputs.writable_base_path.empty()
+                                              ? result.selected_base_path
+                                              : inputs.writable_base_path;
 
   if (change_working_directory) {
     result.working_directory_change_result =
-        change_working_directory(result.selected_base_path);
+        change_working_directory(writable_base_path);
   }
 
   SetStartupExecutableBasePath(result.selected_base_path);
+  SetStartupWritableBasePath(writable_base_path);
   MutableStartupFileSystemState().client_init_archive_gate = 0;
   SetStartupArchiveDataPath(inputs.archive_data_path);
   return result;

@@ -1868,19 +1868,86 @@ void UnitMovementRuntime::AdvanceMovementStep(
   const MovementCollisionResult collision =
       solver->Solve(body, collision_step);
 
-  collision_stepping_ = body.stepping;
-  data_.SetCumulativeCollisionZ(body.step_reference_z);
+  const bool collision_failed =
+      collision.status == MovementCollisionStatus::kQueryFailed ||
+      collision.status == MovementCollisionStatus::kCancelled ||
+      collision.status == MovementCollisionStatus::kInvalidInput;
+  const bool blocked = collision.status == MovementCollisionStatus::kBlocked;
+  if (owner_.IsActiveMover() && (blocked || collision_failed)) {
+    const auto now_ms = session.CurrentClientTimeMs();
+    if (!last_collision_block_log_ms_.has_value() ||
+        last_collision_log_status_ != static_cast<std::uint8_t>(collision.status) ||
+        now_ms - *last_collision_block_log_ms_ >= 1000u) {
+      last_collision_block_log_ms_ = now_ms;
+      last_collision_log_status_ = static_cast<std::uint8_t>(collision.status);
+      const auto vector_text = [](const C3Vector& value) {
+        return "(" + std::to_string(value.x) + "," +
+               std::to_string(value.y) + "," + std::to_string(value.z) + ")";
+      };
+      const char* const status =
+          collision.status == MovementCollisionStatus::kQueryFailed ? "query_failed" :
+          collision.status == MovementCollisionStatus::kCancelled ? "cancelled" :
+          collision.status == MovementCollisionStatus::kInvalidInput ? "invalid_input" :
+          "blocked";
+      std::string context =
+          std::string("movement_collision: stage=solve status=") + status +
+          " map=" + std::to_string(session.objects().GetMapId()) +
+          " mover=" + std::to_string(owner_.GetGuid().GetRawValue()) +
+          " parent=" + std::to_string(data_.GetTransportGuid()) +
+          " mode=" + std::to_string(static_cast<unsigned>(mode)) +
+          " start=" + vector_text({start[0], start[1], start[2]}) +
+          " requested=" + vector_text(displacement) +
+          " solved=" + vector_text(body.position) +
+          " duration_ms=" + std::to_string(step_ms) +
+          " radius=" + std::to_string(radius) +
+          " height=" + std::to_string(height) +
+          " step_height=" + std::to_string(body.step_height) +
+          " step_reference_z=" + std::to_string(body.step_reference_z) +
+          " stepping_before=" + std::to_string(collision_stepping_) +
+          " stepping_after=" + std::to_string(body.stepping) +
+          " contact=" + std::to_string(collision.last_contact.has_value());
+      if (collision.last_contact.has_value()) {
+        const auto& contact = *collision.last_contact;
+        context += " owner=" + std::to_string(contact.owner_id) +
+                   " owner_guid=" + std::to_string(contact.owner_guid) +
+                   " facet=" + std::to_string(contact.facet_id) +
+                   " secondary=" + std::to_string(contact.secondary) +
+                   " surface=" + vector_text(contact.surface_normal) +
+                   " separating=" + vector_text(contact.normal) +
+                   " a=" + vector_text(contact.vertices[0]) +
+                   " b=" + vector_text(contact.vertices[1]) +
+                   " c=" + vector_text(contact.vertices[2]);
+        context += " hull_planes=" + std::to_string(contact.generated_normal_count);
+        for (std::size_t index = 0; index < contact.generated_normal_count; ++index) {
+          context += " hull_normal_" + std::to_string(index) + "=" +
+                     vector_text(contact.generated_normals[index]);
+        }
+      }
+      diagnostics::Log(collision_failed ? diagnostics::LogLevel::kWarn
+                                       : diagnostics::LogLevel::kInfo,
+                       context);
+    }
+  }
+  if (!collision_failed) {
+    collision_stepping_ = body.stepping;
+    data_.SetCumulativeCollisionZ(body.step_reference_z);
+  }
 
   C3Vector solved_transform{integrated_transform[0], integrated_transform[1],
                             integrated_transform[2]};
-  if (collision.status == MovementCollisionStatus::kCancelled ||
-      collision.status == MovementCollisionStatus::kInvalidInput) {
+  if (collision_failed) {
     solved_transform = {start[0], start[1], start[2]};
-  } else if (collision.status != MovementCollisionStatus::kQueryFailed) {
+  } else {
     solved_transform = body.position;
   }
   PublishSolvedTransformPosition(session.objects(), solved_transform,
                                  parent_transform.has_value(), integrated);
+
+  if (collision_failed) {
+    data_.SyncPresentedMovementInfo(integrated);
+    commit_if_requested();
+    return;
+  }
 
   if (collision.last_contact.has_value()) {
     data_.SetGroundSlopeZ(collision.last_contact->surface_normal.z);
@@ -2238,6 +2305,7 @@ void UnitMovementRuntime::ClearSplineMovementPoseOwnership() {
   spline_movement_pose_owned_ = false;
   spline_locomotion_active_ = false;
   spline_locomotion_backward_ = false;
+  spline_locomotion_id_ = 0u;
   spline_locomotion_flags_ = 0u;
   spline_locomotion_arc_length_ = 0.0f;
   spline_locomotion_duration_ms_ = 0u;
@@ -2286,6 +2354,57 @@ bool UnitMovementRuntime::TrySettleSplineMovementPoseOwnership() {
     return false;
   }
   ClearSplineMovementPoseOwnership();
+  return true;
+}
+
+bool UnitMovementRuntime::CompleteSplineMovement(
+    WorldSession &session, const std::uint32_t timestamp,
+    const std::uint32_t spline_id, const std::uint32_t spline_flags) {
+  if (spline_pose_waiting_for_parent_ && !TryComposeSplineParentPose()) {
+    diagnostics::Log(
+        diagnostics::LogLevel::kWarn,
+        "spline completion failed stage=final-pose reason=unresolved-parent guid=" +
+            std::to_string(owner_.GetGuid().GetRawValue()) +
+            " splineId=" + std::to_string(spline_id) +
+            " parent=" + std::to_string(spline_coordinate_parent_.GetRawValue()));
+    return false;
+  }
+
+  session.movement_spline_mgr().CancelSpline(owner_.GetGuid().GetRawValue());
+  ClearSplineMovementPoseOwnership();
+  if ((spline_flags & (SplineFlag::kFalling | SplineFlag::kParabolic)) != 0u) {
+    data_.StopFalling();
+  }
+  owner_.position_.spline.active = false;
+  data_.SetRuntimeFlags(data_.GetRuntimeFlags() & ~kMoveFlagSplineEnabled);
+
+  const bool active_mover = owner_.IsActiveMover();
+  const bool resumed_falling = active_mover && data_.TryInitRemoteMovement();
+  CommitMovementRuntimeState(session, timestamp);
+  owner_.Animation().RefreshSelectedStandAnimation(session, 0u, ~0u);
+  if (!active_mover) {
+    return true;
+  }
+
+  const auto movement_info = MovementInfoFromRuntimeData(
+      data_, owner_.GetMovementInfo(), session.objects(), timestamp, true);
+  const bool sent = session.Send(net::wotlk::PacketSender::BuildMoveSplineDone(
+      owner_.GetGuid(), movement_info, spline_id));
+  if (sent) {
+    UpdateWireAnnouncedFallingLatch(owner_, data_.GetRuntimeFlags());
+    NoteSuccessfulMovementPacket(timestamp);
+  }
+  diagnostics::Log(
+      sent ? diagnostics::LogLevel::kInfo : diagnostics::LogLevel::kWarn,
+      "spline completion opcode=CMSG_MOVE_SPLINE_DONE guid=" +
+          std::to_string(owner_.GetGuid().GetRawValue()) +
+          " splineId=" + std::to_string(spline_id) +
+          " splineFlags=" + std::to_string(spline_flags) +
+          " resumedFalling=" + std::to_string(resumed_falling) +
+          " movementFlags=" + std::to_string(movement_info.flags) +
+          " position=(" + std::to_string(movement_info.x) + "," +
+          std::to_string(movement_info.y) + "," + std::to_string(movement_info.z) +
+          ") sent=" + std::to_string(sent));
   return true;
 }
 
@@ -2651,7 +2770,8 @@ void UnitMovementRuntime::ApplySplineMovementPose(const Vec3 &position,
                                         const std::uint32_t spline_flags,
                                         const float spline_arc_length,
                                         const std::uint32_t spline_duration_ms,
-                                        const bool parent_movement_active) {
+                                        const bool parent_movement_active,
+                                        const std::uint32_t spline_id) {
   const MovementInfo previous_movement = owner_.position_.movement;
   const auto animation_base_flags =
       owner_.GetMovementInfo().flags & ~kDirectionalLocomotionMask;
@@ -2708,6 +2828,7 @@ void UnitMovementRuntime::ApplySplineMovementPose(const Vec3 &position,
   spline_locomotion_active_ = spline_active;
   spline_locomotion_backward_ = spline_active && moving_backward;
 
+  spline_locomotion_id_ = spline_active ? spline_id : 0u;
   spline_locomotion_flags_ = spline_active ? spline_flags : 0u;
   spline_locomotion_arc_length_ = spline_active ? spline_arc_length : 0.0f;
   spline_locomotion_duration_ms_ = spline_active ? spline_duration_ms : 0u;
@@ -4770,6 +4891,14 @@ void UnitMovementRuntime::Cleanup() {
   last_movement_update_tick_ = 0u;
   has_movement_update_tick_ = false;
   next_water_ripple_timestamp_ = 0u;
+  spline_locomotion_id_ = 0u;
+  ground_projection_seeded_ = false;
+  ground_projection_anchor_ = {};
+  ground_projection_position_ = {};
+  ground_projection_failed_ = false;
+  last_ground_discontinuity_log_tick_.reset();
+  ground_aligned_matrix_memo_.valid = false;
+  model_ground_normal_.reset();
 }
 
 void UnitMovementRuntime::ResetState() noexcept {
@@ -4783,6 +4912,14 @@ void UnitMovementRuntime::ResetState() noexcept {
   previous_liquid_depth_ = 0.0f;
   in_water_ = false;
   next_water_ripple_timestamp_ = 0u;
+  spline_locomotion_id_ = 0u;
+  ground_projection_seeded_ = false;
+  ground_projection_anchor_ = {};
+  ground_projection_position_ = {};
+  ground_projection_failed_ = false;
+  last_ground_discontinuity_log_tick_.reset();
+  ground_aligned_matrix_memo_.valid = false;
+  model_ground_normal_.reset();
 }
 
 }

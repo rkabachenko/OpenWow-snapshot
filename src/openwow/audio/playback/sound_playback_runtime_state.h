@@ -13,8 +13,6 @@ protected:
   std::optional<std::uint32_t> script_music_handle_id_{};
   std::uint32_t error_speech_handle_id_{0};
   int ambient_idle_selection_counter_{0};
-  std::uint32_t ambient_idle_handle_id_{0};
-  bool ambient_idle_handle_valid_{false};
   std::uint64_t ambient_idle_last_guid_{0};
   bool script_music_playing_{false};
   struct BackgroundDisplayChannelState {

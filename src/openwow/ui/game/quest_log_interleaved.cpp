@@ -289,6 +289,28 @@ int FindInterleavedQuestIndexById(::openwow::game::WorldSession &session,
   return 0;
 }
 
+int FindVisibleQuestIndexById(::openwow::game::WorldSession &session,
+                              const std::uint32_t quest_id) {
+  if (quest_id == 0) {
+    return 0;
+  }
+
+  const auto view = BuildQuestLogView(session);
+  const auto &log = session.quests().quest_log();
+  const auto visible_limit = std::min(view.visible_count, view.entries.size());
+  for (std::size_t index = 0; index < visible_limit; ++index) {
+    const auto &entry = view.entries[index];
+    if (entry.is_header || entry.quest_log_index >= log.size()) {
+      continue;
+    }
+    if (log[entry.quest_log_index].quest_id == quest_id) {
+      return static_cast<int>(index + 1);
+    }
+  }
+
+  return 0;
+}
+
 bool IsVisibleQuestFailedById(::openwow::game::WorldSession &session,
                               const std::uint32_t quest_id) {
   if (quest_id == 0) {

@@ -12,15 +12,19 @@
 #include "openwow/world/environment/lighting.h"
 #include "openwow/world/coordinates/map_placement.h"
 #include "openwow/foundation/diagnostics/logging.h"
+#include "openwow/foundation/diagnostics/performance_logging.h"
+#include "openwow/core/platform_runtime_policy.h"
 #include "openwow/world/collision/collision.h"
 #include "openwow/world/environment/chunk_ambient_audio.h"
 #include "openwow/world/liquid/liquid_vertex_lookup.h"
 #include "openwow/world/environment/weather.h"
 #include "openwow/world/environment/wmo_fog.h"
 #include "openwow/world/liquid/wmo_liquid_surface.h"
+#include "openwow/world/terrain/ground_effect_map.h"
 
 #include <algorithm>
 #include <bit>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -37,6 +41,7 @@ constexpr float kMinutesPerDay = 1440.0f;
 constexpr float kSecondsToMilliseconds = 1000.0f;
 constexpr float kCriticalSpawnSurfaceRadius = 96.0f;
 constexpr float kWmoHighPriorityRadius = 384.0f;
+constexpr float kRetailLowDetailNearOverlap = 50.0f;
 
 constexpr float kWmoRoomQueryDepth = 1000.0f;
 constexpr float kWmoRoomQueryStartLift = 0.1f;
@@ -268,78 +273,8 @@ void VisitWaterHeightfieldFacets(
   }
 }
 
-constexpr std::size_t kTerrainChunkCellGridSide = 8u;
-constexpr std::size_t kTerrainChunkCellCount =
-    kTerrainChunkCellGridSide * kTerrainChunkCellGridSide;
-constexpr std::size_t kTerrainAlphaMapSide = 64u;
-constexpr std::size_t kTerrainAlphaPixelsPerCell = kTerrainAlphaMapSide / kTerrainChunkCellGridSide;
 constexpr float kGroundTypeQueryMapHalfSize = kWorldGridCenter;
 constexpr float kGroundTypeQueryMapFullSize = 34133.332f;
-
-[[nodiscard]] std::array<std::uint32_t, kTerrainChunkCellCount>
-BuildChunkGroundEffectIdGrid(const data::terrain::TerrainChunk &chunk, const bool big_alpha) {
-  std::array<std::uint32_t, kTerrainChunkCellCount> effect_ids{};
-  const std::size_t layer_count = std::min<std::size_t>(chunk.layers.size(), 4u);
-  if (layer_count == 0u) {
-    return effect_ids;
-  }
-
-  std::array<std::vector<std::uint8_t>, 4> layer_alpha_maps{};
-  for (std::size_t layer_index = 1u; layer_index < layer_count; ++layer_index) {
-    const auto &layer = chunk.layers[layer_index];
-    if ((layer.flags & data::terrain::AlphaMapFlags::kHasAlpha) == 0u ||
-        layer.alpha_map_offset >= chunk.alpha_data.size()) {
-      continue;
-    }
-
-    layer_alpha_maps[layer_index] = data::terrain::DecompressAlphaMap(
-        chunk.alpha_data.data() + layer.alpha_map_offset,
-        chunk.alpha_data.size() - layer.alpha_map_offset, layer.flags, big_alpha,
-        (chunk.header.flags & data::terrain::McnkFlags::kDoNotFixAlphaMap) == 0u);
-  }
-
-  for (std::size_t cell_row = 0; cell_row < kTerrainChunkCellGridSide; ++cell_row) {
-    for (std::size_t cell_col = 0; cell_col < kTerrainChunkCellGridSide; ++cell_col) {
-      const std::size_t cell_index = cell_row * kTerrainChunkCellGridSide + cell_col;
-      if (IsTerrainHoleCell(chunk.holes, static_cast<int>(cell_row),
-                            static_cast<int>(cell_col))) {
-        continue;
-      }
-
-      std::array<std::uint32_t, 4> layer_weight_sums{};
-      for (std::size_t alpha_row = 0; alpha_row < kTerrainAlphaPixelsPerCell; ++alpha_row) {
-        for (std::size_t alpha_col = 0; alpha_col < kTerrainAlphaPixelsPerCell; ++alpha_col) {
-          const std::size_t pixel_row = cell_row * kTerrainAlphaPixelsPerCell + alpha_row;
-          const std::size_t pixel_col = cell_col * kTerrainAlphaPixelsPerCell + alpha_col;
-          const std::size_t pixel_index = pixel_row * kTerrainAlphaMapSide + pixel_col;
-
-          std::uint32_t secondary_weight = 0u;
-          for (std::size_t layer_index = 1u; layer_index < layer_count; ++layer_index) {
-            const auto &alpha_map = layer_alpha_maps[layer_index];
-            const std::uint32_t alpha =
-                pixel_index < alpha_map.size() ? alpha_map[pixel_index] : 0u;
-            layer_weight_sums[layer_index] += alpha;
-            secondary_weight += alpha;
-          }
-
-          const std::uint32_t base_weight = static_cast<std::uint8_t>(255u - secondary_weight);
-          layer_weight_sums[0] += base_weight;
-        }
-      }
-
-      std::size_t best_layer = 0u;
-      for (std::size_t layer_index = 1u; layer_index < layer_count; ++layer_index) {
-        if (layer_weight_sums[layer_index] > layer_weight_sums[best_layer]) {
-          best_layer = layer_index;
-        }
-      }
-
-      effect_ids[cell_index] = chunk.layers[best_layer].effect_id;
-    }
-  }
-
-  return effect_ids;
-}
 
 [[nodiscard]] std::uint32_t ResolveGroundTypeFromEffectId(const openwow::data::dbc::DbcLoader &dbc,
                                                           const std::uint32_t effect_id) {
@@ -352,7 +287,7 @@ BuildChunkGroundEffectIdGrid(const data::terrain::TerrainChunk &chunk, const boo
     return 0u;
   }
 
-  return entry->density;
+  return entry->sound;
 }
 
 constexpr float kRetailAdtLiquidFixedTexcoordScale = 0.01171875f;
@@ -514,6 +449,9 @@ std::unique_ptr<CachedWmo>
 WorldMap::PrepareWmoCpuBundle(const WorldMap::LoadFileCallback &load_file,
                               const std::string &wmo_path,
                               std::string *error) {
+  static openwow::diagnostics::PerformanceLogSite performance_site;
+  const openwow::diagnostics::ScopedPerformanceLog performance(
+      performance_site, "world.wmo_read_parse", wmo_path);
   if (!load_file) {
     *error = "no file loader";
     return {};
@@ -553,7 +491,13 @@ WorldMap::PrepareWmoCpuBundle(const WorldMap::LoadFileCallback &load_file,
 }
 
 WorldMap::WorldMap(audio::SoundRuntime* ambient_audio)
-    : ambient_audio_(ambient_audio) {}
+    : ambient_audio_(ambient_audio) {
+  constexpr auto runtime_policy =
+      openwow::core::GetPlatformRuntimePolicy();
+  view_distance_ = std::max(0, runtime_policy.world_tile_load_radius);
+  unload_distance_ = std::max(
+      view_distance_, runtime_policy.world_tile_unload_radius);
+}
 
 WorldMap::~WorldMap() {
   Shutdown();
@@ -567,9 +511,20 @@ bool WorldMap::Initialize() {
   lifecycle_state_ = LifecycleState::kStarting;
 
   const std::uint32_t hardware_threads = std::thread::hardware_concurrency();
-  const std::uint32_t worker_count =
-      std::clamp(hardware_threads > 1u ? hardware_threads - 1u : 1u, 1u, 4u);
+  constexpr auto runtime_policy =
+      openwow::core::GetPlatformRuntimePolicy();
+  const std::uint32_t worker_count = std::clamp(
+      hardware_threads > 1u ? hardware_threads - 1u : 1u, 1u,
+      runtime_policy.resource_worker_limit);
   InitializeWorldStagingWorkers(worker_count);
+  if (runtime_policy.constrained_mobile_runtime) {
+    diagnostics::Log(
+        diagnostics::LogLevel::kInfo,
+        "WorldMap: constrained streaming policy load_radius=" +
+            std::to_string(view_distance_) + " unload_radius=" +
+            std::to_string(unload_distance_) + " workers=" +
+            std::to_string(worker_count));
+  }
 
   initialization_succeeded_ = true;
   lifecycle_state_ = LifecycleState::kRunning;
@@ -603,8 +558,8 @@ void WorldMap::UnloadMap() {
   wmo_cache_.clear();
 
   InvalidateAreaEnvironmentCache();
-  active_weather_type_ = WeatherKind::kNone;
-  active_weather_density_ = 0.0f;
+  ResetWeather(weather_);
+  weather_clock_ = 0u;
   active_weather_row_.reset();
   terrain_streamer_.Reset();
   terrain_streamer_.SetTileExistsCallback({});
@@ -754,6 +709,7 @@ void WorldMap::UpdatePlayerPosition(float x, float y, float z) {
 }
 
 void WorldMap::UpdateStreamingPosition(const float x, const float y) {
+  const bool had_streaming_focus = has_camera_streaming_focus_;
   streaming_x_ = x;
   streaming_y_ = y;
   has_camera_streaming_focus_ = true;
@@ -766,13 +722,48 @@ void WorldMap::UpdateStreamingPosition(const float x, const float y) {
   terrain_streamer_.Update(x, y, map_id_);
 
   if (new_tile != streaming_tile_ || loaded_tiles_.empty()) {
+    const TileCoord previous_tile = streaming_tile_;
     streaming_tile_ = new_tile;
 
-    const auto required = GetRequiredTiles();
+    auto required = GetRequiredTiles();
+    constexpr auto runtime_policy =
+        openwow::core::GetPlatformRuntimePolicy();
+    if (runtime_policy.constrained_mobile_runtime && had_streaming_focus &&
+        new_tile != previous_tile) {
+      const TileCoord direction{
+          std::clamp(new_tile.x - previous_tile.x, -1, 1),
+          std::clamp(new_tile.y - previous_tile.y, -1, 1),
+      };
+      const auto insert_if_valid = [&required](const TileCoord coord) {
+        if (coord.x >= kMinTile && coord.x <= kMaxTile &&
+            coord.y >= kMinTile && coord.y <= kMaxTile) {
+          required.insert(coord);
+        }
+      };
+      if (direction.x != 0) {
+        const std::int32_t ahead_x =
+            new_tile.x + direction.x * (view_distance_ + 1);
+        for (std::int32_t offset = -view_distance_;
+             offset <= view_distance_; ++offset) {
+          insert_if_valid({ahead_x, new_tile.y + offset});
+        }
+      }
+      if (direction.y != 0) {
+        const std::int32_t ahead_y =
+            new_tile.y + direction.y * (view_distance_ + 1);
+        for (std::int32_t offset = -view_distance_;
+             offset <= view_distance_; ++offset) {
+          insert_if_valid({new_tile.x + offset, ahead_y});
+        }
+      }
+    }
 
     std::vector<TileCoord> to_unload;
     for (const auto &[coord, tile_ptr] : loaded_tiles_) {
-      if (required.find(coord) == required.end()) {
+      const std::int32_t distance = std::max(
+          std::abs(coord.x - streaming_tile_.x),
+          std::abs(coord.y - streaming_tile_.y));
+      if (distance > unload_distance_) {
         to_unload.push_back(coord);
       }
     }
@@ -830,6 +821,18 @@ void WorldMap::UpdateStreamingPosition(const float x, const float y) {
   }
 
   RebuildPublicationOrder(x, y);
+}
+
+void WorldMap::SetViewDistance(const int32_t tiles) {
+  view_distance_ = std::clamp(tiles, 0, kMaxTile - kMinTile);
+  constexpr auto runtime_policy =
+      openwow::core::GetPlatformRuntimePolicy();
+  unload_distance_ = std::max(
+      runtime_policy.constrained_mobile_runtime ? view_distance_ + 1
+                                                 : view_distance_,
+      runtime_policy.constrained_mobile_runtime
+          ? runtime_policy.world_tile_unload_radius
+          : view_distance_);
 }
 
 bool WorldMap::AreExistingTerrainTilesLoaded(const float min_x,
@@ -916,6 +919,37 @@ bool WorldMap::IsWorldEntryStreamingComplete() const {
     }
   }
   return true;
+}
+
+std::string WorldMap::DescribeStreamingProgress() const {
+  std::size_t resident_groups = 0u;
+  std::size_t pending_gpu_groups = 0u;
+  std::string first_pending_gpu;
+  for (const auto& [path, cached] : wmo_cache_) {
+    for (std::size_t group = 0; group < cached.group_residency.size(); ++group) {
+      if (cached.group_residency[group] != WmoGroupResidency::kResident) continue;
+      ++resident_groups;
+      if (group >= cached.group_gpu_publication.size() ||
+          (cached.group_gpu_publication[group] != WmoGroupPublicationStatus::kFailed &&
+           !IsWmoGroupPublicationComplete(cached.group_gpu_publication[group]))) {
+        ++pending_gpu_groups;
+        if (first_pending_gpu.empty()) {
+          first_pending_gpu = path + "[" + std::to_string(group) + "]";
+        }
+      }
+    }
+  }
+  return "tiles_loaded=" + std::to_string(loaded_tiles_.size()) +
+      " tiles_pending=" + std::to_string(pending_tile_loads_.size()) +
+      " tiles_prepared=" + std::to_string(ready_tile_loads_.size()) +
+      " wmo_roots=" + std::to_string(wmo_cache_.size()) +
+      " wmo_roots_pending=" + std::to_string(pending_wmo_loads_.size()) +
+      " wmo_placements_pending=" + std::to_string(streaming_ownership_.pending_count()) +
+      " wmo_groups_resident=" + std::to_string(resident_groups) +
+      " wmo_groups_pending=" + std::to_string(pending_wmo_group_loads_.size()) +
+      " wmo_groups_prepared=" + std::to_string(ready_wmo_group_loads_.size()) +
+      " wmo_gpu_pending=" + std::to_string(pending_gpu_groups) +
+      " first_gpu_pending=" + (first_pending_gpu.empty() ? "none" : first_pending_gpu);
 }
 
 bool WorldMap::IsCriticalSpawnSurfaceReady() const {
@@ -1077,7 +1111,7 @@ void WorldMap::RefreshLightingEnvironment() {
     const auto resolved = lighting_.ResolveEnvironment(
         player_x_, player_y_, player_z_, time_of_day_,
         screen_effect_light_param_slot_override_,
-        active_weather_density_,
+        WeatherLightParamBlendFactor(weather_),
         use_underwater_light_params, liquid_darkening,
         suppress_local_lighting_);
     const world::SkyColors &colors = resolved.sky;
@@ -1161,7 +1195,7 @@ void WorldMap::UpdateDayNightLightEnvironmentForFrame(
   light_env.WriteFloat(16u, far_clip);
   light_env.WriteFloat(17u, static_cast<float>(tick_ms) * 0.001f);
   light_env.WriteFloat(18u, last_frame_delta_seconds_);
-  light_env.WriteFloat(19u, active_weather_density_);
+  light_env.WriteFloat(19u, WeatherDayNightFactor(weather_));
   openwow::game::DayNight_WriteOutdoorFogBand(
       light_env,
       openwow::game::DayNightFogBand{
@@ -1222,18 +1256,21 @@ void WorldMap::SetWeather(const std::uint32_t type, const float intensity,
 
   const std::uint32_t effect_type =
       weather_row != nullptr ? weather_row->effect_type : 0u;
-  active_weather_type_ =
+  const WeatherKind effect =
       effect_type <= static_cast<std::uint32_t>(WeatherKind::kSandstorm)
           ? static_cast<WeatherKind>(effect_type)
           : WeatherKind::kNone;
-  active_weather_density_ = std::clamp(intensity, 0.0f, 1.0f);
   active_weather_row_ =
       weather_row != nullptr
           ? std::optional<data::dbc::WeatherEntry>(*weather_row)
           : std::nullopt;
+  openwow::world::SetWeather(
+      weather_, effect, intensity, weather_row, smooth,
+      weather_row != nullptr ? weather_row->transition_value : 1.0f,
+      weather_clock_);
   presentation_commands_.emplace_back(SetWeatherPresentationCommand{
-      .type = active_weather_type_,
-      .density = active_weather_density_,
+      .type = weather_.kind,
+      .density = weather_.target_density,
       .row = active_weather_row_,
       .smooth = smooth});
   RefreshLightingEnvironment();
@@ -1771,6 +1808,432 @@ AreaEnvironmentContext WorldMap::ResolveAreaEnvironmentContextAtPosition(
                                          AreaEnvironmentProbe::kUnitSurface);
 }
 
+AreaEnvironmentContext WorldMap::ResolveZoneUiAreaContextAtPosition(
+    const float x, const float y, const float z) const {
+  AreaEnvironmentContext result =
+      ResolveAreaEnvironmentContextAtPosition(x, y, z);
+  if (!wdt_.has_global_wmo || dbc_ == nullptr) {
+    return result;
+  }
+
+  const auto *const map = dbc_->map().LookupEntry(map_id_);
+  if (map != nullptr && map->linked_zone != 0u) {
+    result.area_id = map->linked_zone;
+  }
+  return result;
+}
+
+bool WorldMap::UsesWmoMinimapSource(
+    const ResolvedWmoAreaRows &rows) noexcept {
+  if (!rows.resolved || !rows.group_resident) {
+    return false;
+  }
+
+  constexpr std::uint32_t kRootWmoMinimapSourceMask = 0x19u;
+  constexpr std::uint32_t kGroupSuppressesWmoMinimap = 0x20u;
+  if (rows.group != nullptr &&
+      (rows.group->flags & kGroupSuppressesWmoMinimap) != 0u) {
+    return false;
+  }
+
+  const bool interior_group =
+      (rows.group_flags & data::wmo::kMogpExterior) == 0u;
+  const std::uint32_t root_flags =
+      rows.root != nullptr ? rows.root->flags : 0u;
+  return interior_group ||
+         (root_flags & kRootWmoMinimapSourceMask) != 0u;
+}
+
+bool WorldMap::UsesWmoMinimapSourceAtPosition(
+    const float x, const float y, const float z) const {
+  const AreaEnvironmentContext environment =
+      ResolveAreaEnvironmentAtPosition(x, y, z,
+                                       AreaEnvironmentProbe::kUnitSurface);
+  if (!environment.has_wmo_context ||
+      !last_area_environment_resolution_.containing_group.has_value()) {
+    return false;
+  }
+  return UsesWmoMinimapSource(ResolveWmoAreaRowsForGroup(
+      *last_area_environment_resolution_.containing_group));
+}
+
+WmoMinimapSource WorldMap::PrepareWmoMinimapSource(
+    const float x, const float y, const float z,
+    const float visible_radius) {
+  WmoMinimapSource source;
+  const AreaEnvironmentContext environment =
+      ResolveAreaEnvironmentAtPosition(x, y, z,
+                                       AreaEnvironmentProbe::kUnitSurface);
+  if (!environment.has_wmo_context) {
+    return source;
+  }
+
+  source.status = WmoMinimapSourceStatus::kPending;
+  if (!last_area_environment_resolution_.containing_group.has_value()) {
+    source.detail = "WMO environment has no containing group";
+    return source;
+  }
+
+  const WmoAreaGroupRef active_ref =
+      *last_area_environment_resolution_.containing_group;
+  const auto instance_it = wmo_instances_.find(active_ref.placement);
+  if (instance_it == wmo_instances_.end()) {
+    source.status = WmoMinimapSourceStatus::kFailed;
+    source.detail = "active WMO placement is unavailable";
+    return source;
+  }
+  const WmoInstance& instance = instance_it->second;
+  source.placement_stable_id = instance.placement_stable_id;
+  source.active_group_index = active_ref.group_index;
+  source.model_matrix = instance.model_matrix;
+
+  source.root_path = instance.wmo_path;
+  std::replace(source.root_path.begin(), source.root_path.end(), '/', '\\');
+  const auto starts_with_no_case = [](const std::string_view value,
+                                      const std::string_view prefix) {
+    if (value.size() < prefix.size()) {
+      return false;
+    }
+    for (std::size_t index = 0; index < prefix.size(); ++index) {
+      if (std::tolower(static_cast<unsigned char>(value[index])) !=
+          std::tolower(static_cast<unsigned char>(prefix[index]))) {
+        return false;
+      }
+    }
+    return true;
+  };
+  if (starts_with_no_case(source.root_path, "World\\")) {
+    source.root_path.erase(0u, 6u);
+  }
+  if (source.root_path.size() >= 4u &&
+      starts_with_no_case(
+          std::string_view(source.root_path).substr(source.root_path.size() - 4u),
+          ".wmo")) {
+    source.root_path.resize(source.root_path.size() - 4u);
+  }
+
+  const auto cache_it = wmo_cache_.find(instance.wmo_path);
+  if (cache_it == wmo_cache_.end()) {
+    source.detail = "active WMO root is pending";
+    return source;
+  }
+  const CachedWmo& cached = cache_it->second;
+  const std::size_t active_group = active_ref.group_index;
+  if (active_group >= cached.groups.size() ||
+      active_group >= cached.group_residency.size() ||
+      active_group >= cached.root.groupInfos.size()) {
+    source.status = WmoMinimapSourceStatus::kFailed;
+    source.detail = "active WMO group index is out of range";
+    return source;
+  }
+  if (cached.group_residency[active_group] != WmoGroupResidency::kResident) {
+    source.detail = "active WMO group is pending";
+    return source;
+  }
+  const ResolvedWmoAreaRows active_area_rows =
+      ResolveWmoAreaRowsForGroup(active_ref);
+  if (!UsesWmoMinimapSource(active_area_rows)) {
+    source.status = WmoMinimapSourceStatus::kOutdoor;
+    source.detail.clear();
+    return source;
+  }
+  if (visible_radius <= 0.0f || !std::isfinite(visible_radius)) {
+    source.status = WmoMinimapSourceStatus::kFailed;
+    source.detail = "WMO minimap radius is invalid";
+    return source;
+  }
+
+  const float cell_world_min_x =
+      std::floor(x / visible_radius) * visible_radius;
+  const float cell_world_min_y =
+      std::floor(y / visible_radius) * visible_radius;
+  Bounds world_query_bounds{
+      cell_world_min_x,
+      cell_world_min_y,
+      z - visible_radius * 0.5f,
+      cell_world_min_x + visible_radius,
+      cell_world_min_y + visible_radius,
+      z,
+  };
+  // The snapped cell controls refresh cadence; tile and portal admission use
+  // its bounds expanded by one visible radius on every side. Expand in world
+  // space before transforming so rotated placements use the same coverage.
+  for (std::size_t axis = 0u; axis < 3u; ++axis) {
+    world_query_bounds[axis] -= visible_radius;
+    world_query_bounds[axis + 3u] += visible_radius;
+  }
+  Bounds query_bounds{
+      std::numeric_limits<float>::infinity(),
+      std::numeric_limits<float>::infinity(),
+      std::numeric_limits<float>::infinity(),
+      -std::numeric_limits<float>::infinity(),
+      -std::numeric_limits<float>::infinity(),
+      -std::numeric_limits<float>::infinity(),
+  };
+  for (const float world_x : {world_query_bounds[0], world_query_bounds[3]}) {
+    for (const float world_y : {world_query_bounds[1], world_query_bounds[4]}) {
+      for (const float world_z : {world_query_bounds[2],
+                                  world_query_bounds[5]}) {
+        const Vec3 local = TransformPoint(instance.inverse_model_matrix,
+                                          {world_x, world_y, world_z});
+        for (std::size_t axis = 0u; axis < 3u; ++axis) {
+          query_bounds[axis] = std::min(query_bounds[axis], local[axis]);
+          query_bounds[axis + 3u] =
+              std::max(query_bounds[axis + 3u], local[axis]);
+        }
+      }
+    }
+  }
+
+  const auto root_group_bounds = [&cached](const std::size_t group_index) {
+    const auto& info = cached.root.groupInfos[group_index];
+    return Bounds{
+        std::min(info.boundingBox1[0], info.boundingBox2[0]),
+        std::min(info.boundingBox1[1], info.boundingBox2[1]),
+        std::min(info.boundingBox1[2], info.boundingBox2[2]),
+        std::max(info.boundingBox1[0], info.boundingBox2[0]),
+        std::max(info.boundingBox1[1], info.boundingBox2[1]),
+        std::max(info.boundingBox1[2], info.boundingBox2[2]),
+    };
+  };
+  const auto loaded_group_bounds = [&cached](const std::size_t group_index) {
+    const auto& header = cached.groups[group_index].header;
+    return Bounds{
+        std::min(header.boundingBox1[0], header.boundingBox2[0]),
+        std::min(header.boundingBox1[1], header.boundingBox2[1]),
+        std::min(header.boundingBox1[2], header.boundingBox2[2]),
+        std::max(header.boundingBox1[0], header.boundingBox2[0]),
+        std::max(header.boundingBox1[1], header.boundingBox2[1]),
+        std::max(header.boundingBox1[2], header.boundingBox2[2]),
+    };
+  };
+  const auto horizontal_bounds_intersect = [](const Bounds& lhs,
+                                               const Bounds& rhs) {
+    return rhs[0] <= lhs[3] && lhs[0] < rhs[3] &&
+           rhs[1] <= lhs[4] && lhs[1] < rhs[4];
+  };
+  // Portal admission uses the active group's ceiling after transforming the
+  // world query into local space. Tile admission remains horizontal only.
+  query_bounds[5] = loaded_group_bounds(active_group)[5];
+  const auto portal_intersects = [&cached, &query_bounds](
+                                     const data::wmo::WmoPortalRef& ref) {
+    if (ref.portalIndex >= cached.root.portals.size()) {
+      return false;
+    }
+    const auto& portal = cached.root.portals[ref.portalIndex];
+    const std::size_t begin = portal.startVertex;
+    if (portal.nVertices == 0u || begin > cached.root.portalVertices.size() ||
+        portal.nVertices > cached.root.portalVertices.size() - begin) {
+      return false;
+    }
+    std::uint8_t common_outcode = 0x3fu;
+    for (std::size_t index = 0u; index < portal.nVertices; ++index) {
+      const auto& vertex = cached.root.portalVertices[begin + index];
+      std::uint8_t outcode = 0u;
+      outcode |= vertex.x < query_bounds[0] ? 0x01u : 0u;
+      outcode |= vertex.x > query_bounds[3] ? 0x02u : 0u;
+      outcode |= vertex.y < query_bounds[1] ? 0x04u : 0u;
+      outcode |= vertex.y > query_bounds[4] ? 0x08u : 0u;
+      outcode |= vertex.z < query_bounds[2] ? 0x10u : 0u;
+      outcode |= vertex.z > query_bounds[5] ? 0x20u : 0u;
+      common_outcode &= outcode;
+    }
+    return common_outcode == 0u;
+  };
+
+  constexpr float kWmoMinimapUnitsPerPixel = 0.5f;
+  constexpr float kWmoMinimapTileWorldSpan =
+      256.0f * kWmoMinimapUnitsPerPixel;
+  constexpr float kWmoMinimapEdgePad = kWmoMinimapUnitsPerPixel * 2.0f;
+  constexpr std::size_t kWmoMinimapTileLimit = 256u;
+  const std::uint32_t active_flags = cached.groups[active_group].header.flags;
+  const bool active_exterior =
+      (active_flags & data::wmo::kMogpExterior) != 0u;
+  const std::uint32_t expected_family =
+      active_exterior
+          ? data::wmo::kMogpExterior
+          : (cached.root.groupInfos[active_group].flags &
+             data::wmo::kMogpExteriorLit);
+  const bool use_root_minimap =
+      active_area_rows.root != nullptr &&
+      (active_area_rows.root->flags & 0x18u) != 0u &&
+      (cached.root.groupInfos[active_group].flags &
+       (data::wmo::kMogpExterior | data::wmo::kMogpExteriorLit)) != 0u;
+  std::size_t pending_group_count = 0u;
+  const std::size_t candidate_group_count = std::min(
+      {cached.root.groupInfos.size(), cached.group_residency.size(),
+       instance.group_world_bounds.size()});
+  for (std::size_t group_index = 0u; group_index < candidate_group_count;
+       ++group_index) {
+    if (use_root_minimap ||
+        !horizontal_bounds_intersect(root_group_bounds(group_index),
+                                     query_bounds) ||
+        cached.group_residency[group_index] == WmoGroupResidency::kResident) {
+      continue;
+    }
+    ++pending_group_count;
+    QueueWmoGroupLoad(
+        instance.wmo_path, static_cast<std::uint32_t>(group_index),
+        BoundsDistanceSquared3D(instance.group_world_bounds[group_index], x, y,
+                                z));
+  }
+  if (pending_group_count != 0u) {
+    source.detail = std::to_string(pending_group_count) +
+                    " intersecting WMO minimap groups pending";
+    return source;
+  }
+
+  const auto next_texture_span = [=](const float extent) {
+    const auto required_pixels = static_cast<std::uint32_t>(
+        std::max(1.0f, std::ceil(extent / kWmoMinimapUnitsPerPixel)));
+    return std::clamp(std::bit_ceil(required_pixels), 32u, 256u);
+  };
+  const auto emit_tiles = [&](const std::size_t texture_group_index,
+                              const Bounds& bounds) {
+    const float extent_x = bounds[3] - bounds[0];
+    const float extent_y = bounds[4] - bounds[1];
+    if (extent_x <= 0.0f || extent_y <= 0.0f) {
+      return;
+    }
+    const float span_x = static_cast<float>(next_texture_span(extent_x)) *
+                         kWmoMinimapUnitsPerPixel;
+    const float span_y = static_cast<float>(next_texture_span(extent_y)) *
+                         kWmoMinimapUnitsPerPixel;
+    const std::uint32_t count_x = static_cast<std::uint32_t>(
+        std::max(1.0f, std::ceil(extent_x / kWmoMinimapTileWorldSpan)));
+    const std::uint32_t count_y = static_cast<std::uint32_t>(
+        std::max(1.0f, std::ceil(extent_y / kWmoMinimapTileWorldSpan)));
+    for (std::uint32_t tile_y = 0u; tile_y < count_y; ++tile_y) {
+      for (std::uint32_t tile_x = 0u; tile_x < count_x; ++tile_x) {
+        if (source.tiles.size() >= kWmoMinimapTileLimit) {
+          return;
+        }
+        Bounds tile_bounds{
+            bounds[0] + static_cast<float>(tile_x) * span_x,
+            bounds[1] + static_cast<float>(tile_y) * span_y,
+            (bounds[2] + bounds[5]) * 0.5f,
+            bounds[0] + static_cast<float>(tile_x + 1u) * span_x,
+            bounds[1] + static_cast<float>(tile_y + 1u) * span_y,
+            (bounds[2] + bounds[5]) * 0.5f,
+        };
+        if (tile_x == 0u) {
+          tile_bounds[0] -= kWmoMinimapEdgePad;
+        }
+        if (tile_y == 0u) {
+          tile_bounds[1] -= kWmoMinimapEdgePad;
+        }
+        if (tile_x + 1u == count_x) {
+          tile_bounds[3] += kWmoMinimapEdgePad;
+        }
+        if (tile_y + 1u == count_y) {
+          tile_bounds[4] += kWmoMinimapEdgePad;
+        }
+        if (horizontal_bounds_intersect(tile_bounds, query_bounds)) {
+          source.tiles.push_back({
+              .group_index = static_cast<std::uint32_t>(texture_group_index),
+              .tile_x = tile_x,
+              .tile_y = tile_y,
+              .local_bounds = tile_bounds,
+          });
+        }
+      }
+    }
+  };
+
+  std::vector<bool> visited(cached.groups.size(), false);
+  const auto visit_group = [&](const auto& self,
+                               const std::size_t group_index,
+                               const std::size_t previous_group) -> void {
+    if (group_index >= visited.size() || visited[group_index] ||
+        group_index >= cached.group_residency.size() ||
+        cached.group_residency[group_index] != WmoGroupResidency::kResident) {
+      return;
+    }
+    const std::uint32_t flags = cached.groups[group_index].header.flags;
+    const bool accepted = active_exterior
+                              ? (flags & data::wmo::kMogpExterior) != 0u
+                              : (flags & (data::wmo::kMogpExterior |
+                                          data::wmo::kMogpExteriorLit)) ==
+                                    expected_family;
+    if (!accepted) {
+      return;
+    }
+
+    visited[group_index] = true;
+    if (!horizontal_bounds_intersect(loaded_group_bounds(group_index),
+                                     query_bounds)) {
+      return;
+    }
+    emit_tiles(group_index, loaded_group_bounds(group_index));
+    const ResolvedWmoAreaRows rows = ResolveWmoAreaRowsForGroup(
+        WmoAreaGroupRef{active_ref.placement,
+                        static_cast<std::uint32_t>(group_index)});
+    if (rows.group != nullptr &&
+        (rows.group->id == 0x59e7u || rows.group->id == 0x59e8u)) {
+      return;
+    }
+
+    const auto& group = cached.groups[group_index];
+    const std::size_t portal_begin = group.header.portalStart;
+    const std::size_t portal_end = std::min(
+        cached.root.portalRefs.size(),
+        portal_begin + static_cast<std::size_t>(group.header.portalCount));
+    for (std::size_t portal_index = portal_begin; portal_index < portal_end;
+         ++portal_index) {
+      const auto& portal_ref = cached.root.portalRefs[portal_index];
+      if (portal_ref.groupIndex == 0xffffu ||
+          portal_ref.groupIndex == previous_group ||
+          !portal_intersects(portal_ref)) {
+        continue;
+      }
+      const std::size_t candidate_group = portal_ref.groupIndex;
+      if (candidate_group < cached.group_residency.size() &&
+          cached.group_residency[candidate_group] ==
+              WmoGroupResidency::kResident) {
+        const ResolvedWmoAreaRows candidate_rows = ResolveWmoAreaRowsForGroup(
+            WmoAreaGroupRef{active_ref.placement,
+                            static_cast<std::uint32_t>(candidate_group)});
+        if (candidate_rows.group != nullptr &&
+            (candidate_rows.group->id == 0x59e7u ||
+             candidate_rows.group->id == 0x59e8u)) {
+          continue;
+        }
+      }
+      self(self, candidate_group, group_index);
+    }
+  };
+
+  if (use_root_minimap) {
+    // The combined map has a synthetic texture group numbered after the last
+    // authored group. Its geometry covers the root bounds, not the active room.
+    const auto& header = cached.root.header;
+    emit_tiles(header.nGroups, Bounds{
+        header.boundingBox1[0], header.boundingBox1[1], header.boundingBox1[2],
+        header.boundingBox2[0], header.boundingBox2[1], header.boundingBox2[2]});
+  } else {
+    visit_group(visit_group, active_group, active_group);
+  }
+
+  std::stable_sort(
+      source.tiles.begin(), source.tiles.end(),
+      [active_group](const WmoMinimapTileRecord& lhs,
+                     const WmoMinimapTileRecord& rhs) {
+        const bool lhs_active = lhs.group_index == active_group;
+        const bool rhs_active = rhs.group_index == active_group;
+        if (lhs_active != rhs_active) {
+          return !lhs_active;
+        }
+        if (lhs_active) {
+          return false;
+        }
+        return (lhs.local_bounds[2] + lhs.local_bounds[5]) <
+               (rhs.local_bounds[2] + rhs.local_bounds[5]);
+      });
+
+  source.status = WmoMinimapSourceStatus::kReady;
+  return source;
+}
+
 WorldMap::ResolvedWmoAreaRows WorldMap::ResolveWmoAreaRowsForGroup(
     const WmoAreaGroupRef &ref) const {
   ResolvedWmoAreaRows rows{};
@@ -1797,6 +2260,10 @@ WorldMap::ResolvedWmoAreaRows WorldMap::ResolveWmoAreaRowsForGroup(
   rows.group_flags = rows.group_resident
                          ? cached.groups[group_index].header.flags
                          : cached.root.groupInfos[group_index].flags;
+  if (rows.group_resident) {
+    rows.wmo_group_id = static_cast<std::int32_t>(
+        cached.groups[group_index].header.wmoGroupID);
+  }
 
   constexpr std::int32_t kWmoAreaTableRootGroupId = -1;
   rows.root = openwow::data::DBClient_FindWmoAreaTable(
@@ -2138,6 +2605,8 @@ WorldMap::ResolveAreaEnvironmentAtPosition(
     const ResolvedWmoAreaRows wmo_rows =
         ResolveWmoAreaRowsForGroup(*best_group);
     if (wmo_rows.resolved) {
+
+      result.wmo_group_id = wmo_rows.wmo_group_id;
 
       const data::dbc::WMOAreaTableEntry *const naming_row =
           wmo_rows.group != nullptr ? wmo_rows.group : wmo_rows.root;
@@ -2667,6 +3136,16 @@ void WorldMap::Update(float dt) {
 
   last_frame_delta_seconds_ = std::max(0.0f, dt);
   light_env_elapsed_seconds_ += last_frame_delta_seconds_;
+  weather_clock_ += static_cast<std::uint32_t>(
+      last_frame_delta_seconds_ * 1000.0f);
+  const float previous_weather_blend =
+      WeatherLightParamBlendFactor(weather_);
+  UpdateWeather(weather_, {.now = weather_clock_,
+                           .position = {player_x_, player_y_, player_z_},
+                           .indoors = !player_is_outdoors_});
+  if (WeatherLightParamBlendFactor(weather_) != previous_weather_blend) {
+    RefreshLightingEnvironment();
+  }
 }
 
 WorldPresentationSnapshot WorldMap::PublishPresentationSnapshot(
@@ -2737,12 +3216,28 @@ WorldPresentationSnapshot WorldMap::PublishPresentationSnapshot(
   environment_.fog_end = fog.params[1];
   environment_.fog_density = std::clamp(fog.params[2], 0.0f, 1.0f);
   environment_.fog_color = fog.color;
-  environment_.weather = active_weather_type_;
-  environment_.weather_density = active_weather_density_;
+  environment_.weather = weather_.kind;
+  environment_.weather_density = weather_.density;
   environment_.indoors = !area_environment.outdoors;
   std::optional<ZoneSkyboxEntry> camera_wmo_skybox;
   const auto view_projection = Multiply(camera.view, camera.projection);
   frustum_.ExtractFromViewProj(std::span<const float, 16>{view_projection});
+  const float low_detail_near_clip =
+      camera.far_clip - kRetailLowDetailNearOverlap;
+  Matrix4 low_detail_projection = camera.projection;
+  const float low_detail_depth_range =
+      camera.low_detail_far_clip - low_detail_near_clip;
+  low_detail_projection[10] =
+      (low_detail_near_clip + camera.low_detail_far_clip) /
+      low_detail_depth_range;
+  low_detail_projection[14] =
+      (-2.0f * low_detail_near_clip * camera.low_detail_far_clip) /
+      low_detail_depth_range;
+  const Matrix4 low_detail_view_projection =
+      Multiply(camera.view, low_detail_projection);
+  world::Frustum low_detail_frustum{};
+  low_detail_frustum.ExtractFromViewProj(
+      std::span<const float, 16>{low_detail_view_projection});
   camera.map_generation = world_staging_generation_;
   for (std::size_t plane = 0; plane < frustum_.planes.size(); ++plane) {
     std::copy_n(frustum_.planes[plane].begin(), 4u,
@@ -2929,6 +3424,8 @@ WorldPresentationSnapshot WorldMap::PublishPresentationSnapshot(
     (void)placement;
     QueueVisibleWmoGroups(instance.wmo_path, instance, frustum_, camera_x,
                           camera_y, camera_z);
+    QueueLowDetailWmoGroups(instance.wmo_path, instance,
+                            low_detail_frustum, camera_x, camera_y, camera_z);
   }
   return snapshot;
 }
@@ -3041,6 +3538,11 @@ void WorldMap::AcknowledgePresentation(
         if (result.group_index < cached->second.group_gpu_retry.size()) {
           cached->second.group_gpu_retry[result.group_index].Reset();
         }
+        if (result.group_index <
+            cached->second.group_presentation_payloads.size()) {
+          cached->second.group_presentation_payloads[result.group_index]
+              .reset();
+        }
       }
     }
   }
@@ -3116,8 +3618,8 @@ void WorldMap::QueueFullPresentationReplay() {
   }
 
   presentation_commands_.emplace_back(SetWeatherPresentationCommand{
-      .type = active_weather_type_,
-      .density = active_weather_density_,
+      .type = weather_.kind,
+      .density = weather_.target_density,
       .row = active_weather_row_});
 }
 
@@ -3239,7 +3741,6 @@ void WorldMap::QueueTileLoad(const TileCoord &coord) {
   const MapGeneration generation = world_staging_generation_;
   const std::uint64_t request_id = next_world_staging_request_id_++;
   const StreamOwnerHandle owner = MakeStreamOwnerHandle(request_id);
-  const bool big_alpha = (wdt_.flags & data::terrain::WdtFlags::kBigAlpha) != 0u;
   const std::uint32_t map_id = map_id_;
   std::array<std::uint32_t, 4> liquid_vertex_formats{0u, 1u, 2u, 2u};
   std::array<std::uint32_t, 4> liquid_material_variants{2u, 2u, 2u, 2u};
@@ -3277,7 +3778,7 @@ void WorldMap::QueueTileLoad(const TileCoord &coord) {
 
     const std::uint32_t task_id = world_staging_workers_.Submit(
         "world-adt:" + path, WmoTaskPriority(publication_priority),
-        [coord, generation, owner, request_id, big_alpha, map_id,
+        [coord, generation, owner, request_id, map_id,
          liquid_vertex_formats, liquid_material_variants, path, load_file,
          mailbox]() mutable {
           StagedWorldTile completion{
@@ -3299,7 +3800,8 @@ void WorldMap::QueueTileLoad(const TileCoord &coord) {
                 for (std::size_t chunk_index = 0;
                      chunk_index < tile->adt.chunks.size(); ++chunk_index) {
                   tile->terrain_cell_ground_effect_ids[chunk_index] =
-                      BuildChunkGroundEffectIdGrid(tile->adt.chunks[chunk_index], big_alpha);
+                      BuildTerrainChunkGroundEffectIdGrid(
+                          tile->adt.chunks[chunk_index]);
                 }
                 tile->water_surfaces =
                     BuildAdtWaterHeightfields(
@@ -3682,6 +4184,43 @@ void WorldMap::QueueVisibleWmoGroups(
   }
 }
 
+void WorldMap::QueueLowDetailWmoGroups(
+    const std::string& wmo_path, const WmoInstance& instance,
+    const world::Frustum& frustum, const float camera_x,
+    const float camera_y, const float camera_z) {
+  auto cached = wmo_cache_.find(wmo_path);
+  if (cached == wmo_cache_.end()) {
+    return;
+  }
+  auto& candidates = wmo_group_priority_scratch_;
+  candidates.clear();
+  const std::size_t group_count =
+      std::min({cached->second.group_residency.size(),
+                cached->second.root.groupInfos.size(),
+                instance.group_world_bounds.size()});
+  candidates.reserve(group_count);
+  for (std::size_t group_index = 0; group_index < group_count; ++group_index) {
+    if (cached->second.group_residency[group_index] !=
+            WmoGroupResidency::kUnrequested ||
+        (cached->second.root.groupInfos[group_index].flags &
+         data::wmo::kMogpExterior) == 0u) {
+      continue;
+    }
+    const auto& bounds = instance.group_world_bounds[group_index];
+    if (!frustum.TestAABB(bounds[0], bounds[1], bounds[2], bounds[3],
+                          bounds[4], bounds[5])) {
+      continue;
+    }
+    candidates.emplace_back(
+        BoundsDistanceSquared3D(bounds, camera_x, camera_y, camera_z),
+        static_cast<std::uint32_t>(group_index));
+  }
+  std::stable_sort(candidates.begin(), candidates.end());
+  for (const auto& [distance_squared, group_index] : candidates) {
+    QueueWmoGroupLoad(wmo_path, group_index, distance_squared);
+  }
+}
+
 void WorldMap::RebuildPublicationOrder(const float focus_x, const float focus_y) {
   ready_tile_publications_ = {};
   for (auto &[coord, request] : pending_tile_loads_) {
@@ -4032,6 +4571,9 @@ std::size_t WorldMap::PumpReadyWmoGroups(
 
 void WorldMap::PumpWorldStaging(const std::size_t tile_budget,
                                     const std::size_t wmo_budget) {
+  static openwow::diagnostics::PerformanceLogSite performance_site;
+  const openwow::diagnostics::ScopedPerformanceLog performance(
+      performance_site, "world.publish_staged_assets");
   ++world_staging_pump_sequence_;
   QueueDueWmoRetries();
   const auto pump_started = std::chrono::steady_clock::now();

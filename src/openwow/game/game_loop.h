@@ -1,6 +1,7 @@
 #pragma once
 
 #include "openwow/game/world_scene.h"
+#include "openwow/foundation/diagnostics/performance_logging.h"
 #include "openwow/game/world_environment_state.h"
 #include "openwow/game/unit_sound_dispatch.h"
 #include "openwow/game/objects/unit/unit_presentation_runtime.h"
@@ -108,6 +109,8 @@ class GameLoop : private openwow::render::api::RendererDeviceLifecycleObserver {
   void Tick(float dt);
 
   void Shutdown();
+
+  [[nodiscard]] bool PersistRuntimeConfiguration();
 
   void EnterWorld(std::uint32_t map_id, float x, float y, float z,
                   float orientation, const std::string& map_name = {});
@@ -333,6 +336,7 @@ class GameLoop : private openwow::render::api::RendererDeviceLifecycleObserver {
   void ShowLoadingScreen(std::uint32_t map_id);
   void HideLoadingScreen();
   void RefreshLoadingWorldEntryState(float dt);
+  void TryAcknowledgeReadyWorldTransfer();
 
   void UpdateLoadingTrackedPlayerState();
   [[nodiscard]] LoadingScreenWorldEntryGateState BuildLoadingScreenWorldEntryGateState() const;
@@ -466,6 +470,8 @@ class GameLoop : private openwow::render::api::RendererDeviceLifecycleObserver {
   bool initialized_{false};
 
   bool prepared_world_entry_{false};
+  openwow::diagnostics::PerformanceTimer world_entry_performance_timer_;
+  double next_world_entry_performance_ms_{0.0};
 
   bool corpse_proximity_active_{false};
 

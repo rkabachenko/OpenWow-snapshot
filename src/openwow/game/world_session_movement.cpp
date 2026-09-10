@@ -416,7 +416,12 @@ void WorldSession::FeedSplineManager(const MonsterMoveInfo &info) {
           info.position, stop_facing, false, false, true,
           info.has_transport ? info.transport : ObjectGuid{},
           info.has_transport ? info.transport_seat : -1);
-      (void)stop_unit->Movement().TrySettleSplineMovementPoseOwnership();
+      if (stop_unit->IsActiveMover()) {
+        (void)stop_unit->Movement().CompleteSplineMovement(
+            *this, CurrentClientTimeMs(), info.spline_id, info.spline_flags);
+      } else {
+        (void)stop_unit->Movement().TrySettleSplineMovementPoseOwnership();
+      }
     }
   }
 }

@@ -9,6 +9,7 @@ vcpkg_from_github(
         deps.patch
         alsa-dep-fix.patch
         cxx-linkage-pkgconfig.diff
+        ios-uiscene-lifecycle.patch
 )
 
 string(COMPARE EQUAL "${VCPKG_LIBRARY_LINKAGE}" "static" SDL_STATIC)

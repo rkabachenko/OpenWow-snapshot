@@ -3,10 +3,12 @@
 
 #include "openwow/render/api/math/render_matrix_math.h"
 #include "openwow/render/resources/fonts/text_layout.h"
+#include "openwow/foundation/diagnostics/logging.h"
 
 #include <algorithm>
 #include <cmath>
 #include <string_view>
+#include <utility>
 
 namespace openwow::render {
 
@@ -59,7 +61,26 @@ void UnitNameRenderer::Shutdown() {
   text_renderer_.Shutdown();
   entries_.clear();
   line_layout_cache_.clear();
+  font_failure_reported_ = false;
   initialized_ = false;
+}
+
+void UnitNameRenderer::SetFontPath(std::string path) {
+  if (font_path_ == path) {
+    return;
+  }
+  text_renderer_.Shutdown();
+  line_layout_cache_.clear();
+  font_failure_reported_ = false;
+  font_path_ = std::move(path);
+}
+
+void UnitNameRenderer::SetFileLoader(
+    std::function<std::vector<std::uint8_t>(const std::string&)> loader) {
+  text_renderer_.Shutdown();
+  line_layout_cache_.clear();
+  font_failure_reported_ = false;
+  file_loader_ = std::move(loader);
 }
 
 bool UnitNameRenderer::EnsureFont() {
@@ -67,11 +88,28 @@ bool UnitNameRenderer::EnsureFont() {
     return true;
   }
 
-  if (text_renderer_.InitFromVirtualPath(kUnitNameFontPath,
-                                         kBaseFontPixelHeight)) {
-    return true;
+  if (!font_path_.empty()) {
+    if (file_loader_) {
+      auto font_bytes = file_loader_(font_path_);
+      if (!font_bytes.empty() &&
+          text_renderer_.InitFromMemory(font_path_, std::move(font_bytes),
+                                        kBaseFontPixelHeight)) {
+        return true;
+      }
+    } else if (text_renderer_.InitFromVirtualPath(font_path_,
+                                                  kBaseFontPixelHeight)) {
+      return true;
+    }
   }
-  return text_renderer_.Init(kBaseFontPixelHeight);
+  if (!font_failure_reported_) {
+    openwow::diagnostics::Log(
+        openwow::diagnostics::LogLevel::kError,
+        "UnitNameRenderer: locale font initialization failed path=" +
+            font_path_ + " source=" +
+            (file_loader_ ? "active-vfs" : "registered-sfile"));
+    font_failure_reported_ = true;
+  }
+  return false;
 }
 
 void UnitNameRenderer::ConsumePresentation(

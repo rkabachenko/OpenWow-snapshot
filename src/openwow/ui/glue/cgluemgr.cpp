@@ -5,6 +5,7 @@
 
 #include "openwow/core/storm_string.h"
 #include "openwow/data/startup_filesystem_state.h"
+#include "openwow/foundation/diagnostics/logging.h"
 #include "openwow/game/localization.h"
 #include "openwow/game/name_declension.h"
 #include "openwow/game/name_validation.h"
@@ -64,20 +65,16 @@ struct ScanDllRuntimeState {
   ScanDllExecutorForTests executor;
 };
 
-[[nodiscard]] std::filesystem::path ResolveClientRootPath() {
-  const auto& startup_state = openwow::data::GetStartupFileSystemState();
-  if (!startup_state.executable_base_path.empty()) {
-    return std::filesystem::path(startup_state.executable_base_path);
-  }
-  return std::filesystem::current_path();
+[[nodiscard]] std::filesystem::path ResolveWritableClientRootPath() {
+  return openwow::data::ResolveStartupWritablePath();
 }
 
 [[nodiscard]] std::filesystem::path ResolveScanDllModulePath() {
-  return (ResolveClientRootPath() / "Scan.dll").lexically_normal();
+  return (ResolveWritableClientRootPath() / "Scan.dll").lexically_normal();
 }
 
 [[nodiscard]] std::filesystem::path ResolveScanDllStagedModulePath() {
-  return (ResolveClientRootPath() / "Scan.dll.new").lexically_normal();
+  return (ResolveWritableClientRootPath() / "Scan.dll.new").lexically_normal();
 }
 
 void DeletePathIfPresent(const std::filesystem::path& path) {
@@ -206,6 +203,9 @@ void DeletePathIfPresent(const std::filesystem::path& path) {
   std::ofstream staged_output(staged_module_path,
                               std::ios::binary | std::ios::trunc | std::ios::out);
   if (!staged_output.is_open()) {
+    openwow::diagnostics::Log(
+        openwow::diagnostics::LogLevel::kError,
+        "Scan module update failed to open " + staged_module_path.string());
     return false;
   }
 
@@ -214,6 +214,9 @@ void DeletePathIfPresent(const std::filesystem::path& path) {
   staged_output.close();
 
   if (!write_ok) {
+    openwow::diagnostics::Log(
+        openwow::diagnostics::LogLevel::kError,
+        "Scan module update failed to write " + staged_module_path.string());
     std::error_code ec;
     std::filesystem::remove(current_module_path, ec);
     return false;

@@ -7,6 +7,7 @@
 #include "openwow/game/localization.h"
 #include "openwow/game/objects/cgplayer.h"
 #include "openwow/game/world_session.h"
+#include "openwow/foundation/diagnostics/logging.h"
 #include "openwow/ui/game/cvar_system.h"
 #include "openwow/ui/game/game_ui_manager.h"
 #include "openwow/ui/game/script_event_dispatch.h"
@@ -120,26 +121,46 @@ std::string FormatSystemMessage(const char* format, va_list arguments) {
   return buffer.data();
 }
 
-void PlayNamedSystemMessageSound(const char* sound_name) {
+void PlayNamedSystemMessageSound(const SystemMessageCatalogEntry& descriptor) {
+  const char* const sound_name = descriptor.sound_name;
   if (sound_name == nullptr || sound_name[0] == '\0' ||
       openwow::core::SStrCmpNoCase(sound_name, "NONE", 0x7FFFFFFFu) == 0) {
     return;
   }
 
-  auto* session = GetActiveSystemMessageSession();
-  const auto* dbc =
-      session != nullptr ? session->GetDbcLoader()
-                         : TooltipSystem::Get().GetDbcLoader();
-  if (dbc == nullptr) {
+  const std::string context =
+      "system message audio stage=playback source=" +
+      std::string(descriptor.global_string_key != nullptr
+                      ? descriptor.global_string_key : "<unnamed>") +
+      " sound=" + sound_name;
+  const auto* session = GetActiveSystemMessageSession();
+  if (session == nullptr) {
+    diagnostics::Log(diagnostics::LogLevel::kWarn,
+                     context + " reason=world-session-unavailable");
     return;
   }
 
-  const auto* entry =
-      dbc->sound_entries().LookupByNameCaseInsensitive(sound_name);
-  if (entry != nullptr) {
-    if (session == nullptr) return;
-    (void)session->sound_runtime().PlaySoundKit(
-        entry->id, nullptr, nullptr);
+  const auto* dbc = session->GetDbcLoader();
+  if (dbc == nullptr) {
+    diagnostics::Log(diagnostics::LogLevel::kWarn,
+                     context + " reason=sound-table-unavailable");
+    return;
+  }
+  const auto* entry = dbc->sound_entries().LookupByNameCaseInsensitive(sound_name);
+  if (entry == nullptr) {
+    diagnostics::Log(diagnostics::LogLevel::kWarn,
+                     context + " reason=sound-kit-name-missing");
+    return;
+  }
+  const int result = session->sound_runtime().PlaySoundKit(entry->id, nullptr, nullptr);
+  if (result != 0) {
+    diagnostics::Log(
+        result == 9 || result == 17 ? diagnostics::LogLevel::kInfo
+                                   : diagnostics::LogLevel::kWarn,
+        context + " reason=playback-not-started result=" +
+            std::to_string(result) + " allSound=" +
+            std::to_string(CVarSystem::Instance().GetCVarBool("Sound_EnableAllSound")) +
+            " sfx=" + std::to_string(CVarSystem::Instance().GetCVarBool("Sound_EnableSFX")));
   }
 }
 
@@ -163,7 +184,7 @@ std::uint32_t ResolveSystemMessageSpeechSoundKit(
 
 void PlaySystemMessageAudio(const SystemMessageCatalogEntry& descriptor) {
   if (descriptor.sound_mode == kNamedSystemMessageSoundMode) {
-    PlayNamedSystemMessageSound(descriptor.sound_name);
+    PlayNamedSystemMessageSound(descriptor);
     return;
   }
   if (!CVarSystem::Instance().GetCVarBool("Sound_EnableErrorSpeech")) {

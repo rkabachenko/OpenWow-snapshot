@@ -290,7 +290,6 @@ class LootInteraction {
   [[nodiscard]] std::optional<std::size_t> FindFirstFreeDisplayIndex() const;
   [[nodiscard]] ItemQueryRequest RegisterItemQuery(const LootItem& item);
   void ResetItemQueries();
-  void RemoveLocalLootSlot(std::uint8_t slot);
   void RemovePendingQueriesForSlot(std::uint8_t slot);
 
   std::optional<LootWindow> loot_window_;

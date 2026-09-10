@@ -46,6 +46,7 @@ inline AchievementCategoryCount CountLocalCategoryAchievements(
     const openwow::data::dbc::DbcLoader& dbc,
     const openwow::game::WorldSession& session,
     const AchievementCategorySelector selector,
+    const bool include_all_chain_entries,
     const AchievementIdSet& local_completed_ids,
     const AchievementIdSet& comparison_completed_ids) {
   constexpr std::uint32_t kStatisticsCategoryId = 81;
@@ -84,7 +85,7 @@ inline AchievementCategoryCount CountLocalCategoryAchievements(
     if (previous_chain_id.value != 0 &&
         previous_chain_id.value == achievement.parent_achievement) {
       previous_chain_id = achievement_id;
-      if (!selector.IsWildcard()) {
+      if (!include_all_chain_entries) {
         if (comparison_completed) {
           ++comparison_only_count;
         }
@@ -95,7 +96,7 @@ inline AchievementCategoryCount CountLocalCategoryAchievements(
     }
 
     if (local_completed) {
-      if (selector.IsWildcard() ||
+      if (include_all_chain_entries ||
           !HasCompletedChildAchievement(dbc, local_completed_ids,
                                         achievement_id)) {
         ++result.completed;

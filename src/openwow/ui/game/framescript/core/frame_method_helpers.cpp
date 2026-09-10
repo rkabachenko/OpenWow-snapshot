@@ -160,6 +160,10 @@ static void SyncLuaFrameParentOrdering(lua_State* L, int self_idx,
   SetLuaFrameLevelCascade(L, self_idx, 0, true);
 }
 
+void SetLuaFrameLevel(lua_State* L, int frame_index, int level) {
+  SetLuaFrameLevelCascade(L, frame_index, level, true);
+}
+
 static bool ScriptFrameRectsOverlap(const ScriptFrameDeviceRect& lhs,
                                     const ScriptFrameDeviceRect& rhs) {
   return lhs.left < rhs.right() && lhs.right() > rhs.left &&
@@ -295,9 +299,14 @@ int LuaFrame_Raise(lua_State* L) {
   if (!detail::AllowLuaFrameProtectedMutation(L, self_idx)) {
     return 0;
   }
+  RaiseLuaFrameResolved(L, self_idx);
+  return 0;
+}
+
+void RaiseLuaFrameResolved(lua_State* L, int self_idx) {
   const int target_idx = PushNearestToplevelFrame(L, self_idx);
   if (target_idx == 0) {
-    return 0;
+    return;
   }
 
   auto* manager = runtime::WorldUiRuntimeContext::FromLua(L);
@@ -349,7 +358,6 @@ int LuaFrame_Raise(lua_State* L) {
   }
 
   lua_pop(L, 1);
-  return 0;
 }
 
 int LuaFrame_Lower(lua_State* L) {
@@ -363,7 +371,7 @@ int LuaFrame_Lower(lua_State* L) {
 
 int LuaFrame_SetFrameStrata(lua_State* L) {
   ValidateFrameSelf(L);
-  if (detail::LuaFrameMutationBlocked(L, 1)) {
+  if (!detail::AllowLuaFrameProtectedMutation(L, 1)) {
     return 0;
   }
   if (lua_isstring(L, 2) == 0) {
@@ -402,7 +410,7 @@ int LuaFrame_GetFrameStrata(lua_State* L) {
 
 int LuaFrame_SetFrameLevel(lua_State* L) {
   ValidateFrameSelf(L);
-  if (detail::LuaFrameMutationBlocked(L, 1)) {
+  if (!detail::AllowLuaFrameProtectedMutation(L, 1)) {
     return 0;
   }
   if (lua_isnumber(L, 2) == 0) {
@@ -415,7 +423,7 @@ int LuaFrame_SetFrameLevel(lua_State* L) {
                       lua_adapter::ScriptObjectDisplayName(L, 1), level);
   }
 
-  SetLuaFrameLevelCascade(L, 1, level, true);
+  SetLuaFrameLevel(L, 1, level);
   return 0;
 }
 
@@ -531,7 +539,7 @@ static void SetLuaScrollChildTable(lua_State* L, int self_idx, int new_child_idx
 
 int LuaScriptObject_SetParent(lua_State* L) {
   const int self_idx = ValidateParentableScriptObjectSelf(L);
-  if (detail::LuaFrameMutationBlocked(L, self_idx)) {
+  if (!detail::AllowLuaFrameProtectedMutation(L, self_idx)) {
     return 0;
   }
 

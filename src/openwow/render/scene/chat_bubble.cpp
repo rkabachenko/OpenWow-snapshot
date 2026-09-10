@@ -114,6 +114,7 @@ void ChatBubblePresenter::Shutdown() {
   backdrop_lease_ = {};
   tail_lease_ = {};
   text_renderer_.Shutdown();
+  font_failure_reported_ = false;
   last_rendered_bubble_count_ = 0u;
   last_render_generation_ = 0u;
   initialized_ = false;
@@ -122,6 +123,7 @@ void ChatBubblePresenter::Shutdown() {
 
 void ChatBubblePresenter::SetFileLoader(FileLoader loader) {
   file_loader_ = std::move(loader);
+  font_failure_reported_ = false;
   if (!initialized_) {
     return;
   }
@@ -133,6 +135,19 @@ void ChatBubblePresenter::SetFileLoader(FileLoader loader) {
   text_renderer_.Shutdown();
   EnsureFont();
   EnsureTextures();
+}
+
+void ChatBubblePresenter::SetFontPath(std::string path) {
+  if (font_path_ == path) {
+    return;
+  }
+  font_path_ = std::move(path);
+  font_failure_reported_ = false;
+  prepared_layouts_.clear();
+  text_renderer_.Shutdown();
+  if (initialized_) {
+    EnsureFont();
+  }
 }
 
 bool ChatBubblePresenter::stock_visuals_ready() const noexcept {
@@ -224,6 +239,11 @@ void ChatBubblePresenter::Render(
     return;
   }
 
+  const float diagonal = std::sqrt(screen_w * screen_w + screen_h * screen_h);
+  const float diag_scale = diagonal / kUiCoordinateDiagonalReference;
+  // A failed resize is diagnosed and retains the previous usable atlas.
+  static_cast<void>(text_renderer_.PrepareGlyphRasterScale(diag_scale));
+
   bgfx::setViewMode(view_id, bgfx::ViewMode::Sequential);
   text_renderer_.BeginFrame(view_id, screen_w, screen_h);
   bgfx::setViewClear(view_id, BGFX_CLEAR_NONE);
@@ -237,8 +257,6 @@ void ChatBubblePresenter::Render(
   const float tail_overlap = kTailOverlap * ui_scale;
   const float minimum_text_width = kMinimumTextWidth * ui_scale;
 
-  const float diagonal = std::sqrt(screen_w * screen_w + screen_h * screen_h);
-  const float diag_scale = diagonal / kUiCoordinateDiagonalReference;
   const float text_padding = kTextPadding * diag_scale;
 
   const float maximum_text_width = std::max(
@@ -537,12 +555,18 @@ void ChatBubblePresenter::EnsureFont() {
                                              kNameplateFontHeight);
     }
   }
-  if (!loaded) {
+  if (!loaded && !file_loader_) {
     loaded = text_renderer_.InitFromVirtualPath(font_path_, kNameplateFontHeight);
   }
-  if (!loaded) {
-    diagnostics::Log(diagnostics::LogLevel::kWarn,
-              "ChatBubblePresenter: NAMEPLATE_FONT initialization failed");
+  if (!loaded && !font_failure_reported_) {
+    diagnostics::Log(
+        diagnostics::LogLevel::kError,
+        "ChatBubblePresenter: locale font initialization failed path=" +
+            font_path_ + " source=" +
+            (file_loader_ ? "active-vfs" : "registered-sfile"));
+    font_failure_reported_ = true;
+  } else if (loaded) {
+    font_failure_reported_ = false;
   }
 }
 

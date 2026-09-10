@@ -37,6 +37,7 @@ enum class AttackResultType : std::uint32_t {
 
 namespace AttackHitFlags {
 inline constexpr std::uint32_t kOffhand         = 0x00000004;
+inline constexpr std::uint32_t kMiss            = 0x00000010;
 inline constexpr std::uint32_t kFullAbsorb      = 0x00000020;
 inline constexpr std::uint32_t kFullResist      = 0x00000080;
 inline constexpr std::uint32_t kCriticalHit     = 0x00000200;

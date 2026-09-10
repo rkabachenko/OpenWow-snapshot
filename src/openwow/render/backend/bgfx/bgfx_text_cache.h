@@ -7,6 +7,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "openwow/render/resources/fonts/font_face.h"
@@ -132,14 +133,17 @@ class BgfxTextCache {
 
   [[nodiscard]] const std::string& NormalizedFontPath(
       const std::string& font_path);
+  void RefreshVfsRevision();
 
   const openwow::vfs::VirtualFileSystem* vfs_{};
+  std::uint64_t vfs_revision_{};
   std::unordered_map<std::string,
                      std::shared_ptr<openwow::render::text::FontFace>>
       faces_;
   std::unordered_map<std::string, std::unique_ptr<BgfxGlyphAtlas>> atlases_;
   std::unordered_map<std::size_t, std::unique_ptr<CachedLayout>> layouts_;
   std::unordered_map<std::string, std::string> normalized_font_path_cache_;
+  std::unordered_set<std::string> failed_faces_;
 };
 
 }

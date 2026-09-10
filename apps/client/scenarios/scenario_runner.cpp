@@ -86,6 +86,7 @@ std::string_view RegionRoleName(
     case RegionRole::ButtonText: return "button-text";
     case RegionRole::EditBoxText: return "editbox-text";
     case RegionRole::MessageFontDefinition: return "message-font-definition";
+    case RegionRole::SimpleHtmlFontDefinition: return "simplehtml-font-definition";
     case RegionRole::EditBoxCaret: return "editbox-caret";
     case RegionRole::EditBoxHighlight: return "editbox-highlight";
   }

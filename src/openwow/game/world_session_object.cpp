@@ -34,6 +34,7 @@
 #include "openwow/game/profession_system.h"
 #include "openwow/game/quest_poi.h"
 #include "openwow/game/readable_text.h"
+#include "openwow/game/reputation_info.h"
 #include "openwow/game/spellbook_frame.h"
 #include "openwow/game/spellbook_system.h"
 #include "openwow/game/talent_info.h"
@@ -49,6 +50,7 @@
 #include "openwow/ui/game/game_ui_core.h"
 #include "openwow/ui/surfaces/game/runtime/system_message_dispatch.h"
 #include "openwow/ui/game/game_ui_manager.h"
+#include "openwow/ui/game/quest_log_interleaved.h"
 #include "openwow/ui/game/script_event_dispatch.h"
 #include "openwow/ui/game/secure_execution.h"
 #include "openwow/ui/game/world_map_system.h"
@@ -72,6 +74,21 @@ namespace openwow::game {
 namespace {
 
 constexpr std::uint32_t kShapeshiftFormFlagSuppressCreateUiRefresh = 0x1u;
+
+void LogActivePlayerVitals(const char* stage, const CGUnit_C& player) {
+  openwow::diagnostics::Log(
+      openwow::diagnostics::LogLevel::kInfo,
+      std::string("WorldSession: Active player vitals stage=") + stage +
+          " authoritative_health=" +
+          std::to_string(player.GetUInt32(UNIT_FIELD_HEALTH)) +
+          " displayed_health=" + std::to_string(player.State().GetHealth()) +
+          " max_health=" +
+          std::to_string(player.GetUInt32(UNIT_FIELD_MAXHEALTH)) +
+          " base_health=" +
+          std::to_string(player.GetUInt32(UNIT_FIELD_BASE_HEALTH)) +
+          " max_health_modifier=" +
+          std::to_string(player.GetFloat(UNIT_FIELD_MAXHEALTHMODIFIER)));
+}
 
 [[nodiscard]] std::optional<DancePlayerClass> ToDancePlayerClass(
     const std::uint8_t external_class) {
@@ -184,12 +201,6 @@ constexpr std::array kPushPlayerEventRegistrations{
                                 ui::game::events::KNOWN_TITLES_UPDATE},
     PushPlayerEventRegistration{TypeID::kPlayer, 0x788, 8,
                                 ui::game::events::KNOWN_TITLES_UPDATE},
-    PushPlayerEventRegistration{TypeID::kPlayer, 0xFF4, 4,
-                                ui::game::events::UPDATE_EXHAUSTION},
-    PushPlayerEventRegistration{TypeID::kPlayer, 0x798, 4,
-                                ui::game::events::PLAYER_XP_UPDATE},
-    PushPlayerEventRegistration{TypeID::kPlayer, 0x79C, 4,
-                                ui::game::events::PLAYER_XP_UPDATE},
     PushPlayerEventRegistration{TypeID::kPlayer, 0xFFC, 0x1C,
                                 ui::game::events::PLAYER_DAMAGE_DONE_MODS},
     PushPlayerEventRegistration{TypeID::kPlayer, 0x1018, 0x1C,
@@ -712,6 +723,7 @@ bool WorldSession::ApplyLoginVerifyWorld(const LoginVerifyWorld &verify) {
 
   if (needs_world_entry_dispatch) {
     pending_quest_poi_queries_.clear();
+    pending_quest_accepted_slots_.fill(0u);
     std::string map_internal_name;
     if (!ResolveWorldTransferMap(verify.map_id, &map_internal_name)) {
       openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kWarn, "Bad SMSG_NEW_WORLD zoneID");
@@ -832,6 +844,10 @@ void WorldSession::OnLocalPlayerCreated(const ObjectGuid &guid) {
 
   if (const auto *player = objects().GetActivePlayer()) {
     chat_sender_.SyncLocalAfkDisplayState(player->GetPlayerFlags());
+    auto &reputation = ReputationInfo::Get();
+    PrimeReputationInfo(reputation, dbc_, objects());
+    reputation.SyncWatchedFactionSlot(player->GetWatchedFactionIndex());
+    reputation.InitFromPlayerData(objects());
   }
   ResumeIncomingChatDelivery();
   if (const auto *const player = objects().GetLocalPlayerTyped(); player != nullptr) {
@@ -871,10 +887,8 @@ void WorldSession::OnLocalPlayerCreated(const ObjectGuid &guid) {
   if (dbc_ != nullptr) {
     if (const auto *const player = objects().GetLocalPlayerTyped();
         player != nullptr) {
-      auto &talent_store = TalentInfoStore::Get();
-      talent_store.LoadFromDbc(*dbc_);
-      talent_store.InitFromPlayer(player->State().GetClass(),
-                                  player->State().GetRace());
+      TalentInfoStore::Get().InitFromPlayer(player->State().GetClass(),
+                                            player->State().GetRace());
     }
   }
   if (const auto *player = objects().GetLocalPlayerTyped(); player != nullptr) {
@@ -886,6 +900,7 @@ void WorldSession::OnLocalPlayerCreated(const ObjectGuid &guid) {
       (void)ui::game::detail::RefreshActionSlotsForChangedItemEntry(*this, entry);
       SpellBookFrame::HandleTrackedMultiCastTotemItemEntry(*this, entry);
     }
+    LogActivePlayerVitals("create", *player);
   }
 
   openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kInfo,
@@ -941,8 +956,13 @@ void WorldSession::OnLocalPlayerCreated(const ObjectGuid &guid) {
   interaction_.SendLfgGetStatus();
   interaction_.SendLfdPlayerLockInfoRequest();
 
+  // FrameXML is already live when the authoritative inventory post-image is
+  // installed. Preserve its container deltas until the object batch commits,
+  // and rehydrate controls that sampled the pre-player state during OnLoad.
   inventory_bridge_.FullResync();
   QueueEquipmentPresentation();
+  ui::game::ScriptEventDispatch::Get().FireUnitInventoryChanged(
+      guid.GetRawValue());
   if (!update_object_batch_active_) {
     FlushInventoryReplicaTransaction();
   }
@@ -1298,16 +1318,18 @@ void WorldSession::RegisterActivePlayerRegenRefresh(const ObjectGuid &guid) {
 
         const bool in_combat = (new_flags & kUnitFlagInCombat) != 0u;
 
-        ui::game::SecureExecution::Get().SetInCombatLockdown(in_combat);
-
-        RefreshLocalPlayerCombatUsability(*this);
-
         auto &dispatch = ui::game::ScriptEventDispatch::Get();
         if (in_combat) {
+          // AddOns finish protected layout changes in the entering-combat
+          // callback before the combat lock takes effect.
           dispatch.FirePlayerRegenDisabled();
+          ui::game::SecureExecution::Get().SetInCombatLockdown(true);
         } else {
+          ui::game::SecureExecution::Get().SetInCombatLockdown(false);
           dispatch.FirePlayerRegenEnabled();
         }
+
+        RefreshLocalPlayerCombatUsability(*this);
 
         if (local_player_combat_flag_changed_callback_) {
           local_player_combat_flag_changed_callback_();
@@ -1352,7 +1374,7 @@ void WorldSession::RegisterActivePlayerDailyQuestRefresh(const ObjectGuid &guid)
             return;
           }
 
-          RequestVisibleQuestgiverStatusRefresh();
+          RequestQuestgiverStatusRefresh("daily-quest-update");
 
           const int filled = static_cast<int>(player->GetDailyQuestCount());
 
@@ -1823,17 +1845,13 @@ void WorldSession::RegisterActivePlayerSkillRefresh(const ObjectGuid &guid) {
           }
 
           const auto skill = player->GetSkill(slot);
-          std::uint32_t new_adjusted_value = skill.value;
-          if (new_adjusted_value != 0u) {
-            new_adjusted_value += static_cast<std::uint16_t>(skill.step_modifier);
-          }
 
           OnSkillValueDescriptorChanged(
               *this,
               {.slot_index = slot,
                .old_raw_value =
                    static_cast<std::uint16_t>(change.old_words.front()),
-               .new_adjusted_value = new_adjusted_value,
+               .new_adjusted_value = skill.EffectiveValue(),
                .skill_line_id = skill.skill_id,
                .race = player->State().GetRace(),
                .player_class = player->State().GetClass(),
@@ -1988,6 +2006,24 @@ void WorldSession::HandleCapturePointObjectDestroyed(const ObjectGuid &guid) {
                                              guid.GetRawValue(), &world_states_);
 }
 
+void WorldSession::RequestQuestgiverStatusRefresh(const char *source) {
+  const auto *active_player = objects().GetActivePlayer();
+  if (active_player == nullptr) {
+    return;
+  }
+  const bool sent = Send(net::wotlk::PacketSender::BuildQuestgiverStatusMultipleQuery());
+  const auto level = sent ? openwow::diagnostics::LogLevel::kDebug
+                          : openwow::diagnostics::LogLevel::kWarn;
+  if (openwow::diagnostics::IsLogEnabled(level)) {
+    openwow::diagnostics::Log(
+        level,
+        "NPC interaction status stage=query source=" + std::string(source) +
+            " player=" + active_player->GetGuid().ToString() +
+            " opcode=CMSG_QUESTGIVER_STATUS_MULTIPLE_QUERY" +
+            (sent ? " result=sent" : " reason=send-failed"));
+  }
+}
+
 void WorldSession::RequestVisibleQuestgiverStatusRefresh() {
   const auto *active_player = objects().GetActivePlayer();
   if (active_player == nullptr) {
@@ -2008,10 +2044,13 @@ void WorldSession::RequestVisibleQuestgiverStatusRefresh() {
 
         unit.ClearOverlayModelImmediate();
       } else if ((unit.State().GetNpcFlags() & kNpcFlagFlightmaster) != 0) {
-        Send(net::wotlk::PacketSender::BuildQuestgiverStatusQuery(
-            unit.GetGuid().GetRawValue()));
-
-        interaction().SendTaxiNodeStatusQuery(unit.GetGuid().GetRawValue());
+        if (!interaction().SendTaxiNodeStatusQuery(unit.GetGuid().GetRawValue())) {
+          openwow::diagnostics::Log(
+              openwow::diagnostics::LogLevel::kWarn,
+              "NPC interaction status stage=query source=visible-set-refresh guid=" +
+                  unit.GetGuid().ToString() +
+                  " opcode=CMSG_TAXINODE_STATUS_QUERY reason=send-failed");
+        }
       }
     } else if (obj.IsGameObject()) {
       auto &go = static_cast<CGGameObject_C &>(obj);
@@ -2023,7 +2062,7 @@ void WorldSession::RequestVisibleQuestgiverStatusRefresh() {
     }
   });
 
-  Send(net::wotlk::PacketSender::BuildQuestgiverStatusMultipleQuery());
+  RequestQuestgiverStatusRefresh("visible-set-refresh");
 }
 
 void WorldSession::RefreshCreatedGameObjectQuestgiverStatus(const WorldObject &obj) {
@@ -2038,7 +2077,14 @@ void WorldSession::RefreshCreatedGameObjectQuestgiverStatus(const WorldObject &o
     return;
   }
 
-  Send(net::wotlk::PacketSender::BuildQuestgiverStatusQuery(game_object.GetGuid().GetRawValue()));
+  if (!Send(net::wotlk::PacketSender::BuildQuestgiverStatusQuery(
+          game_object.GetGuid().GetRawValue()))) {
+    openwow::diagnostics::Log(
+        openwow::diagnostics::LogLevel::kWarn,
+        "NPC interaction status stage=query source=gameobject-availability guid=" +
+            game_object.GetGuid().ToString() +
+            " opcode=CMSG_QUESTGIVER_STATUS_QUERY reason=send-failed");
+  }
 }
 
 void WorldSession::ClearDestroyedQuestgiverStatus(const ObjectGuid &guid) {
@@ -2094,33 +2140,81 @@ void WorldSession::RefreshActivePlayerFactionDependentState() {
   active_player->Interaction().RefreshFactionDependentState(*this, false);
 }
 
+void WorldSession::ObserveQuestAcceptedTransitions(
+    const CGPlayer_C &player, const FieldUpdateBatch &updates) {
+  constexpr std::uint16_t kQuestRecordFieldCount = 5;
+
+  for (std::uint8_t slot = 0; slot < kMaxQuestLogEntries; ++slot) {
+    const auto base = static_cast<std::uint16_t>(
+        PLAYER_QUEST_LOG_1_1 + slot * kQuestRecordFieldCount);
+    const auto *quest_id_change = FindValueChange(updates, base);
+    const auto *state_change =
+        FindValueChange(updates, static_cast<std::uint16_t>(base + 1u));
+    if (quest_id_change == nullptr && state_change == nullptr) {
+      continue;
+    }
+
+    const auto current = player.GetQuestLog(slot);
+    const auto old_quest_id =
+        quest_id_change != nullptr ? quest_id_change->old_value : current.quest_id;
+    const auto old_state =
+        state_change != nullptr ? state_change->old_value : current.state;
+    const bool quest_identity_changed = old_quest_id != current.quest_id;
+    const bool failure_cleared =
+        (old_state & 0x02u) != 0u && (current.state & 0x02u) == 0u;
+
+    if (current.quest_id != 0u &&
+        (quest_identity_changed || failure_cleared)) {
+      pending_quest_accepted_slots_[slot] = current.quest_id;
+    } else if (pending_quest_accepted_slots_[slot] != current.quest_id) {
+      pending_quest_accepted_slots_[slot] = 0u;
+    }
+  }
+}
+
 void WorldSession::RefreshQuestRuntimeFromPlayer(bool request_query_time) {
   const auto *player = objects().GetLocalPlayerTyped();
   if (player == nullptr) {
     return;
   }
 
-  std::unordered_set<std::uint32_t> previous_quest_ids;
-  previous_quest_ids.reserve(quests_.quest_log_count());
-  for (const auto &entry : quests_.quest_log()) {
-    previous_quest_ids.insert(entry.quest_id);
-  }
-  quests_.SyncQuestLogFromPlayer(objects(), *player);
-  if (!request_query_time) {
-    for (const auto &entry : quests_.quest_log()) {
-      const auto quest_id = entry.quest_id;
-      if (quest_id != 0 && !previous_quest_ids.contains(quest_id)) {
-        ui::game::ScriptEventDispatch::Get().FireQuestAccepted(
-            static_cast<int>(entry.slot + 1), static_cast<int>(quest_id));
-      }
+  quests_.SyncQuestLogFromPlayer(*this, *player);
+
+  for (std::uint8_t slot = 0; slot < kMaxQuestLogEntries; ++slot) {
+    const auto quest_id = pending_quest_accepted_slots_[slot];
+    if (quest_id == 0u) {
+      continue;
     }
+    if (player->GetQuestLog(slot).quest_id != quest_id) {
+      pending_quest_accepted_slots_[slot] = 0u;
+      continue;
+    }
+    const auto *quest_template = quests_.GetTemplate(quest_id);
+    if (quest_template == nullptr) {
+      continue;
+    }
+
+    // Consume the pending publication before dispatching Lua callbacks, which
+    // may query or refresh the quest log again.
+    pending_quest_accepted_slots_[slot] = 0u;
+    if (quest_template->title.empty()) {
+      diagnostics::Log(
+          diagnostics::LogLevel::kWarn,
+          "quest feedback stage=accepted source=quest-log-update quest=" +
+              std::to_string(quest_id) + " slot=" + std::to_string(slot) +
+              " reason=quest-record-has-no-title");
+    } else {
+      ui::game::DisplaySystemMessage(146, quest_template->title.c_str());
+    }
+    const int visible_index =
+        ui::game::detail::FindVisibleQuestIndexById(*this, quest_id);
+    ui::game::ScriptEventDispatch::Get().FireQuestAccepted(visible_index);
   }
 
   if (request_query_time) {
     interaction_.SendQueryTime();
   }
 
-  bool waiting_for_template = false;
   std::vector<std::uint32_t> poi_query_ids;
   poi_query_ids.reserve(quests_.quest_log_count());
 
@@ -2133,18 +2227,28 @@ void WorldSession::RefreshQuestRuntimeFromPlayer(bool request_query_time) {
         entry.quest_id, {.callback_key = AsyncQueryChannel::CallbackKey(
                              reinterpret_cast<std::uintptr_t>(this), entry.quest_id),
                          .dedupe_callbacks = true,
-                         .callback = [this](bool success) {
+                         .callback = [this, quest_id = entry.quest_id](bool success) {
                            if (!success) {
-
+                             for (auto &pending_quest_id :
+                                  pending_quest_accepted_slots_) {
+                               if (pending_quest_id == quest_id) {
+                                 pending_quest_id = 0u;
+                               }
+                             }
+                             openwow::diagnostics::Log(
+                                 openwow::diagnostics::LogLevel::kWarn,
+                                 "quest template resolution failed quest=" +
+                                     std::to_string(quest_id) +
+                                     " stage=quest-log-publication");
                              openwow::debug::DebugConsole::Get().Write(
                                  "Invalid quest log entry");
                              return;
                            }
                            ui::game::ScriptEventDispatch::Get().FireQuestQueryComplete();
                            RefreshQuestRuntimeFromPlayer(false);
+                           ui::game::ScriptEventDispatch::Get().FireQuestLogUpdate();
                          }});
     if (tmpl == nullptr) {
-      waiting_for_template = true;
       continue;
     }
 
@@ -2154,7 +2258,7 @@ void WorldSession::RefreshQuestRuntimeFromPlayer(bool request_query_time) {
     }
   }
 
-  if (waiting_for_template || poi_query_ids.empty()) {
+  if (poi_query_ids.empty()) {
     return;
   }
 
@@ -2201,6 +2305,7 @@ void WorldSession::OnFieldsChanged(const WorldObject &obj, const FieldUpdateBatc
       dance_studio().SetActivePlayerClass(
           ToDancePlayerClass(local_player->State().GetClass()));
       if (!is_create && obj.GetTypeId() == TypeID::kPlayer) {
+        ObserveQuestAcceptedTransitions(*local_player, updates);
         container_frame_func3_summary =
             SummarizeContainerFrameFunc3SlotChanges(*this, *local_player, updates);
         container_frame_func3_summary_pending = container_frame_func3_summary.has_slot_guid_change;
@@ -2209,9 +2314,12 @@ void WorldSession::OnFieldsChanged(const WorldObject &obj, const FieldUpdateBatc
       }
     }
 
-    if (obj.GetTypeId() == TypeID::kPlayer &&
-        (is_create || HasUpdatedField(updates, UNIT_FIELD_HEALTH))) {
-      EvaluateActivePlayerLifeLevel(false);
+    if (!is_create && obj.GetTypeId() == TypeID::kPlayer &&
+        HasUpdatedField(updates, UNIT_FIELD_MAXHEALTH)) {
+      if (const auto* const local_player = objects().GetLocalPlayerTyped();
+          local_player != nullptr) {
+        LogActivePlayerVitals("max-health-update", *local_player);
+      }
     }
 
     if (obj.GetTypeId() == TypeID::kPlayer &&
@@ -2223,10 +2331,6 @@ void WorldSession::OnFieldsChanged(const WorldObject &obj, const FieldUpdateBatc
         ResetAndRequeryCorpsePosition();
       }
       active_player_was_ghost_ = is_ghost_now;
-
-      if (!is_create) {
-        EvaluateActivePlayerLifeLevel(false);
-      }
     }
 
     if (obj.GetTypeId() == TypeID::kPlayer &&
@@ -2348,6 +2452,16 @@ void WorldSession::OnFieldsChanged(const WorldObject &obj, const FieldUpdateBatc
   }
 
   DescriptorCallbackRegistry::Get().Dispatch(obj, updates, is_create);
+
+  // Health callbacks prepare the release timer and death side effects before
+  // publishing PLAYER_DEAD. A level check before them consumes the transition
+  // while Lua still sees the initial zero release time and hides the popup.
+  if (obj.GetGuid() == objects().GetLocalPlayerGuid() &&
+      obj.GetTypeId() == TypeID::kPlayer &&
+      (is_create || HasUpdatedField(updates, UNIT_FIELD_HEALTH) ||
+       HasUpdatedField(updates, PLAYER_FLAGS))) {
+    EvaluateActivePlayerLifeLevel(false);
+  }
 
   if (!is_create) {
     DispatchLocalPlayerVisibleItemCombatEvents(obj, updates, objects().GetLocalPlayerGuid(),
@@ -2484,132 +2598,40 @@ void WorldSession::OnFieldsChanged(const WorldObject &obj, const FieldUpdateBatc
       continue;
 
     if (evt.needs_unit_token) {
-
-      std::uint64_t guid = evt.guid_raw;
-
-      if (std::strcmp(evt.event_name, "UNIT_HEALTH") == 0) {
-        dispatch.FireUnitHealth(guid);
-      } else if (std::strcmp(evt.event_name, "UNIT_MAXHEALTH") == 0) {
-        dispatch.FireUnitMaxHealth(guid);
-      }
-
-      else if (std::strcmp(evt.event_name, "UNIT_MAXMANA") == 0 ||
-                 std::strcmp(evt.event_name, "UNIT_MAXRAGE") == 0 ||
-                 std::strcmp(evt.event_name, "UNIT_MAXFOCUS") == 0 ||
-                 std::strcmp(evt.event_name, "UNIT_MAXENERGY") == 0 ||
-                 std::strcmp(evt.event_name, "UNIT_MAXHAPPINESS") == 0 ||
-                 std::strcmp(evt.event_name, "UNIT_MAXRUNIC_POWER") == 0) {
-        dispatch.FireUnitMaxPowerSpecific(guid, evt.power_type);
-      }
-
-      else if (std::strcmp(evt.event_name, "UNIT_MANA") == 0 ||
-               std::strcmp(evt.event_name, "UNIT_RAGE") == 0 ||
-               std::strcmp(evt.event_name, "UNIT_FOCUS") == 0 ||
-               std::strcmp(evt.event_name, "UNIT_ENERGY") == 0 ||
-               std::strcmp(evt.event_name, "UNIT_HAPPINESS") == 0 ||
-               std::strcmp(evt.event_name, "UNIT_RUNIC_POWER") == 0) {
-        dispatch.FireUnitPowerSpecific(guid, evt.power_type);
-      }
-
-      else if (std::strcmp(evt.event_name, "UNIT_LEVEL") == 0) {
-        dispatch.FireUnitLevel(guid);
-      }
-
-      else if (std::strcmp(evt.event_name, "UNIT_FLAGS") == 0) {
-        dispatch.FireUnitFlags(guid);
-      }
-
-      else if (std::strcmp(evt.event_name, "UNIT_TARGET") == 0) {
-        dispatch.FireUnitTarget(guid);
-      }
-
-      else if (std::strcmp(evt.event_name, "UNIT_MODEL_CHANGED") == 0) {
-        dispatch.FireUnitModel(guid);
-      }
-
-      else if (std::strcmp(evt.event_name, "UNIT_PORTRAIT_UPDATE") == 0) {
-        dispatch.FireUnitPortrait(guid);
-      }
-
-      else if (std::strcmp(evt.event_name, "UNIT_STATS") == 0) {
-        dispatch.FireUnitStats(guid);
-      }
-
-      else if (std::strcmp(evt.event_name, "UNIT_ATTACK_POWER") == 0) {
-        dispatch.FireUnitAttackPower(guid);
-      }
-
-      else if (std::strcmp(evt.event_name, "UNIT_ATTACK_SPEED") == 0) {
-        dispatch.FireUnitAttackSpeed(guid);
-      }
-
-      else if (std::strcmp(evt.event_name, "UNIT_DAMAGE") == 0) {
-        dispatch.FireUnitAttack(guid);
-      }
-
-      else if (std::strcmp(evt.event_name, "UNIT_RANGEDDAMAGE") == 0 ||
-               std::strcmp(evt.event_name, "UNIT_RANGED_ATTACK_POWER") == 0) {
-        dispatch.FireUnitRangedAttackPower(guid);
-      }
-
-      else if (std::strcmp(evt.event_name, "UNIT_RESISTANCES") == 0) {
-        dispatch.FireUnitResistances(guid);
-      }
-
-      else if (std::strcmp(evt.event_name, "UNIT_DEFENSE") == 0) {
-        dispatch.FireUnitDefense(guid);
-      }
-
-      else if (std::strcmp(evt.event_name, "UNIT_FACTION") == 0) {
-        dispatch.FireUnitFaction(guid);
-      }
-
-      else if (std::strcmp(evt.event_name, "UNIT_DISPLAYPOWER") == 0) {
-        dispatch.FireUnitDisplayPower(guid);
-      }
-
-      else if (std::strcmp(evt.event_name, "UNIT_INVENTORY_CHANGED") == 0) {
-        dispatch.FireUnitInventoryChanged(guid);
-      }
-
-      else if (std::strcmp(evt.event_name, "UNIT_PET") == 0) {
-        dispatch.FireUnitPet(guid);
-      }
-
-      else if (std::strcmp(evt.event_name, "UNIT_AURA") == 0) {
-        dispatch.FireUnitAura(guid);
-      }
-
-      else if (std::strcmp(evt.event_name, "UNIT_DYNAMIC_FLAGS") == 0) {
-        dispatch.FireUnitFlags(guid);
-      }
-
-      else if (std::strcmp(evt.event_name, "UNIT_COMBO_POINTS") == 0) {
-        dispatch.FireUnitComboPoints(guid);
-      }
-
-      else if (std::strcmp(evt.event_name, "PLAYER_GUILD_UPDATE") == 0) {
-        dispatch.FirePerUnitEvent(ui::game::events::PLAYER_GUILD_UPDATE, guid);
+      dispatch.FirePerUnitEvent(evt.event_name, evt.guid_raw);
+      if (std::strcmp(evt.event_name, "PLAYER_GUILD_UPDATE") == 0) {
         dispatch.FireEvent(ui::game::events::TABARD_CANSAVE_CHANGED);
       }
     }
 
     else {
       if (std::strcmp(evt.event_name, "PLAYER_XP_UPDATE") == 0) {
-        dispatch.FirePlayerXP();
+        if (evt.guid_raw == objects().GetLocalPlayerGuid().GetRawValue()) {
+          dispatch.FirePlayerXP();
+        }
       } else if (std::strcmp(evt.event_name, "PLAYER_MONEY") == 0) {
-        dispatch.FirePlayerMoney();
+        if (evt.guid_raw == objects().GetLocalPlayerGuid().GetRawValue()) {
+          dispatch.FirePlayerMoney();
+          RequestQuestgiverStatusRefresh("money-update");
+        }
+      } else if (std::strcmp(evt.event_name, "UPDATE_EXHAUSTION") == 0) {
+        if (evt.guid_raw == objects().GetLocalPlayerGuid().GetRawValue()) {
+          dispatch.FireEventArgs(ui::game::events::UPDATE_EXHAUSTION,
+                                 {std::string("player")});
+        }
       } else if (std::strcmp(evt.event_name, "PLAYER_FLAGS_CHANGED") == 0) {
         dispatch.FirePlayerFlags();
       } else if (std::strcmp(evt.event_name, "PLAYER_TALENT_UPDATE") == 0) {
 
       } else if (std::strcmp(evt.event_name, "UNIT_QUEST_LOG_CHANGED") == 0) {
 
-        RequestVisibleQuestgiverStatusRefresh();
+        RequestQuestgiverStatusRefresh("quest-log-update");
         RefreshQuestRuntimeFromPlayer(false);
-        dispatch.FireQuestLogUpdate();
-      } else if (std::strcmp(evt.event_name, "SPELLS_CHANGED") == 0) {
-        dispatch.FireSpellsChanged();
+        dispatch.QueueGlobalEvent("QUEST_LOG_UPDATE");
+      } else if (std::strcmp(evt.event_name, "SKILL_LINES_CHANGED") == 0) {
+        if (evt.guid_raw == objects().GetLocalPlayerGuid().GetRawValue()) {
+          dispatch.FireEvent(ui::game::events::SKILL_LINES_CHANGED);
+        }
       }
     }
   }

@@ -152,6 +152,7 @@ struct Quad {
 
   BlendMode blend{BlendMode::kAlpha};
   bgfx::TextureHandle mask_texture = BGFX_INVALID_HANDLE;
+  bool replace_alpha_with_mask{false};
   std::uint64_t sampler_flags{BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP};
   std::array<UvPoint, 4> uv_quad{};
   bool has_custom_uv_quad{false};
@@ -243,7 +244,8 @@ class UiRenderer {
   [[nodiscard]] DrawStateKey BuildDrawStateKey(
       std::uint64_t bgfx_state, float alpha_reference,
       bgfx::TextureHandle texture, std::uint64_t sampler_flags,
-      bgfx::TextureHandle mask_texture, bool desaturated,
+      bgfx::TextureHandle mask_texture, bool replace_alpha_with_mask,
+      bool desaturated,
       bool flip_texture_y) const noexcept;
 
   bool EmitRun(const DrawStateKey& key, std::span<const MeshVertex> vertices,

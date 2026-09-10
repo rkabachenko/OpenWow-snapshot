@@ -525,7 +525,11 @@ M2InstanceAnimationInfo M2SpatialQueries::BuildAnimationInfoLocked(
           .sequence_index = instance.animation_sequence_index,
           .time_ms = AnimationTimeMs(instance),
           .duration_ms = SequenceDurationMs(resource.model_data,
-                                            instance.animation_sequence_index)};
+                                            instance.animation_sequence_index),
+          .sequence_flags =
+              instance.animation_sequence_index < resource.model_data.animation_sequences.size()
+                  ? resource.model_data.animation_sequences[instance.animation_sequence_index].flags
+                  : 0u};
 }
 
 M2ModelSpatialInfo M2SpatialQueries::BuildSpatialInfoLocked(

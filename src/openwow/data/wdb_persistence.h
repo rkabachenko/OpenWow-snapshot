@@ -61,13 +61,13 @@ inline constexpr uint32_t kRecordSize_Dance = 152;
 
 inline constexpr uint32_t kRecordSize_ItemText = 8000;
 
-inline constexpr uint32_t kVersion_Creature = 1;
-inline constexpr uint32_t kVersion_GameObject = 1;
-inline constexpr uint32_t kVersion_Item = 5;
-inline constexpr uint32_t kVersion_ItemName = 1;
-inline constexpr uint32_t kVersion_Quest = 3;
-inline constexpr uint32_t kVersion_PageText = 1;
-inline constexpr uint32_t kVersion_NpcText = 1;
+inline constexpr uint32_t kVersion_Creature = 2;
+inline constexpr uint32_t kVersion_GameObject = 2;
+inline constexpr uint32_t kVersion_Item = 6;
+inline constexpr uint32_t kVersion_ItemName = 2;
+inline constexpr uint32_t kVersion_Quest = 4;
+inline constexpr uint32_t kVersion_PageText = 2;
+inline constexpr uint32_t kVersion_NpcText = 2;
 inline constexpr uint32_t kVersion_PetName = 1;
 inline constexpr uint32_t kVersion_Petition = 1;
 inline constexpr uint32_t kVersion_GuildStats = 1;

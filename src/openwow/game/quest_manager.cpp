@@ -11,6 +11,9 @@
 #include "openwow/game/packet_reader.h"
 #include "openwow/game/quest_dialog_text.h"
 #include "openwow/game/quest_log.h"
+#include "openwow/game/localization.h"
+#include "openwow/game/quest_turnin_state.h"
+#include "openwow/game/world_session.h"
 #include "openwow/game/reputation_info.h"
 #include "openwow/network/protocol/wotlk/opcodes.h"
 #include "openwow/foundation/diagnostics/logging.h"
@@ -456,8 +459,9 @@ std::string QuestManager::ExpandDialogText(
              : ExpandQuestDialogText(text, empty_as_space);
 }
 
-void QuestManager::ShowQuestGreeting(const std::string &greeting) {
+void QuestManager::ShowQuestGreeting(const ObjectGuid &giver, const std::string &greeting) {
   ResetDialogState();
+  SetQuestFrameInteractionState(giver, {}, 0);
   dialog_text_.greeting_text = ExpandDialogText(greeting, true);
   dialog_text_.has_greeting_text = true;
 }
@@ -785,14 +789,14 @@ bool QuestManager::HandleQuestGiverQuestDetails(const std::uint8_t *data, std::s
       !r.ReadCString(d.objectives, kQuestTemplateObjectivesSize))
     return false;
 
-  std::uint8_t auto_accept;
+  std::uint8_t activate_accept;
   std::uint32_t flags_raw, suggested;
   std::uint8_t accept_packet_value = 0;
-  if (!r.ReadU8(auto_accept) || !r.ReadU32(flags_raw) || !r.ReadU32(suggested) ||
+  if (!r.ReadU8(activate_accept) || !r.ReadU32(flags_raw) || !r.ReadU32(suggested) ||
       !r.ReadU8(accept_packet_value))
     return false;
 
-  d.auto_accept = auto_accept != 0;
+  d.activate_accept = activate_accept != 0;
   d.quest_flags = static_cast<QuestFlags>(flags_raw);
   d.suggested_players = suggested;
   d.accept_packet_value = accept_packet_value;
@@ -879,6 +883,11 @@ bool QuestManager::HandleQuestGiverQuestDetails(const std::uint8_t *data, std::s
     return false;
   }
 
+  openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kInfo,
+      "Quest text stage=dialog source=SMSG_QUESTGIVER_QUEST_DETAILS quest=" +
+          std::to_string(d.quest_id) + " locale=" + Localization::Get().GetLocaleName() +
+          " title=" + d.title);
+
   BeginDialogResponse();
   SetQuestFrameInteractionState(d.npc_guid, d.sharer_guid, d.quest_id);
   dialog_text_.title_text = NormalizeQuestFrameTitle(d.title);
@@ -913,9 +922,7 @@ bool QuestManager::HandleQuestGiverRequestItems(const std::uint8_t *data, std::s
   d.quest_flags = static_cast<QuestFlags>(flags_raw);
   d.close_on_decline = progress_state != 0;
 
-  if (emote_delay != 0 || emote_id != 0) {
-    d.emotes.push_back({.delay = emote_delay, .emote_id = emote_id});
-  }
+  d.emotes.push_back({.delay = emote_delay, .emote_id = emote_id});
 
   std::uint32_t required_count = 0;
   if (!r.ReadU32(required_count))
@@ -947,6 +954,11 @@ bool QuestManager::HandleQuestGiverRequestItems(const std::uint8_t *data, std::s
   if (r.Remaining() != 0) {
     return false;
   }
+
+  openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kInfo,
+      "Quest text stage=dialog source=SMSG_QUESTGIVER_REQUEST_ITEMS quest=" +
+          std::to_string(d.quest_id) + " locale=" + Localization::Get().GetLocaleName() +
+          " title=" + d.title);
 
   BeginDialogResponse();
   SetQuestFrameInteractionState(d.npc_guid, ObjectGuid(), d.quest_id);
@@ -1058,6 +1070,11 @@ bool QuestManager::HandleQuestGiverOfferReward(const std::uint8_t *data, std::si
     return false;
   }
 
+  openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kInfo,
+      "Quest text stage=dialog source=SMSG_QUESTGIVER_OFFER_REWARD quest=" +
+          std::to_string(d.quest_id) + " locale=" + Localization::Get().GetLocaleName() +
+          " title=" + d.title);
+
   BeginDialogResponse();
   SetQuestFrameInteractionState(d.npc_guid, ObjectGuid(), d.quest_id);
   dialog_text_.title_text = NormalizeQuestFrameTitle(d.title);
@@ -1137,8 +1154,12 @@ bool QuestManager::HandleQuestUpdateComplete(const std::uint8_t *data, std::size
   std::uint32_t quest_id;
   if (!r.ReadU32(quest_id) || r.Remaining() != 0)
     return false;
-  if (auto *entry = FindQuestLogEntry(quest_id))
-    entry->status = QuestStatus::kComplete;
+  pending_quest_watch_update_.reset();
+  if (auto *entry = FindQuestLogEntry(quest_id)) {
+    if (entry->status != QuestStatus::kFailed) {
+      pending_quest_watch_update_ = quest_id;
+    }
+  }
   return true;
 }
 
@@ -1151,12 +1172,16 @@ bool QuestManager::HandleQuestUpdateAddKill(const std::uint8_t *data, std::size_
       !r.ReadGuid(guid) || r.Remaining() != 0)
     return false;
 
+  pending_quest_watch_update_.reset();
   if (auto *log = FindQuestLogEntry(quest_id)) {
 
     if (auto *tmpl = GetTemplate(quest_id)) {
       for (int i = 0; i < kQuestObjectivesCount; ++i) {
         if (tmpl->npc_or_go_objectives[i].creature_or_go == entry_id) {
           log->kill_counts[i] = current;
+          if (log->status != QuestStatus::kFailed) {
+            pending_quest_watch_update_ = quest_id;
+          }
           break;
         }
       }
@@ -1255,8 +1280,10 @@ bool QuestManager::HandleQuestGiverQuestFailed(const std::uint8_t *data, std::si
 
 bool QuestManager::HandleQuestUpdateFailed(const std::uint8_t *data, std::size_t len) {
   PacketReader r(data, len);
-  if (!r.ReadU32(last_update_failed_quest_))
+  std::uint32_t quest_id = 0;
+  if (!r.ReadU32(quest_id))
     return false;
+  last_update_failed_quest_ = quest_id;
   MarkQuestFailedInLog(last_update_failed_quest_, false);
   return true;
 }
@@ -1264,23 +1291,43 @@ bool QuestManager::HandleQuestUpdateFailed(const std::uint8_t *data, std::size_t
 bool QuestManager::HandleQuestUpdateAddPvpKill(const std::uint8_t *data, std::size_t len) {
   PacketReader r(data, len);
   QuestPvpKillInfo pk;
-  if (!r.ReadU32(pk.quest_id) || !r.ReadU32(pk.current_count) || !r.ReadU32(pk.required_count))
+  if (!r.ReadU32(pk.quest_id) || !r.ReadU32(pk.current_count))
     return false;
+  pending_quest_watch_update_.reset();
+  const auto *const quest_template = GetTemplate(pk.quest_id);
+  if (quest_template != nullptr) {
+    pk.required_count = quest_template->required_player_kills;
+  }
   last_pvp_kill_ = pk;
+  const auto *entry = FindQuestLogEntry(pk.quest_id);
+  if (entry != nullptr && entry->status != QuestStatus::kFailed &&
+      quest_template != nullptr) {
+    pending_quest_watch_update_ = pk.quest_id;
+  }
   return true;
+}
+
+std::optional<std::uint32_t> QuestManager::TakeQuestWatchUpdateQuestId() {
+  auto quest_id = pending_quest_watch_update_;
+  pending_quest_watch_update_.reset();
+  return quest_id;
 }
 
 bool QuestManager::HandleQuestForceRemove(const std::uint8_t *data, std::size_t len) {
   PacketReader r(data, len);
-  if (!r.ReadU32(force_remove_quest_))
+  std::uint32_t quest_id = 0;
+  if (!r.ReadU32(quest_id))
     return false;
+  force_remove_quest_ = quest_id;
   return true;
 }
 
 bool QuestManager::HandleQuestgiverQuestInvalid(const std::uint8_t *data, std::size_t len) {
   PacketReader r(data, len);
-  if (!r.ReadU32(quest_invalid_reason_))
+  std::uint32_t reason = 0;
+  if (!r.ReadU32(reason))
     return false;
+  quest_invalid_reason_ = reason;
   return true;
 }
 
@@ -1297,8 +1344,10 @@ bool QuestManager::HandleQuestUpdateAddItem(const std::uint8_t *data, std::size_
 
 bool QuestManager::HandleQuestUpdateFailedTimer(const std::uint8_t *data, std::size_t len) {
   PacketReader r(data, len);
-  if (!r.ReadU32(failed_timer_quest_))
+  std::uint32_t quest_id = 0;
+  if (!r.ReadU32(quest_id))
     return false;
+  failed_timer_quest_ = quest_id;
   MarkQuestFailedInLog(failed_timer_quest_, true);
   return true;
 }
@@ -1308,15 +1357,19 @@ bool QuestManager::HandleQueryQuestsCompleted(const std::uint8_t *data, std::siz
   std::uint32_t count;
   if (!r.ReadU32(count))
     return false;
+  if (count > r.Remaining() / sizeof(std::uint32_t)) {
+    return false;
+  }
 
-  completed_quests_.clear();
-  completed_quests_.reserve(count);
+  std::vector<std::uint32_t> completed_quests;
+  completed_quests.reserve(count);
   for (std::uint32_t i = 0; i < count; ++i) {
     std::uint32_t qid;
     if (!r.ReadU32(qid))
       return false;
-    completed_quests_.push_back(qid);
+    completed_quests.push_back(qid);
   }
+  completed_quests_ = std::move(completed_quests);
   return true;
 }
 
@@ -1368,7 +1421,7 @@ void QuestManager::RemoveQuestFromLog(std::uint32_t quest_id) {
       quest_log_.end());
 }
 
-void QuestManager::SyncQuestLogFromPlayer(const ObjectManager& objects,
+void QuestManager::SyncQuestLogFromPlayer(const WorldSession& session,
                                           const CGPlayer_C &player) {
   std::unordered_map<std::uint32_t, QuestLogEntry> previous_entries;
   previous_entries.reserve(quest_log_.size());
@@ -1398,11 +1451,11 @@ void QuestManager::SyncQuestLogFromPlayer(const ObjectManager& objects,
               std::begin(entry.kill_counts));
 
     if (const auto it = previous_entries.find(entry.quest_id); it != previous_entries.end()) {
-      entry.status = it->second.status;
-      entry.timer_expiration_reported = it->second.timer_expiration_reported;
+      entry.timer_expiration_reported = it->second.timer_expiration_reported &&
+                                        it->second.timer_ms == player_entry.timer;
     }
-    if ((player_entry.state & 0x10000u) != 0) {
-      entry.status = QuestStatus::kComplete;
+    if ((player_entry.state & 0x02u) != 0 || entry.timer_expiration_reported) {
+      entry.status = QuestStatus::kFailed;
     }
 
     quest_log_.push_back(entry);
@@ -1410,7 +1463,10 @@ void QuestManager::SyncQuestLogFromPlayer(const ObjectManager& objects,
     QuestLogSlot runtime_entry;
     runtime_entry.quest_id = entry.quest_id;
     runtime_entry.has_cached_template = false;
-    runtime_entry.is_complete = entry.status == QuestStatus::kComplete;
+    runtime_entry.is_complete = IsQuestTurnInReady(session, entry.quest_id, true);
+    if (runtime_entry.is_complete) {
+      quest_log_.back().status = QuestStatus::kComplete;
+    }
     runtime_entry.is_failed = entry.status == QuestStatus::kFailed;
     runtime_entry.is_tracked = runtime_log.IsTracked(entry.quest_id);
     runtime_entry.timer = player_entry.timer;
@@ -1436,7 +1492,7 @@ void QuestManager::SyncQuestLogFromPlayer(const ObjectManager& objects,
   }
 
   runtime_log.SetQuestLog(runtime_entries);
-  runtime_log.LoadTrackedQuestsFromCVarIfNeeded(objects);
+  runtime_log.LoadTrackedQuestsFromCVarIfNeeded(session.objects());
 }
 
 bool QuestManager::IsQuestInLog(std::uint32_t quest_id) const {
@@ -1587,6 +1643,7 @@ void QuestManager::Clear() {
   last_quest_failed_.reset();
   last_update_failed_quest_ = 0;
   last_pvp_kill_.reset();
+  pending_quest_watch_update_.reset();
 
   force_remove_quest_ = 0;
   quest_invalid_reason_ = 0;

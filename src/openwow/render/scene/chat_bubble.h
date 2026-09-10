@@ -43,7 +43,7 @@ class ChatBubblePresenter {
   bool Initialize();
   void Shutdown();
   void SetFileLoader(FileLoader loader);
-  void SetFontPath(std::string path) { font_path_ = std::move(path); }
+  void SetFontPath(std::string path);
 
   [[nodiscard]] std::vector<ChatBubbleDrawInfo> BuildDrawList(
       std::span<const game::ChatBubble> bubbles,
@@ -104,6 +104,7 @@ class ChatBubblePresenter {
   std::size_t last_rendered_bubble_count_{0u};
   std::uint64_t last_render_generation_{0u};
   bool initialized_{false};
+  bool font_failure_reported_{false};
 
   static constexpr float kHeadClearance = 0.7f;
 

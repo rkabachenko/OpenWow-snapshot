@@ -1,8 +1,11 @@
 #include "openwow/ui/game/runtime/retained_layout.h"
+#include "openwow/foundation/diagnostics/logging.h"
+#include "openwow/foundation/diagnostics/performance_logging.h"
 
 #include "openwow/ui/animation/animation_coordinate_space.h"
 #include "openwow/ui/framexml/layout_anchor_resolution.h"
 #include "openwow/ui/game/framescript/core/frame_font_runtime.h"
+#include "openwow/ui/game/framescript/core/frame_layout_methods.h"
 #include "openwow/ui/game/framescript/widgets/edit_box_state.h"
 #include "openwow/ui/game/api/game_lua_api_internal.h"
 #include "openwow/ui/game/runtime/layout_persistence.h"
@@ -36,6 +39,14 @@ namespace {
 
 constexpr float kUiVirtualHeight = 768.0F;
 constexpr float kScaleWriteEpsilon = 0.00000023841858F;
+
+void LogMoveSizingFailure(const char* stage, std::string_view name, int mode,
+                           const char* reason) {
+  openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kWarn,
+      std::string("UI move/sizing failed: source=retained-layout stage=") + stage +
+      " frame=" + std::string(name.substr(0, 256)) + " mode=" + std::to_string(mode) +
+      " reason=" + reason);
+}
 
 namespace layout_field {
 
@@ -180,8 +191,9 @@ bool ReadBoolean(lua_State* lua, int index, const char* field) {
 }
 
 void ClearField(lua_State* lua, int index, const char* field) {
+  index = lua_absindex(lua, index);
   lua_pushnil(lua);
-  lua_setfield(lua, lua_absindex(lua, index), field);
+  lua_setfield(lua, index, field);
 }
 
 std::optional<std::string> ReadInternedStringField(lua_State* lua, int index,
@@ -352,10 +364,11 @@ bool ApplyAnchorDelta(lua_State* lua, int frame_index, float dx, float dy,
 float EffectiveScale(const openwow::ui::framexml::UiFrame& frame,
                      const FrameStore& frames, float screen_height,
                      float root_scale) {
-  float scale = (screen_height > 0.0F ? screen_height / kUiVirtualHeight : 1.0F) * root_scale;
+  float scale = screen_height > 0.0F ? screen_height / kUiVirtualHeight : 1.0F;
   const auto* current = &frame;
   for (int depth = 0; current != nullptr && depth < 64; ++depth) {
-    scale *= current->scale > 0.0F ? current->scale : 1.0F;
+    scale *= openwow::ui::framexml::ResolveLocalFrameScale(
+        current->name, current->scale > 0.0F ? current->scale : 1.0F, root_scale);
     current = current->parent.empty() ? nullptr : frames.FindFrame(current->parent);
   }
   return scale > 0.0F ? scale : 1.0F;
@@ -370,7 +383,7 @@ std::string RelativeName(const openwow::ui::framexml::UiFrame& frame,
 openwow::ui::framexml::FrameRect ReferenceRect(
     const openwow::ui::TransparentStringMap<openwow::ui::framexml::FrameRect>& rects,
     float width, float height, std::string_view name) {
-  if (!name.empty() && name != "UIParent") {
+  if (!name.empty()) {
     if (const auto it = rects.find(name); it != rects.end()) return it->second;
   }
   return {.x = 0, .y = 0, .width = static_cast<int>(std::lround(width)),
@@ -399,10 +412,10 @@ NearestMatchingFramePointPlacement NearestPlacement(
   return best;
 }
 
-bool RectanglesOverlap(const openwow::ui::framexml::FrameRect& lhs,
-                       const openwow::ui::framexml::FrameRect& rhs) {
-  return lhs.x < rhs.x + rhs.width && lhs.x + lhs.width > rhs.x &&
-         lhs.y < rhs.y + rhs.height && lhs.y + lhs.height > rhs.y;
+bool RectsEqual(const openwow::ui::framexml::FrameRect& lhs,
+                const openwow::ui::framexml::FrameRect& rhs) {
+  return lhs.x == rhs.x && lhs.y == rhs.y && lhs.width == rhs.width &&
+         lhs.height == rhs.height;
 }
 
 struct RectDdc { float min_x; float min_y; float max_x; float max_y; };
@@ -482,6 +495,7 @@ struct RetainedLayout::Impl {
   std::unordered_map<std::string, PendingNaturalSize> natural_size_pending;
   float width{1280.0F};
   float height{720.0F};
+  openwow::ui::framexml::ViewportInsets insets;
   float root_scale{1.0F};
   std::int32_t mode{0};
   bool dirty{true};
@@ -496,6 +510,7 @@ struct RetainedLayout::Impl {
   openwow::ui::TransparentStringMap<ScrollFrameRanges> scroll_frame_ranges;
 
   std::uint64_t scroll_frame_ranges_generation{0};
+  bool scroll_frame_ranges_dirty{true};
   std::unordered_map<std::string, std::vector<std::string>> dependencies;
   std::unordered_map<std::string, std::vector<std::string>> dependents;
   std::vector<std::string> pending_names;
@@ -506,6 +521,32 @@ struct RetainedLayout::Impl {
   std::vector<std::optional<openwow::ui::framexml::FrameRect>> solved_scratch;
   Metrics metrics;
 
+  struct SizeCommit {
+    std::string name;
+    float width{0.0F};
+    float height{0.0F};
+  };
+
+  [[nodiscard]] std::optional<SizeCommit> BuildSizeCommit(
+      const openwow::ui::framexml::UiFrame& frame,
+      const openwow::ui::framexml::FrameRect* previous,
+      const openwow::ui::framexml::FrameRect& current) const {
+    const int previous_width = previous != nullptr ? previous->width : 0;
+    const int previous_height = previous != nullptr ? previous->height : 0;
+    if (previous_width == current.width && previous_height == current.height)
+      return std::nullopt;
+    const float scale = EffectiveScale(frame, frames, height, root_scale);
+    return SizeCommit{.name = frame.name,
+                      .width = static_cast<float>(current.width) / scale,
+                      .height = static_cast<float>(current.height) / scale};
+  }
+
+  void PublishSizeCommits(const std::vector<SizeCommit>& commits) const {
+    if (!ports.size_committed) return;
+    for (const auto& commit : commits)
+      ports.size_committed(commit.name, commit.width, commit.height);
+  }
+
   void RebuildScrollFrameRanges() {
     struct PresentedBounds {
       int right{0};
@@ -513,6 +554,7 @@ struct RetainedLayout::Impl {
       bool populated{false};
     };
 
+    scroll_frame_ranges_dirty = false;
     scroll_frame_ranges.clear();
     ++scroll_frame_ranges_generation;
     openwow::ui::TransparentStringMap<PresentedBounds> bounds_by_owner;
@@ -609,6 +651,14 @@ struct RetainedLayout::Impl {
     const std::string name(key);
     if (const auto previous = dependencies.find(name); previous != dependencies.end()) {
       for (const auto& dependency : previous->second) {
+        // A reparented region may no longer carry scroll-child membership.
+        // Preserve the old owner's range invalidation before replacing edges.
+        if (const auto* owner = frames.FindFrame(dependency);
+            owner != nullptr &&
+            (owner->scroll_child_content ||
+             openwow::text::EqualsIgnoreCaseAscii(owner->kind, "ScrollFrame"))) {
+          scroll_frame_ranges_dirty = true;
+        }
         if (auto it = dependents.find(dependency); it != dependents.end()) {
           std::erase(it->second, name);
           if (it->second.empty()) dependents.erase(it);
@@ -902,13 +952,22 @@ struct RetainedLayout::Impl {
   }
 
   void SolveOnDemand(std::string_view requested) {
-    if (lua == nullptr || requested.empty() || width <= 0.0F || height <= 0.0F) return;
+    if (lua == nullptr || requested.empty() || width <= 0.0F ||
+        height <= 0.0F || solving)
+      return;
+    solving = true;
+    struct Guard {
+      bool& active;
+      ~Guard() { active = false; }
+    } guard{solving};
     std::vector<std::string> names{std::string(requested)};
     std::unordered_set<std::string> members{std::string(requested)};
     std::size_t synchronized = 0;
     for (std::size_t cursor = 0; cursor < names.size(); ++cursor) {
       const auto& name = names[cursor];
-      if (pending_members.erase(name) != 0) {
+      // A query commits only this dependency closure. Keep the invalidation
+      // until the frame pass also updates dependents outside the closure.
+      if (pending_members.contains(name)) {
         Sync(std::span<const std::string>(&name, 1));
         ++synchronized;
       }
@@ -929,11 +988,23 @@ struct RetainedLayout::Impl {
     metrics.last_on_demand_frames = solve_frames.size();
     auto solved = openwow::ui::framexml::ResolveExpandedLayout(
         solve_frames, static_cast<int>(width), static_cast<int>(height),
-        height / kUiVirtualHeight * root_scale);
-    for (auto& [name, rect] : solved) {
-      if (rects.insert_or_assign(std::move(name), rect).second)
-        ++rects_generation;
+        height / kUiVirtualHeight, insets, root_scale);
+    std::vector<SizeCommit> size_commits;
+    bool rects_changed = false;
+    for (const auto* frame : solve_frames) {
+      const auto resolved = solved.find(frame->name);
+      if (resolved == solved.end()) continue;
+      const auto previous = rects.find(frame->name);
+      const auto* previous_rect =
+          previous != rects.end() ? &previous->second : nullptr;
+      rects_changed = rects_changed || previous_rect == nullptr ||
+                      !RectsEqual(*previous_rect, resolved->second);
+      if (auto commit = BuildSizeCommit(*frame, previous_rect, resolved->second))
+        size_commits.push_back(std::move(*commit));
+      rects.insert_or_assign(frame->name, resolved->second);
     }
+    if (rects_changed) ++rects_generation;
+    PublishSizeCommits(size_commits);
   }
 };
 
@@ -997,6 +1068,7 @@ void RetainedLayout::Clear() {
   x.lua = nullptr;
   x.rects.clear(); ++x.rects_generation;
   x.scroll_frame_ranges.clear(); ++x.scroll_frame_ranges_generation;
+  x.scroll_frame_ranges_dirty = true;
   x.dependencies.clear(); x.dependents.clear();
   x.pending_names.clear(); x.pending_members.clear();
   x.natural_size_pending.clear();
@@ -1010,6 +1082,9 @@ void RetainedLayout::Clear() {
 float RetainedLayout::viewport_width() const noexcept { return impl_->width; }
 float RetainedLayout::viewport_height() const noexcept { return impl_->height; }
 float RetainedLayout::root_scale() const noexcept { return impl_->root_scale; }
+openwow::ui::framexml::ViewportInsets RetainedLayout::viewport_insets() const noexcept {
+  return impl_->insets;
+}
 std::int32_t RetainedLayout::mode() const noexcept { return impl_->mode; }
 bool RetainedLayout::dirty() const noexcept { return impl_->dirty; }
 const RetainedLayout::Metrics& RetainedLayout::metrics() const noexcept { return impl_->metrics; }
@@ -1022,12 +1097,36 @@ std::uint64_t RetainedLayout::ScrollFrameRangesGeneration() const noexcept {
   return impl_->scroll_frame_ranges_generation;
 }
 
-bool RetainedLayout::SetViewport(float width, float height) {
+bool RetainedLayout::SetViewport(
+    float width, float height,
+    const std::optional<openwow::ui::framexml::ViewportInsets> insets) {
   width = std::max(1.0F, width); height = std::max(1.0F, height);
-  if (impl_->width == width && impl_->height == height) return false;
+  const auto next = insets.value_or(impl_->insets);
+  if (next.left < 0 || next.top < 0 || next.right < 0 || next.bottom < 0 ||
+      static_cast<double>(next.left) + next.right >= width ||
+      static_cast<double>(next.top) + next.bottom >= height) {
+    openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kError,
+        "HUD viewport rejected invalid safe insets: drawable=" +
+        std::to_string(width) + "x" + std::to_string(height) +
+        " left/top/right/bottom=" + std::to_string(next.left) + "/" +
+        std::to_string(next.top) + "/" + std::to_string(next.right) + "/" +
+        std::to_string(next.bottom));
+    return false;
+  }
+  if (impl_->width == width && impl_->height == height && impl_->insets == next)
+    return false;
+  if (impl_->insets != next || next != openwow::ui::framexml::ViewportInsets{}) {
+    openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kInfo,
+        "HUD viewport safe insets: drawable=" + std::to_string(width) + "x" +
+        std::to_string(height) + " left/top/right/bottom=" +
+        std::to_string(next.left) + "/" + std::to_string(next.top) + "/" +
+        std::to_string(next.right) + "/" + std::to_string(next.bottom));
+  }
   impl_->width = width; impl_->height = height;
+  impl_->insets = next;
   impl_->dirty = true;
   impl_->full_solve_required = true;
+  if (impl_->ports.hit_test_invalidated) impl_->ports.hit_test_invalidated();
   return true;
 }
 void RetainedLayout::SetRootScale(float scale, bool force, bool defer_solve) {
@@ -1073,6 +1172,10 @@ void RetainedLayout::SyncTrackedFramesFromLua() { impl_->Sync(); }
 void RetainedLayout::SolveIfDirty() {
   auto& x = *impl_;
   if (!x.dirty || x.width <= 0.0F || x.height <= 0.0F || x.solving) return;
+  static openwow::diagnostics::PerformanceLogSite performance_site;
+  const openwow::diagnostics::ScopedPerformanceLog performance(
+      performance_site, "ui.layout_solve_commit",
+      x.full_solve_required ? "full_solve" : "incremental_candidate");
   x.solving = true;
   struct Guard { bool& active; ~Guard() { active = false; } } guard{x.solving};
   x.dirty = false;
@@ -1109,7 +1212,7 @@ void RetainedLayout::SolveIfDirty() {
                   affected_frames.size() * 3U <
                       std::max<std::size_t>(x.frames.size() * 2U, 1U);
   }
-  const float scale = x.height / kUiVirtualHeight * x.root_scale;
+  const float scale = x.height / kUiVirtualHeight;
   if (incremental) {
 
     const std::size_t affected_count = affected_frames.size();
@@ -1128,19 +1231,28 @@ void RetainedLayout::SolveIfDirty() {
     x.solved_scratch.clear();
     openwow::ui::framexml::ResolveExpandedLayoutInto(
         solve_frames, static_cast<int>(x.width), static_cast<int>(x.height),
-        scale, &x.solved_scratch);
+        scale, &x.solved_scratch, x.insets, x.root_scale);
 
+    std::vector<Impl::SizeCommit> size_commits;
+    bool rects_changed = false;
     for (std::size_t index = 0; index < solve_frames.size(); ++index) {
       if (const auto& rect = x.solved_scratch[index]; rect.has_value()) {
-
-        if (x.rects.insert_or_assign(solve_frames[index]->name, *rect).second)
-          ++x.rects_generation;
+        const auto previous = x.rects.find(solve_frames[index]->name);
+        const auto* previous_rect =
+            previous != x.rects.end() ? &previous->second : nullptr;
+        rects_changed = rects_changed || previous_rect == nullptr ||
+                        !RectsEqual(*previous_rect, *rect);
+        if (auto commit =
+                x.BuildSizeCommit(*solve_frames[index], previous_rect, *rect))
+          size_commits.push_back(std::move(*commit));
+        x.rects.insert_or_assign(solve_frames[index]->name, *rect);
       }
     }
+    if (rects_changed) ++x.rects_generation;
     ++x.metrics.incremental_resolves;
     x.metrics.last_resolve_candidates = solve_frames.size();
 
-    bool scroll_ranges_may_have_changed = false;
+    bool scroll_ranges_may_have_changed = x.scroll_frame_ranges_dirty;
     for (std::size_t index = 0; index < affected_count; ++index) {
       const auto* const frame = solve_frames[index];
       if (frame->scroll_child_content ||
@@ -1152,11 +1264,26 @@ void RetainedLayout::SolveIfDirty() {
     if (scroll_ranges_may_have_changed) {
       x.RebuildScrollFrameRanges();
     }
+    x.PublishSizeCommits(size_commits);
   } else {
     const auto frames = x.frames.CollectFramePointersInRegistrationOrder();
 
-    x.rects = openwow::ui::framexml::ResolveExpandedLayout(
-        frames, static_cast<int>(x.width), static_cast<int>(x.height), scale);
+    auto resolved = openwow::ui::framexml::ResolveExpandedLayout(
+        frames, static_cast<int>(x.width), static_cast<int>(x.height), scale, x.insets,
+        x.root_scale);
+    std::vector<Impl::SizeCommit> size_commits;
+    size_commits.reserve(frames.size());
+    for (const auto* frame : frames) {
+      const auto current = resolved.find(frame->name);
+      if (current == resolved.end()) continue;
+      const auto previous = x.rects.find(frame->name);
+      const auto* previous_rect =
+          previous != x.rects.end() ? &previous->second : nullptr;
+      if (auto commit =
+              x.BuildSizeCommit(*frame, previous_rect, current->second))
+        size_commits.push_back(std::move(*commit));
+    }
+    x.rects = std::move(resolved);
     ++x.rects_generation;
     x.RebuildGraph();
     x.full_solve_required = false;
@@ -1164,6 +1291,7 @@ void RetainedLayout::SolveIfDirty() {
     x.metrics.last_resolve_candidates = frames.size();
 
     x.RebuildScrollFrameRanges();
+    x.PublishSizeCommits(size_commits);
   }
   if (x.ports.hit_test_invalidated) x.ports.hit_test_invalidated();
 }
@@ -1177,9 +1305,8 @@ void RetainedLayout::RefreshTrackedLayout() {
 }
 
 const openwow::ui::framexml::FrameRect* RetainedLayout::FindRect(std::string_view name) {
-  if (impl_->dirty && (impl_->construction_depth != 0 || impl_->bootstrap_active))
+  if (impl_->dirty)
     impl_->SolveOnDemand(name);
-  else SolveIfDirty();
   const auto it = impl_->rects.find(name);
   return it == impl_->rects.end() ? nullptr : &it->second;
 }
@@ -1195,7 +1322,8 @@ RetainedLayout::ScrollFrameRanges RetainedLayout::ResolveScrollFrameRanges(
 std::string RetainedLayout::BuildLayoutCache() {
   RefreshTrackedLayout();
   return SerializeLayoutCache(impl_->frames.CollectFramesInRegistrationOrder(),
-                              static_cast<int>(impl_->width), static_cast<int>(impl_->height));
+                              static_cast<int>(impl_->width), static_cast<int>(impl_->height),
+                              impl_->insets, impl_->root_scale);
 }
 
 void RetainedLayout::ApplyLayoutCache(std::string_view text) {
@@ -1218,10 +1346,7 @@ void RetainedLayout::ApplyLayoutCache(std::string_view text) {
     if (lua_istable(impl_->lua, -1) != 0) {
       const int index = lua_absindex(impl_->lua, -1);
       if (current.level >= 0) {
-        lua_pushinteger(impl_->lua, current.level); lua_setfield(impl_->lua, index, "__ow_frame_level");
-        frame->frame_level = current.level;
-        if (impl_->ports.order_invalidated) impl_->ports.order_invalidated();
-        if (impl_->ports.on_update_order_invalidated) impl_->ports.on_update_order_invalidated();
+        frame_api::SetLuaFrameLevel(impl_->lua, index, current.level);
       }
       if (ReadBoolean(impl_->lua, index, "__ow_movable")) {
         const std::string point(LayoutCacheFramePointName(std::clamp(current.point, 0, 8)));
@@ -1261,16 +1386,37 @@ void RetainedLayout::ApplyLayoutCache(std::string_view text) {
 
 bool RetainedLayout::BeginMoveSizing(std::string_view name, int mode, float cursor_x,
                                      float cursor_y, MoveSizingSession* session) {
-  if (session == nullptr || session->active) return false;
+  const auto fail = [&](const char* reason) {
+    LogMoveSizingFailure("begin", name, mode, reason);
+    return false;
+  };
+  if (session == nullptr || session->active) return fail("invalid-session");
+  if (impl_->lua == nullptr) return fail("lua-unavailable");
   SolveIfDirty();
   auto* frame = impl_->frames.FindFrame(name);
   const auto ref = impl_->frames.FindLuaRef(name);
   const auto* rect = FindRect(name);
-  if (frame == nullptr || !ref.has_value() || rect == nullptr || impl_->lua == nullptr) return false;
-  *session = {.frame_name = std::string(name), .mode = mode, .cursor_x = cursor_x,
-              .cursor_y = cursor_y, .active = true};
+  if (frame == nullptr) return fail("frame-missing");
+  if (!ref.has_value()) return fail("lua-binding-missing");
+  if (rect == nullptr) return fail("resolved-geometry-missing");
   const int top = lua_gettop(impl_->lua);
   lua_rawgeti(impl_->lua, LUA_REGISTRYINDEX, *ref);
+  if (lua_istable(impl_->lua, -1) == 0) {
+    lua_settop(impl_->lua, top);
+    return fail("lua-binding-invalid");
+  }
+  // Raising is shared with the Frame API: it considers the nearest toplevel
+  // owner and propagates its level change to children before capture begins.
+  frame_api::RaiseLuaFrameResolved(impl_->lua, lua_absindex(impl_->lua, -1));
+  rect = FindRect(name);
+  frame = impl_->frames.FindFrame(name);
+  if (session->active || frame == nullptr || rect == nullptr ||
+      impl_->frames.FindLuaRef(name) != ref) {
+    lua_settop(impl_->lua, top);
+    return fail("frame-or-session-changed-during-raise");
+  }
+  *session = {.frame_name = std::string(name), .mode = mode, .cursor_x = cursor_x,
+              .cursor_y = cursor_y, .active = true};
   if (lua_istable(impl_->lua, -1) != 0) {
     const int index = lua_absindex(impl_->lua, -1);
     session->relative_name = RelativeName(*frame, ReadAnchors(impl_->lua, index));
@@ -1286,33 +1432,18 @@ bool RetainedLayout::BeginMoveSizing(std::string_view name, int mode, float curs
   }
   lua_settop(impl_->lua, top);
   impl_->frames.SetFrameUserPlaced(name, true);
-  if (frame->top_level || frame->toplevel) {
-    int highest = frame->frame_level;
-    for (const auto& view : impl_->frames.CollectStableFrames()) {
-      if (view.key == name || view.frame->frame_strata != frame->frame_strata) continue;
-      const auto other = impl_->rects.find(view.key);
-      if (other != impl_->rects.end() && RectanglesOverlap(*rect, other->second))
-        highest = std::max(highest, view.frame->frame_level + 1);
-    }
-    frame->frame_level = highest;
-    const int stack_top = lua_gettop(impl_->lua);
-    lua_rawgeti(impl_->lua, LUA_REGISTRYINDEX, *ref);
-    if (lua_istable(impl_->lua, -1) != 0) {
-      lua_pushinteger(impl_->lua, highest);
-      lua_setfield(impl_->lua, -2, "__ow_frame_level");
-    }
-    lua_settop(impl_->lua, stack_top);
-    if (impl_->ports.order_invalidated) impl_->ports.order_invalidated();
-  }
   return true;
 }
 
 bool RetainedLayout::UpdateMoveSizing(MoveSizingSession* session, float x, float y) {
-  if (session == nullptr || !session->active || impl_->lua == nullptr) return false;
+  if (session == nullptr || !session->active) return false;
+  if (impl_->lua == nullptr) return AbortMoveSizing(session, "update", "lua-unavailable");
   auto* frame = impl_->frames.FindFrame(session->frame_name);
   const auto ref = impl_->frames.FindLuaRef(session->frame_name);
   const auto* current = FindRect(session->frame_name);
-  if (frame == nullptr || !ref.has_value() || current == nullptr) { *session = {}; return false; }
+  if (frame == nullptr) return AbortMoveSizing(session, "update", "frame-missing");
+  if (!ref.has_value()) return AbortMoveSizing(session, "update", "lua-binding-missing");
+  if (current == nullptr) return AbortMoveSizing(session, "update", "resolved-geometry-missing");
   const float dx = x - session->cursor_x, dy = y - session->cursor_y;
   if (dx == 0.0F && dy == 0.0F) return true;
   float left = current->x, top_edge = current->y;
@@ -1329,6 +1460,10 @@ bool RetainedLayout::UpdateMoveSizing(MoveSizingSession* session, float x, float
   const int top = lua_gettop(impl_->lua);
   lua_rawgeti(impl_->lua, LUA_REGISTRYINDEX, *ref);
   const int index = lua_absindex(impl_->lua, -1);
+  if (lua_istable(impl_->lua, index) == 0) {
+    lua_settop(impl_->lua, top);
+    return AbortMoveSizing(session, "update", "lua-binding-invalid");
+  }
   if (lua_istable(impl_->lua, index) != 0 && session->mode == 4 &&
       ApplyAnchorDelta(impl_->lua, index, dx, dy, scale)) {
     lua_settop(impl_->lua, top);
@@ -1376,10 +1511,10 @@ bool RetainedLayout::UpdateMoveSizing(MoveSizingSession* session, float x, float
         .left = left, .top = top_edge, .right = right, .bottom = bottom};
     openwow::ui::ClampRectEdgesYDownPreservingSpan(
         &edges, openwow::ui::RectBoundsYDown{
-                    .min_left = -frame->clamp_rect_inset_left * scale,
-                    .min_top = frame->clamp_rect_inset_top * scale,
-                    .max_right = impl_->width - frame->clamp_rect_inset_right * scale,
-                    .max_bottom = impl_->height + frame->clamp_rect_inset_bottom * scale});
+                    .min_left = impl_->insets.left - frame->clamp_rect_inset_left * scale,
+                    .min_top = impl_->insets.top + frame->clamp_rect_inset_top * scale,
+                    .max_right = impl_->width - impl_->insets.right - frame->clamp_rect_inset_right * scale,
+                    .max_bottom = impl_->height - impl_->insets.bottom + frame->clamp_rect_inset_bottom * scale});
     left = edges.left; top_edge = edges.top; right = edges.right; bottom = edges.bottom;
   }
   const auto relative = ReferenceRect(impl_->rects, impl_->width, impl_->height, session->relative_name);
@@ -1401,15 +1536,20 @@ bool RetainedLayout::UpdateMoveSizing(MoveSizingSession* session, float x, float
 }
 
 bool RetainedLayout::CommitMoveSizing(MoveSizingSession* session) {
-  if (session == nullptr || !session->active || impl_->lua == nullptr) return false;
+  if (session == nullptr || !session->active) return false;
+  if (impl_->lua == nullptr) return AbortMoveSizing(session, "commit", "lua-unavailable");
   const auto ref = impl_->frames.FindLuaRef(session->frame_name);
-  if (!ref.has_value()) return false;
+  if (!ref.has_value()) return AbortMoveSizing(session, "commit", "lua-binding-missing");
   RefreshTrackedLayout();
   const auto* frame = impl_->frames.FindFrame(session->frame_name);
-  if (frame == nullptr) return false;
+  if (frame == nullptr) return AbortMoveSizing(session, "commit", "frame-missing");
   bool committed = false;
   const int top = lua_gettop(impl_->lua);
   lua_rawgeti(impl_->lua, LUA_REGISTRYINDEX, *ref);
+  if (lua_istable(impl_->lua, -1) == 0) {
+    lua_settop(impl_->lua, top);
+    return AbortMoveSizing(session, "commit", "lua-binding-invalid");
+  }
   if (lua_istable(impl_->lua, -1) != 0) {
     const int index = lua_absindex(impl_->lua, -1);
     double left = 0, top_edge = 0, right = 0, bottom = 0;
@@ -1419,6 +1559,9 @@ bool RetainedLayout::CommitMoveSizing(MoveSizingSession* session) {
         !ReadNumber(impl_->lua, index, "__ow_drag_bottom", &bottom)) {
       if (const auto* rect = FindRect(session->frame_name)) {
         left = rect->x; top_edge = rect->y; right = rect->x + rect->width; bottom = rect->y + rect->height;
+      } else {
+        lua_settop(impl_->lua, top);
+        return AbortMoveSizing(session, "commit", "resolved-geometry-missing");
       }
     }
     const std::string relative_name = session->relative_name.empty()
@@ -1441,6 +1584,25 @@ bool RetainedLayout::CommitMoveSizing(MoveSizingSession* session) {
   *session = {};
   if (committed) { QueueLuaMutation(name); SolveIfDirty(); }
   return committed;
+}
+
+bool RetainedLayout::AbortMoveSizing(MoveSizingSession* session, const char* stage,
+                                      const char* reason) {
+  LogMoveSizingFailure(stage, session->frame_name, session->mode, reason);
+  if (impl_->lua != nullptr) {
+    if (const auto ref = impl_->frames.FindLuaRef(session->frame_name)) {
+      const int top = lua_gettop(impl_->lua);
+      lua_rawgeti(impl_->lua, LUA_REGISTRYINDEX, *ref);
+      if (lua_istable(impl_->lua, -1)) {
+        for (const char* field : {"__ow_drag_active", "__ow_drag_mode", "__ow_drag_left",
+                                  "__ow_drag_top", "__ow_drag_right", "__ow_drag_bottom"})
+          ClearField(impl_->lua, -1, field);
+      }
+      lua_settop(impl_->lua, top);
+    }
+  }
+  *session = {};
+  return false;
 }
 
 std::optional<openwow::ui::framexml::FrameRect> RetainedLayout::ResolveAnonymousRegionRect(
@@ -1495,7 +1657,9 @@ std::optional<openwow::ui::framexml::FrameRect> RetainedLayout::ResolveAnonymous
     region.layout_offset_y = static_cast<float>(value);
   openwow::ui::TransparentStringMap<RectDdc> rects;
   rects.reserve(impl_->rects.size() + 2U);
-  rects.emplace("UIParent", RectDdc{0.0F, 0.0F, impl_->width, impl_->height});
+  rects.emplace("UIParent", RectDdc{
+      static_cast<float>(impl_->insets.left), static_cast<float>(impl_->insets.bottom),
+      impl_->width - impl_->insets.right, impl_->height - impl_->insets.top});
   for (const auto& [name, rect] : impl_->rects) {
     const float max_y = impl_->height - rect.y;
     rects.insert_or_assign(name, RectDdc{static_cast<float>(rect.x),
@@ -1508,7 +1672,7 @@ std::optional<openwow::ui::framexml::FrameRect> RetainedLayout::ResolveAnonymous
         RectDdc{static_cast<float>(parent.x), max_y - parent.height,
                 static_cast<float>(parent.x + parent.width), max_y});
   }
-  float scale = impl_->height / kUiVirtualHeight * impl_->root_scale;
+  float scale = impl_->height / kUiVirtualHeight;
   if (const auto* parent = impl_->frames.FindFrame(parent_name))
     scale = EffectiveScale(*parent, impl_->frames, impl_->height, impl_->root_scale);
   const auto resolved = ResolveRegionDdc(region, rects, scale);

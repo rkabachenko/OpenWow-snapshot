@@ -2,7 +2,6 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <array>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -16,8 +15,6 @@ struct NameplateInfo {
   float world_x{0.0f};
   float world_y{0.0f};
   float world_z{0.0f};
-  std::array<float, 6> world_bounds{};
-  bool has_world_bounds{false};
   std::uint32_t name_color_argb{0xFFFFFFFFu};
   std::uint8_t frame_alpha{0xFFu};
   std::uint8_t raid_target_icon_index{0xFFu};
@@ -100,7 +97,7 @@ struct NameplateScreenPlacement {
   float screen_y{0.0f};
   float camera_distance{0.0f};
 
-  float view_depth{0.0f};
+  float projected_depth{0.0f};
 
   std::uint8_t frame_level{10u};
 };

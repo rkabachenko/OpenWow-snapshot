@@ -7,6 +7,7 @@
 #include "openwow/ui/game/framescript/core/frame_script_invocation.h"
 #include "openwow/ui/game/lua_cpu_profiler.h"
 #include "openwow/foundation/diagnostics/logging.h"
+#include "openwow/foundation/diagnostics/performance_logging.h"
 #include "openwow/foundation/text/ascii.h"
 
 extern "C" {
@@ -49,6 +50,34 @@ void PushEventArgument(lua_State* L, const EventArg& arg) {
 bool IsWorldEntryPhaseEvent(const std::string_view event) {
   return event == events::VARIABLES_LOADED || event == events::PLAYER_LOGIN ||
          event == events::PLAYER_ENTERING_WORLD;
+}
+
+void LogAddonEventDelivery(const std::string& event, std::span<const EventArg> args,
+                            std::uint64_t listeners, std::uint64_t invoked,
+                            const openwow::diagnostics::PerformanceTimer& timer) {
+  if (!timer.enabled()) return;
+  const bool unfiltered = event == "COMBAT_LOG_EVENT_UNFILTERED";
+  const bool combat = unfiltered || event == "COMBAT_LOG_EVENT";
+  const bool addon = event == "ADDON_LOADED";
+  if (!combat && !addon) return;
+  std::string context = "event=" + event + " args=" + std::to_string(args.size()) +
+                        " listeners=" + std::to_string(listeners) +
+                        " invoked=" + std::to_string(invoked);
+  const std::size_t identity_arg = combat ? 1 : 0;
+  if (args.size() > identity_arg) {
+    if (const auto* identity = std::get_if<std::string>(&args[identity_arg])) {
+      context += (combat ? " subevent=" : " addon=") + identity->substr(0, 128);
+    }
+  }
+  if (combat) {
+    // Retain the first delivery and sample each stream once per second.
+    // Payload names, chat text and other arbitrary Lua values are not logged.
+    static openwow::diagnostics::PerformanceLogSite sites[2];
+    openwow::diagnostics::LogPerformanceDuration(sites[unfiltered ? 1 : 0],
+        "ui.combat_log_dispatch", timer, context, 0.0);
+  } else {
+    openwow::diagnostics::LogPerformanceEvent("ui.addon_loaded", context);
+  }
 }
 
 }
@@ -448,9 +477,11 @@ void EventDispatcher::FireEventSpan(const std::string& event,
   if (lua_ == nullptr) {
     return;
   }
+  const openwow::diagnostics::PerformanceTimer diagnostic_timer;
   const auto found = event_states_.find(event);
   if (found == event_states_.end() ||
       found->second->active_listeners.empty()) {
+    LogAddonEventDelivery(event, args, 0, 0, diagnostic_timer);
     return;
   }
 
@@ -494,6 +525,8 @@ void EventDispatcher::FireEventSpan(const std::string& event,
       ElapsedNanoseconds(dispatch_start, dispatch_end);
   RecordDispatchSample(state, sample);
   LogWorldEntryPhase(event, sample);
+  LogAddonEventDelivery(event, args, sample.listener_visits,
+                         sample.handlers_invoked, diagnostic_timer);
 }
 
 bool EventDispatcher::DispatchToFrame(

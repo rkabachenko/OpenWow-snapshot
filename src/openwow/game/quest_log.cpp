@@ -163,8 +163,6 @@ void QuestLog::SetQuestLog(const std::vector<QuestLogSlot>& entries) {
         entries_.resize(kMaxQuests);
     }
 
-    ExpireTimedWatchesLocked();
-
     tracked_.erase(
         std::remove_if(
             tracked_.begin(), tracked_.end(),
@@ -194,7 +192,6 @@ void QuestLog::SetQuestLog(const std::vector<QuestLogSlot>& entries) {
         entry.is_tracked = IsTrackedLocked(entry.quest_id);
     }
 
-    MarkWatchUpdateLocked();
 }
 
 size_t QuestLog::GetNumQuests() const {
@@ -218,7 +215,6 @@ const QuestLogSlot* QuestLog::GetQuestById(uint32_t questId) const {
 
 void QuestLog::SetTracked(uint32_t questId, bool tracked) {
     std::lock_guard lock(mutex_);
-    ExpireTimedWatchesLocked();
     if (questId == 0) {
         return;
     }
@@ -227,11 +223,9 @@ void QuestLog::SetTracked(uint32_t questId, bool tracked) {
     if (tracked) {
         if (existing_index < 0 && tracked_.size() < kMaxTracked) {
             tracked_.push_back(QuestWatchEntry{.quest_id = questId});
-            MarkWatchUpdateLocked();
         }
     } else if (existing_index >= 0) {
         tracked_.erase(tracked_.begin() + existing_index);
-        MarkWatchUpdateLocked();
     }
 
     SetEntryTrackedFlagLocked(questId, IsTrackedLocked(questId));
@@ -239,25 +233,21 @@ void QuestLog::SetTracked(uint32_t questId, bool tracked) {
 
 bool QuestLog::IsTracked(uint32_t questId) {
     std::lock_guard lock(mutex_);
-    ExpireTimedWatchesLocked();
     return IsTrackedLocked(questId);
 }
 
 size_t QuestLog::GetNumTracked() {
     std::lock_guard lock(mutex_);
-    ExpireTimedWatchesLocked();
     return tracked_.size();
 }
 
 int QuestLog::GetTrackedIndex(uint32_t questId) {
     std::lock_guard lock(mutex_);
-    ExpireTimedWatchesLocked();
     return FindTrackedIndexLocked(questId);
 }
 
 std::uint32_t QuestLog::GetTrackedQuestId(size_t watchIndex) {
     std::lock_guard lock(mutex_);
-    ExpireTimedWatchesLocked();
     if (watchIndex >= tracked_.size()) {
         return 0;
     }
@@ -267,26 +257,19 @@ std::uint32_t QuestLog::GetTrackedQuestId(size_t watchIndex) {
 bool QuestLog::AddQuestWatch(const ObjectManager& objects, const uint32_t questId,
                              const uint32_t durationSeconds) {
     std::lock_guard lock(mutex_);
-    return AddQuestWatchLocked(&objects, questId, durationSeconds,
-                               WatchMutationMode::kGameplay);
+    return AddQuestWatchLocked(&objects, questId, durationSeconds);
 }
 
 bool QuestLog::AddQuestWatchFromLua(const ObjectManager* const objects,
                                     const uint32_t questId,
                                     const uint32_t durationSeconds) {
     std::lock_guard lock(mutex_);
-    return AddQuestWatchLocked(objects, questId, durationSeconds,
-                               WatchMutationMode::kNativeLua);
+    return AddQuestWatchLocked(objects, questId, durationSeconds);
 }
 
 bool QuestLog::AddQuestWatchLocked(const ObjectManager* const objects,
                                    const uint32_t questId,
-                                   const uint32_t durationSeconds,
-                                   const WatchMutationMode mode) {
-    const bool is_native_lua = mode == WatchMutationMode::kNativeLua;
-    if (!is_native_lua) {
-        ExpireTimedWatchesLocked();
-    }
+                                   const uint32_t durationSeconds) {
     if (questId == 0) {
         return false;
     }
@@ -302,9 +285,6 @@ bool QuestLog::AddQuestWatchLocked(const ObjectManager* const objects,
         auto& watch = tracked_[static_cast<size_t>(existing_index)];
         if (watch.expiration_time > 0) {
             watch.expiration_time = BuildQuestWatchExpiration(durationSeconds);
-            if (!is_native_lua) {
-                MarkWatchUpdateLocked();
-            }
             return true;
         }
         return false;
@@ -322,15 +302,11 @@ bool QuestLog::AddQuestWatchLocked(const ObjectManager* const objects,
     if (objects != nullptr) {
         SortQuestWatchesLocked(*objects);
     }
-    if (!is_native_lua) {
-        MarkWatchUpdateLocked();
-    }
     return true;
 }
 
 bool QuestLog::RemoveQuestWatch(uint32_t questId) {
     std::lock_guard lock(mutex_);
-    ExpireTimedWatchesLocked();
     const int index = FindTrackedIndexLocked(questId);
     if (index < 0) {
         return false;
@@ -338,13 +314,11 @@ bool QuestLog::RemoveQuestWatch(uint32_t questId) {
 
     tracked_.erase(tracked_.begin() + index);
     SetEntryTrackedFlagLocked(questId, false);
-    MarkWatchUpdateLocked();
     return true;
 }
 
 bool QuestLog::MoveQuestWatch(size_t fromIndex, size_t toIndex) {
     std::lock_guard lock(mutex_);
-    ExpireTimedWatchesLocked();
     if (fromIndex >= tracked_.size() || toIndex >= tracked_.size() ||
         fromIndex == toIndex) {
         return false;
@@ -359,17 +333,14 @@ bool QuestLog::MoveQuestWatch(size_t fromIndex, size_t toIndex) {
                     tracked_.begin() + static_cast<ptrdiff_t>(fromIndex),
                     tracked_.begin() + static_cast<ptrdiff_t>(fromIndex + 1));
     }
-    MarkWatchUpdateLocked();
     return true;
 }
 
 bool QuestLog::SortQuestWatches(const ObjectManager& objects) {
     std::lock_guard lock(mutex_);
-    ExpireTimedWatchesLocked();
     if (!SortQuestWatchesLocked(objects)) {
         return false;
     }
-    MarkWatchUpdateLocked();
     return true;
 }
 
@@ -495,53 +466,6 @@ int QuestLog::GetQuestLogIndexById(uint32_t questId) const {
     return -1;
 }
 
-int QuestLog::GetVisibleIndexByQuestId(uint32_t questId) const {
-    std::lock_guard lock(mutex_);
-    if (questId == 0) return -1;
-
-    const auto groups = BuildVisibleQuestGroups(entries_);
-    int position = 0;
-    bool first_group = true;
-    for (const auto& [zone, indices] : groups) {
-        if (!first_group) {
-            ++position;
-        }
-        first_group = false;
-        for (const auto entry_index : indices) {
-            if (entries_[entry_index].quest_id == questId) {
-                return position + 1;
-            }
-            ++position;
-        }
-    }
-    return -1;
-}
-
-uint32_t QuestLog::GetQuestIdByVisibleIndex(int visibleIndex) const {
-    std::lock_guard lock(mutex_);
-    if (visibleIndex < 1) return 0;
-
-    const auto groups = BuildVisibleQuestGroups(entries_);
-    int position = 0;
-    bool first_group = true;
-    for (const auto& [zone, indices] : groups) {
-        if (!first_group) {
-            if (position + 1 == visibleIndex) {
-                return 0;
-            }
-            ++position;
-        }
-        first_group = false;
-        for (const auto entry_index : indices) {
-            if (position + 1 == visibleIndex) {
-                return entries_[entry_index].quest_id;
-            }
-            ++position;
-        }
-    }
-    return 0;
-}
-
 bool QuestLog::IsQuestCompleteDetailed(uint32_t questId,
                                          bool checkReputation) const {
     std::lock_guard lock(mutex_);
@@ -575,7 +499,6 @@ bool QuestLog::IsSelectedQuestFailed() const {
 
 void QuestLog::ShiftQuestWatch(uint32_t questId, int32_t direction) {
     std::lock_guard lock(mutex_);
-    ExpireTimedWatchesLocked();
     const int tracked_index = FindTrackedIndexLocked(questId);
     if (tracked_index < 0) {
         return;
@@ -589,7 +512,6 @@ void QuestLog::ShiftQuestWatch(uint32_t questId, int32_t direction) {
 
     std::swap(tracked_[static_cast<size_t>(tracked_index)],
               tracked_[static_cast<size_t>(target_index)]);
-    MarkWatchUpdateLocked();
 }
 
 void QuestLog::PrepareForLogout() {
@@ -601,15 +523,11 @@ void QuestLog::PrepareForLogout() {
 
 void QuestLog::Reset() {
     std::lock_guard lock(mutex_);
-    const bool had_watches = !tracked_.empty();
     entries_.clear();
     tracked_.clear();
     selected_quest_ = 0;
     daily_done_ = 0;
     tracked_quests_loaded_ = false;
-    if (had_watches) {
-        MarkWatchUpdateLocked();
-    }
 }
 
 int QuestLog::FindTrackedIndexLocked(uint32_t questId) const {
@@ -675,7 +593,6 @@ void QuestLog::LoadTrackedQuestsFromCVarIfNeeded(const ObjectManager& objects) {
         }
         if (added_any) {
             SortQuestWatchesLocked(objects);
-            MarkWatchUpdateLocked();
         }
     }
 }
@@ -694,32 +611,16 @@ void QuestLog::SaveTrackedQuestsToCVar() const {
         true);
 }
 
-void QuestLog::SignalWatchUpdate() {
-    std::lock_guard lock(mutex_);
-    MarkWatchUpdateLocked();
-}
-
-std::uint64_t QuestLog::GetWatchUpdateSerial() const {
-    std::lock_guard lock(mutex_);
-    return watch_update_serial_;
-}
-
 bool QuestLog::ExpireTimedWatchesLocked() {
-    bool removed_any = false;
-    for (auto it = tracked_.begin(); it != tracked_.end(); ) {
+    for (auto it = tracked_.begin(); it != tracked_.end(); ++it) {
         if (it->expiration_time > 0 &&
             static_cast<std::int32_t>(std::time(nullptr)) >= it->expiration_time) {
             SetEntryTrackedFlagLocked(it->quest_id, false);
-            it = tracked_.erase(it);
-            removed_any = true;
-            continue;
+            tracked_.erase(it);
+            return true;
         }
-        ++it;
     }
-    if (removed_any) {
-        MarkWatchUpdateLocked();
-    }
-    return removed_any;
+    return false;
 }
 
 bool QuestLog::SortQuestWatchesLocked(const ObjectManager& objects) {
@@ -785,10 +686,6 @@ bool QuestLog::SortQuestWatchesLocked(const ObjectManager& objects) {
                   return lhs.quest_id < rhs.quest_id;
               });
     return true;
-}
-
-void QuestLog::MarkWatchUpdateLocked() {
-    ++watch_update_serial_;
 }
 
 void QuestLog::SetEntryTrackedFlagLocked(uint32_t questId, bool tracked) {

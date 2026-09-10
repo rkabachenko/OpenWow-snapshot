@@ -64,6 +64,13 @@ float MinimapSystem::GetZoom() const {
   return static_cast<float>(GetZoomLevel());
 }
 
+void MinimapSystem::SetZoomLevels(const std::uint32_t outdoor,
+                                 const std::uint32_t indoor) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  outdoor_zoom_level_ = std::min(outdoor, kMaxZoomLevel);
+  indoor_zoom_level_ = std::min(indoor, kMaxZoomLevel);
+}
+
 std::uint32_t MinimapSystem::GetZoomLevel() const {
   std::lock_guard<std::mutex> lock(mutex_);
   return indoor_minimap_active_ ? indoor_zoom_level_ : outdoor_zoom_level_;
@@ -199,6 +206,23 @@ void MinimapSystem::AddRotatingArrow(const MinimapRotatingArrow& arrow) {
 std::vector<MinimapRotatingArrow> MinimapSystem::GetRotatingArrows() const {
   std::lock_guard<std::mutex> lock(mutex_);
   return rotating_arrows_;
+}
+
+void MinimapSystem::PublishMarkerPresentation(
+    std::vector<MinimapMarkerPresentation> markers) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  marker_presentation_ = std::move(markers);
+}
+
+void MinimapSystem::ClearMarkerPresentation() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  marker_presentation_.clear();
+}
+
+std::vector<MinimapMarkerPresentation>
+MinimapSystem::GetMarkerPresentationSnapshot() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return marker_presentation_;
 }
 
 void MinimapSystem::SetRotatingArrowTexturePath(
@@ -446,6 +470,7 @@ void MinimapSystem::Reset() {
   tracking_mask_ = 0;
   pins_.clear();
   rotating_arrows_.clear();
+  marker_presentation_.clear();
   guide_point_of_interest_.reset();
   player_x_ = 0.0f;
   player_y_ = 0.0f;

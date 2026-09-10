@@ -13,8 +13,6 @@ struct FieldEvent {
   const char* event_name;
   bool needs_unit_token;
   std::uint64_t guid_raw;
-
-  std::uint8_t power_type{0};
 };
 
 std::vector<FieldEvent> MapChangedFieldsToEvents(

@@ -17,19 +17,26 @@ enum class WeatherKind : std::uint8_t {
   kSandstorm,
 };
 
+struct WeatherCollisionHit {
+  std::array<float, 3> position{};
+  std::array<float, 3> normal{};
+  float distance{};
+};
+
 struct WeatherState {
   WeatherKind kind{WeatherKind::kNone};
   float target_density{};
   float density{};
   float transition_start_density{};
-  float target_fog_speed{1.0f};
-  float fog_speed{1.0f};
-  float transition_start_fog_speed{1.0f};
+  float target_transition_value{1.0f};
+  float transition_value{1.0f};
+  float transition_start_value{1.0f};
   float sky_overlay{};
   std::uint32_t color_abgr{0xffffffffu};
   std::string texture;
   std::array<float, 3> position{};
   std::array<float, 3> velocity{};
+  float facing{};
   std::uint32_t transition_started_at{};
   std::uint32_t previous_motion_tick{};
   bool smooth_transition{};
@@ -47,8 +54,10 @@ struct WeatherUpdate {
 
 void SetWeather(WeatherState& state, WeatherKind kind, float density,
                 const data::dbc::WeatherEntry* row, bool smooth,
-                float fog_speed, std::uint32_t now);
+                float transition_value, std::uint32_t now);
 void UpdateWeather(WeatherState& state, const WeatherUpdate& update);
+[[nodiscard]] float WeatherDayNightFactor(const WeatherState& state);
+[[nodiscard]] float WeatherLightParamBlendFactor(const WeatherState& state);
 void ResetWeather(WeatherState& state);
 
 }

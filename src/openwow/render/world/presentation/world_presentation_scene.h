@@ -20,9 +20,14 @@
 namespace openwow::data::dbc {
 class DbcLoader;
 }
+namespace openwow::game {
+struct ObjectPresentationSnapshot;
+}
 namespace openwow::render {
 
 class DistantTerrainRenderer;
+class DetailDoodadRenderer;
+class ObjectRenderer;
 class ShadowPresentationRuntime;
 class SkyRenderer;
 class TerrainRenderer;
@@ -53,7 +58,7 @@ class WorldPresentationScene final {
       world::WorldPresentationCommandBatch batch);
   void Update(float dt, const RenderVec3& camera_position,
               float environment_detail, float weather_particle_density,
-              bool use_weather_shaders, bool indoors);
+              bool use_weather_shaders, bool indoors, float facing);
 
   void Render(const world::WorldPresentationSnapshot& snapshot,
               const WorldRenderViews& views,
@@ -61,8 +66,16 @@ class WorldPresentationScene final {
               std::uint16_t screen_width, std::uint16_t screen_height,
               m2::M2TransparentDrawOrder& alpha_draw_order);
 
+  void RenderShadows(
+      const world::WorldPresentationSnapshot& snapshot,
+      std::uint8_t first_shadow_view, ObjectRenderer& objects,
+      const game::ObjectPresentationSnapshot& object_snapshot);
+
   void SetWeatherGroundHeightSampler(
       std::function<std::optional<float>(float x, float y, float z)> sampler);
+  void SetWeatherCollisionSampler(std::function<std::optional<world::WeatherCollisionHit>(
+      const RenderVec3& origin, const RenderVec3& direction,
+      float maximum_distance)> sampler);
   void SetFileLoader(LoadFileCallback callback);
 
   void SetPrefixFileLoader(m2::M2StreamPrefixFileLoader callback);
@@ -79,6 +92,7 @@ class WorldPresentationScene final {
   [[nodiscard]] std::uint64_t DoodadCollisionRevision() const noexcept;
 
   [[nodiscard]] bool IsDoodadWorldEntryLoadDrained() const;
+  [[nodiscard]] bool IsTerrainWorldEntryLoadDrained() const;
 
   [[nodiscard]] const occlusion::OcclusionDepthBuffer& occlusion_buffer()
       const noexcept {
@@ -87,6 +101,7 @@ class WorldPresentationScene final {
 
  private:
   struct ModelResource;
+  struct PendingTerrainTile;
   struct PendingWmoGroup;
   struct ModelInstance {
     std::string resource_key;
@@ -106,6 +121,13 @@ class WorldPresentationScene final {
   };
 
   void ResetMap();
+  void QueueTerrainTilePreparation(
+      const world::PublishTerrainTileCommand& command);
+  void RetireTerrainTilePreparation(std::int32_t tile_x,
+                                    std::int32_t tile_y);
+  void DrainRetiredTerrainTilePreparations(bool wait);
+  void StartQueuedTerrainTilePreparation();
+  void PumpPreparedTerrainTiles();
   void QueueWmoGroupPreparation(
       const world::PublishWorldModelGroupCommand& command);
   void StartQueuedWmoGroupPreparations();
@@ -123,12 +145,15 @@ class WorldPresentationScene final {
   std::unique_ptr<WeatherRenderer> weather_renderer_;
   std::unique_ptr<WaterRenderer> water_;
   std::unique_ptr<DoodadRenderer> doodads_;
+  std::unique_ptr<DetailDoodadRenderer> detail_doodads_;
   std::unique_ptr<DistantTerrainRenderer> distant_;
 
   std::unique_ptr<WmoRenderer> wmo_shader_warm_up_;
   world::WeatherState weather_;
   std::unordered_map<std::string, std::unique_ptr<ModelResource>> models_;
   std::unordered_map<std::uint64_t, ModelInstance> instances_;
+  std::vector<std::unique_ptr<PendingTerrainTile>> pending_terrain_tiles_;
+  std::vector<std::unique_ptr<PendingTerrainTile>> retired_terrain_tiles_;
   std::map<std::pair<std::string, std::uint32_t>,
            std::unique_ptr<PendingWmoGroup>> pending_wmo_groups_;
   LoadFileCallback load_file_;

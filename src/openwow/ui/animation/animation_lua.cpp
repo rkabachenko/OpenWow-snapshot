@@ -3,7 +3,9 @@
 #include "openwow/ui/animation/animation_lua.h"
 #include "openwow/ui/animation/animation_coordinate_space.h"
 #include "openwow/ui/animation/animation_lua_helpers.h"
+#include "openwow/foundation/diagnostics/logging.h"
 #include "openwow/ui/game/api/game_lua_api_internal.h"
+#include "openwow/ui/game/framescript/core/frame_input_state.h"
 #include "openwow/ui/game/lua_cpu_profiler.h"
 #include "openwow/ui/lua_binding_registry.h"
 #include "openwow/ui/lua_post_hook_closure.h"
@@ -3690,6 +3692,97 @@ void ApplyFrameXmlLoadBehavior(lua_State* L,
         lua_setfield(L, parent_idx, parent_key.c_str());
       }
     }
+  }
+
+  if (!frame.parent_arrays.empty() && parent_idx != 0) {
+    parent_idx = lua_absindex(L, parent_idx);
+    if (lua_istable(L, parent_idx) != 0) {
+      for (const auto& parent_array : frame.parent_arrays) {
+        if (parent_array.empty()) {
+          continue;
+        }
+        lua_getfield(L, parent_idx, parent_array.c_str());
+        if (lua_istable(L, -1) == 0) {
+          lua_pop(L, 1);
+          lua_newtable(L);
+          lua_pushvalue(L, -1);
+          lua_setfield(L, parent_idx, parent_array.c_str());
+        }
+        const int array_idx = lua_absindex(L, -1);
+        lua_pushvalue(L, frame_idx);
+        lua_rawseti(L, array_idx, luaL_len(L, array_idx) + 1);
+        lua_pop(L, 1);
+      }
+    }
+  }
+
+  bool applied_relative_key = false;
+  if (parent_idx != 0 && !frame.anchors.empty()) {
+    parent_idx = lua_absindex(L, parent_idx);
+    lua_getfield(L, frame_idx, "__ow_anchors");
+    if (lua_istable(L, -1) != 0) {
+      const int anchors_idx = lua_absindex(L, -1);
+      for (std::size_t index = 0; index < frame.anchors.size(); ++index) {
+        const auto& anchor = frame.anchors[index];
+        if (anchor.relative_key.empty()) {
+          continue;
+        }
+        lua_rawgeti(L, anchors_idx, static_cast<lua_Integer>(index + 1));
+        if (lua_istable(L, -1) == 0) {
+          lua_pop(L, 1);
+          continue;
+        }
+        const int anchor_idx = lua_absindex(L, -1);
+        const std::string prefix = "$parent.";
+        const std::string key = anchor.relative_key.rfind(prefix, 0) == 0
+                                    ? anchor.relative_key.substr(prefix.size())
+                                    : anchor.relative_key;
+        lua_getfield(L, parent_idx, key.c_str());
+        if (lua_istable(L, -1) != 0) {
+          lua_setfield(L, anchor_idx, "relativeTo");
+        } else {
+          lua_pop(L, 1);
+          lua_pushvalue(L, parent_idx);
+          lua_setfield(L, anchor_idx, "relativeTo");
+          diagnostics::Log(diagnostics::LogLevel::kWarn,
+                           "FrameXML: couldn't resolve relativeKey " +
+                               anchor.relative_key + " for " +
+                               (frame.name.empty() ? std::string("<unnamed>")
+                                                   : frame.name));
+        }
+        applied_relative_key = true;
+        lua_pop(L, 1);
+      }
+    }
+    lua_pop(L, 1);
+  }
+  if (applied_relative_key) {
+    openwow::ui::game::frame_api::NotifyFrameInputMutation(L, frame_idx,
+                                                            false);
+  }
+
+  for (const auto& mixin_name : frame.mixins) {
+    if (mixin_name.empty()) {
+      continue;
+    }
+    lua_getglobal(L, mixin_name.c_str());
+    if (lua_istable(L, -1) == 0) {
+      lua_pop(L, 1);
+      diagnostics::Log(diagnostics::LogLevel::kWarn,
+                       "FrameXML: couldn't find mixin " + mixin_name +
+                           " for " + (frame.name.empty() ? std::string("<unnamed>")
+                                                         : frame.name));
+      continue;
+    }
+    const int mixin_idx = lua_absindex(L, -1);
+    lua_pushnil(L);
+    while (lua_next(L, mixin_idx) != 0) {
+      lua_pushvalue(L, -2);
+      lua_pushvalue(L, -2);
+      lua_settable(L, frame_idx);
+      lua_pop(L, 1);
+    }
+    lua_pop(L, 1);
   }
 
   if (frame.animation_groups.empty()) {

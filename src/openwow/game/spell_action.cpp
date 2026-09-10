@@ -7,9 +7,13 @@
 #include "openwow/game/combat_log.h"
 #include "openwow/game/localization.h"
 #include "openwow/game/object_manager.h"
+#include "openwow/game/pet_manager.h"
 #include "openwow/game/objects/cgcorpse.h"
 #include "openwow/game/spell_cast_execution.h"
 #include "openwow/game/spell_cast_runtime.h"
+#include "openwow/game/spell_cast_diagnostics.h"
+#include "openwow/game/spell_cooldown_state.h"
+#include "openwow/game/spell_cost_and_range.h"
 #include "openwow/game/spell_book.h"
 #include "openwow/game/spell_runtime_values.h"
 #include "openwow/game/spell_c_internals.h"
@@ -21,6 +25,7 @@
 #include "openwow/ui/game/cvar_system.h"
 #include "openwow/ui/game/script_event_dispatch.h"
 #include "openwow/ui/game/ui_error_manager.h"
+#include "openwow/ui/surfaces/game/runtime/system_message_dispatch.h"
 #include "openwow/foundation/diagnostics/logging.h"
 
 #include <cstdio>
@@ -434,19 +439,63 @@ void SpellAction_DisplaySpellFailure(const WorldSession& session,
                                      const std::uint32_t spell_id,
                                      const ObjectGuid caster_guid,
                                      const std::uint32_t error_code,
-                                     const std::string& substitution) {
+                                     const std::string& substitution,
+                                     const char* const source) {
+
+  if (error_code == static_cast<std::uint32_t>(SpellCastResult::kDontReport)) {
+    return;
+  }
+  const bool player_failure = caster_guid == session.objects().GetLocalPlayerGuid();
+  if (player_failure) {
+    auto& runtime = SpellCastDiagnostics::Get();
+    const auto now = core::GameClock::GetTickCount32();
+    const bool repeated = spell_id != 0 && spell_id == runtime.last_feedback_spell_id &&
+                          error_code == runtime.last_feedback_failure_reason;
+    const auto elapsed = now - runtime.previous_feedback_time;
+    runtime.last_feedback_failure_reason = error_code;
+    runtime.last_feedback_spell_id = spell_id;
+    runtime.previous_feedback_time = now;
+    if (repeated && elapsed < 3000u) {
+      return;
+    }
+  }
+
+  const auto* const dbc = session.GetDbcLoader();
+  const auto* const spell_entry =
+      dbc != nullptr ? dbc->spell().LookupEntry(spell_id) : nullptr;
+  const auto cooldown = player_failure
+      ? ResolveSpellbookCooldown(session.spell_book(), spell_id)
+      : ResolvePetBarSpellCooldown(session.pet().pet_bar(), spell_id, dbc);
+  const auto target_guid = session.objects().GetTargetGuid();
+  const auto* const target = session.objects().GetUnit(target_guid);
+  diagnostics::Log(
+      diagnostics::LogLevel::kInfo,
+      std::string("spell_failure: source=") + source +
+          " spell=" + std::to_string(spell_id) +
+          " result=" + std::to_string(error_code) +
+          " caster=" + std::to_string(caster_guid.GetRawValue()) +
+          " target=" + std::to_string(target_guid.GetRawValue()) +
+          " target_health=" + (target != nullptr
+              ? std::to_string(target->State().GetHealth()) : "not_unit") +
+          " target_dynamic_flags=" + (target != nullptr
+              ? std::to_string(target->State().GetDynamicFlags()) : "not_unit") +
+          " category=" + std::to_string(spell_entry != nullptr ? spell_entry->category : 0u) +
+          " gcd_category=" + std::to_string(spell_entry != nullptr
+              ? spell_entry->start_recovery_category : 0u) +
+          " cooldown_ms=" + std::to_string(cooldown.has_value()
+              ? RemainingCooldownMilliseconds(*cooldown) : 0) +
+          " cooldown_start_s=" + std::to_string(cooldown.has_value()
+              ? cooldown->start_time_s : 0.0) +
+          " cooldown_duration_s=" + std::to_string(cooldown.has_value()
+              ? cooldown->duration_s : 0.0) +
+          " cooldown_enabled=" + std::to_string(cooldown.has_value()
+              ? cooldown->enabled : 1.0));
 
   std::string localized_format;
   std::string effective_substitution = substitution;
   const auto result = static_cast<SpellCastResult>(error_code);
 
-  if (result == SpellCastResult::kAlreadyAtFullHealth) {
-    localized_format = Localization::Get().GetString(
-        "ERR_SPELL_FAILED_ALREADY_AT_FULL_HEALTH", {});
-  } else if (result == SpellCastResult::kAlreadyAtFullMana) {
-    localized_format = Localization::Get().GetString(
-        "ERR_SPELL_FAILED_ALREADY_AT_FULL_MANA", {});
-  } else if (result == SpellCastResult::kAlreadyAtFullPower ||
+  if (result == SpellCastResult::kAlreadyAtFullPower ||
              result == SpellCastResult::kNoPower) {
     localized_format = Localization::Get().GetString(
         result == SpellCastResult::kAlreadyAtFullPower
@@ -454,9 +503,6 @@ void SpellAction_DisplaySpellFailure(const WorldSession& session,
             : "ERR_OUT_OF_POWER_DISPLAY",
         {});
 
-    const auto* const dbc = session.GetDbcLoader();
-    const auto* const spell_entry =
-        dbc != nullptr ? dbc->spell().LookupEntry(spell_id) : nullptr;
     if (spell_entry != nullptr) {
       const char* const power_token =
           PowerTypeToString(spell_entry->power_type);
@@ -470,6 +516,9 @@ void SpellAction_DisplaySpellFailure(const WorldSession& session,
   }
 
   if (localized_format.empty()) {
+    diagnostics::Log(diagnostics::LogLevel::kWarn,
+        "spell_failure: missing localized text spell=" +
+            std::to_string(spell_id) + " result=" + std::to_string(error_code));
     return;
   }
 
@@ -485,12 +534,22 @@ void SpellAction_DisplaySpellFailure(const WorldSession& session,
     return;
   }
 
-  ui::UIErrorManager::Get().AddErrorMessage(message);
-  ui::game::ScriptEventDispatch::Get().FireUiErrorMessage(message);
+  // Power failures already contain the final game-error text. Other failures
+  // keep the inner reason for CombatLog and select their own UI descriptor.
+  auto message_id = result == SpellCastResult::kAlreadyAtFullPower ||
+                           result == SpellCastResult::kNoPower || !player_failure
+                       ? 48u
+                       : GetCastFailureMessageId(error_code, spell_entry, 0);
+  if (!player_failure && result == SpellCastResult::kNotReady && spell_entry != nullptr) {
+    message_id = (spell_entry->attributes & 0x10u) != 0u ? 53u : 52u;
+  }
+  ui::game::DisplaySystemMessage(static_cast<int>(message_id), message.c_str());
 
-  auto& combat_log = const_cast<CombatLog&>(session.combat_log());
-  (void)combat_log.HandleSpellCastFailed(caster_guid.GetRawValue(), spell_id,
-                                         message);
+  if (player_failure) {
+    auto& combat_log = const_cast<CombatLog&>(session.combat_log());
+    (void)combat_log.HandleSpellCastFailed(caster_guid.GetRawValue(), spell_id,
+                                           message);
+  }
 }
 
 bool ConfirmSpellGroundTarget(const WorldSession& session,
@@ -906,8 +965,8 @@ bool SpellAction_ValidateAndInitiateCast(const WorldSession& session,
     return false;
   }
 
-  const auto preflight = session.spells().ValidatePlayerCastRequest(session,
-                                                                    spell_id);
+  const auto preflight = session.spells().ValidatePlayerCastRequest(
+      session, spell_id, ObjectGuid(target_guid));
   if (preflight != SpellCastResult::kSuccess) {
     DisplaySpellActionFailure(session, spell_id, preflight,
                               player->GetGuid());

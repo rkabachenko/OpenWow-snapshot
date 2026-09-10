@@ -279,7 +279,7 @@ AddonLoadabilityResult EvaluateLoadabilityRecursive(const AddOnsData &data, cons
     };
   }
 
-  if (addon->security == static_cast<std::uint32_t>(AddonLoadState::Banned)) {
+  if (addon->EffectiveSecurity() == static_cast<std::uint32_t>(AddonLoadState::Banned)) {
     return {
         .loadable = false,
         .reason = AddonStatusLabel::Banned,
@@ -463,7 +463,7 @@ uint32_t AddOnsData::GetSecurity(const char *addon_name) const {
   if (it == addons_.end())
     return 1;
 
-  return it->second.security;
+  return it->second.EffectiveSecurity();
 }
 
 const char *AddOnsData::GetSecurityLabel(const char *addon_name) const {
@@ -677,6 +677,7 @@ void AddOnsData::ImportFromAddonManagerSnapshot(const std::vector<AddonInfo> &ad
 
     state.crc = addon.revision;
     state.secure = addon.is_secure ? 1u : 0u;
+    state.is_builtin_ui = addon.is_builtin_ui;
     if (existing == nullptr) {
 
       state.security = 1u;

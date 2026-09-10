@@ -57,10 +57,6 @@ void SessionEventBridge::Reset() {
   prev_spells_ = {};
   prev_trade_ = {};
   prev_mail_ = {};
-  prev_combat_ = {};
-  if (session_ != nullptr) {
-    prev_combat_.combat_log_serial = session_->combat_log().log_entry_serial();
-  }
   prev_talents_ = {};
   prev_auras_ = {};
   prev_player_state_ = {};
@@ -87,6 +83,26 @@ bool SessionEventBridge::SynchronizePlayerUnitToken() {
   return true;
 }
 
+bool SessionEventBridge::PublishInitialPlayerUnitState() {
+  if (!SynchronizePlayerUnitToken()) {
+    return false;
+  }
+
+  const auto* const player = session_->objects().GetLocalPlayerTyped();
+  if (player == nullptr || player->GetGuid().IsEmpty()) {
+    return false;
+  }
+
+  const std::uint64_t guid = player->GetGuid().GetRawValue();
+  const std::uint8_t power_type = player->State().GetPowerType();
+  auto& dispatch = ScriptEventDispatch::Get();
+  dispatch.FireUnitHealth(guid);
+  dispatch.FireUnitMaxHealth(guid);
+  dispatch.FireUnitPowerSpecific(guid, power_type);
+  dispatch.FireUnitMaxPowerSpecific(guid, power_type);
+  return true;
+}
+
 void SessionEventBridge::Poll(float elapsed_seconds) {
   if (!initialized_ || !session_ || !ui_) return;
 
@@ -107,7 +123,6 @@ void SessionEventBridge::Poll(float elapsed_seconds) {
   PollSpellState();
   PollTradeState();
   PollMailState(elapsed_seconds);
-  PollCombatState();
   PollTalentState();
   PollPlayerExtendedState();
   PollPetState();
@@ -209,12 +224,8 @@ void SessionEventBridge::PollQuestState() {
   prev_quests_.quest_count = cur_quest_count;
 
   auto& runtime_quest_log = QuestLog::Get();
-  runtime_quest_log.ExpireTimedWatches();
-
-  const auto watch_update_serial = runtime_quest_log.GetWatchUpdateSerial();
-  if (watch_update_serial != prev_quests_.watch_update_serial) {
-    ui_->frame_events().dispatcher().FireEvent(events::QUEST_WATCH_UPDATE);
-    prev_quests_.watch_update_serial = watch_update_serial;
+  if (runtime_quest_log.ExpireTimedWatches()) {
+    ui_->frame_events().dispatcher().FireEvent(events::QUEST_LOG_UPDATE);
   }
 
   prev_quests_.has_active_details = quests.has_active_details();
@@ -341,20 +352,6 @@ void SessionEventBridge::PollMailState(float elapsed_seconds) {
     ui_->frame_events().dispatcher().FireEvent(events::MAIL_INBOX_UPDATE);
     prev_mail_.inbox_count = cur_inbox_count;
   }
-}
-
-void SessionEventBridge::PollCombatState() {
-  auto& sed = ScriptEventDispatch::Get();
-  const bool cur_in_combat = session_->combat().in_combat();
-
-  if (cur_in_combat && !prev_combat_.in_combat) {
-    sed.FirePlayerEnterCombat();
-  } else if (!cur_in_combat && prev_combat_.in_combat) {
-    sed.FirePlayerLeaveCombat();
-  }
-  prev_combat_.in_combat = cur_in_combat;
-
-  prev_combat_.combat_log_serial = session_->combat_log().log_entry_serial();
 }
 
 void SessionEventBridge::PollTalentState() {

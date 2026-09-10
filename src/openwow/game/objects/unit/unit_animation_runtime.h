@@ -60,6 +60,14 @@ public:
     [[nodiscard]] bool operator==(const PlaybackRequest &) const = default;
   };
 
+  struct MountPlaybackRequest {
+    std::uint16_t animation_id{render::AnimId::kStand};
+    bool looping{true};
+    std::uint64_t serial{1};
+
+    [[nodiscard]] bool operator==(const MountPlaybackRequest &) const = default;
+  };
+
   explicit UnitAnimationRuntime(CGUnit_C &owner) noexcept : owner_(owner) {}
   UnitAnimationRuntime(const UnitAnimationRuntime &) = delete;
   UnitAnimationRuntime &operator=(const UnitAnimationRuntime &) = delete;
@@ -127,6 +135,9 @@ public:
   [[nodiscard]] const PlaybackRequest &GetPlaybackRequest() const noexcept {
     return playback_request_;
   }
+  [[nodiscard]] const MountPlaybackRequest &GetMountPlaybackRequest() const noexcept {
+    return mount_playback_request_;
+  }
 
   [[nodiscard]] std::uint16_t GetResolvedPlaybackAnimationId() const;
 
@@ -152,6 +163,9 @@ public:
   void HandlePlaybackCompletion(const WorldSession &session,
                                 std::uint64_t request_serial,
                                 std::uint16_t animation_id);
+  void HandleMountPlaybackCompletion(const WorldSession &session,
+                                     std::uint64_t request_serial,
+                                     std::uint16_t animation_id);
   [[nodiscard]] bool IsPlayingUsingAnimation() const;
   [[nodiscard]] std::uint32_t ResolveAnimationId(
       std::uint32_t anim_id, std::uint32_t override_instance_id = 0) const;
@@ -166,6 +180,8 @@ public:
   [[nodiscard]] bool IsEmoteDance(std::uint32_t animation_id) const;
 
   [[nodiscard]] bool IsRestPoseStaleForFlags(std::uint32_t movement_flags) const;
+  [[nodiscard]] bool IsAnimationPoseStaleForFlags(
+      std::uint16_t animation_id, std::uint32_t movement_flags) const;
   [[nodiscard]] bool IsEmoteTalk(std::uint32_t animation_id) const;
   void UpdateMountAndPassengerAnimations();
   void ApplySplineAnimationTier(std::uint8_t tier);
@@ -200,6 +216,10 @@ public:
   void RequestStandSelectorRefresh() noexcept {
     stand_selector_refresh_pending_ = true;
   }
+  void InvalidateDeferredStandSelection() noexcept {
+    pending_deferred_animation_id_ = -1;
+    stand_selector_refresh_pending_ = true;
+  }
   void HandleMovementOpcodeAnimationSideEffects(
       const WorldSession &session, std::uint32_t movement_opcode);
   void PlayEmoteAnimation(std::int32_t emote_anim_id,
@@ -214,7 +234,7 @@ public:
   void HandleAnimSequenceEnd(const WorldSession &session,
                              std::uint32_t animation_group,
                              std::uint32_t animation_id,
-                             std::uint32_t emote_state, bool has_remaining);
+                             std::uint32_t emote_state);
   void ResetEmoteState();
   void ResetDeathPlaybackForAliveTransition(WorldSession &session);
   void EmoteQueueHandler(const std::uint32_t *emote_pairs, std::int32_t count);
@@ -386,9 +406,10 @@ private:
   void CommitPlaybackRequest(std::uint16_t animation_id, bool looping,
                              bool upper_body_only, bool bypass_alias_resolution,
                              bool zero_blend);
+  void CommitMountPlaybackRequest(std::uint16_t animation_id, bool looping,
+                                  bool restart);
 
-  void ClearSequenceEndFlagBits(std::uint32_t finished_behavior,
-                                std::uint16_t finished_animation_id);
+  void ClearSequenceEndFlagBits(std::uint32_t finished_behavior);
 
   void ApplySubmitFunnelFlagBits(std::uint32_t submitted_behavior);
 
@@ -425,10 +446,10 @@ private:
 
   std::int32_t pending_deferred_animation_id_{-1};
 
-  std::int32_t deferred_animation_satisfied_id_{-1};
   std::uint32_t selected_stand_animation_flags_{0};
   std::int32_t spell_visual_persist_anim_id_{-1};
   PlaybackRequest playback_request_{};
+  MountPlaybackRequest mount_playback_request_{};
   std::optional<PendingProtectedPlayback> pending_protected_playback_{};
   std::uint32_t playback_movement_flags_{0};
 

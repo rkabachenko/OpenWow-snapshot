@@ -5,6 +5,10 @@
 #include <functional>
 #include <string>
 
+namespace openwow::vfs {
+class VirtualFileSystem;
+}
+
 namespace openwow::data {
 
 using STORM_HANDLE = void*;
@@ -41,7 +45,9 @@ struct ArchiveSystemCallbacks {
   std::function<std::string(const std::string& key)> read_wow_ini;
 };
 
-void DefaultLoadLoginConfigs(int reload, const char* locale);
+void DefaultLoadLoginConfigs(
+    int reload, const char* locale,
+    const openwow::vfs::VirtualFileSystem* content_vfs = nullptr);
 
 std::string ResolveWowIniArchiveLocale(
     const std::string& locale_token,

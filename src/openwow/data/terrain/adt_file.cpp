@@ -832,6 +832,7 @@ bool DecompressAlphaMapInto(const uint8_t *raw_alpha, const size_t raw_size,
     }
   }
 
+  const bool complete = produced == kAlphaSize;
   emit_run(0u, kAlphaSize - produced);
 
   if (fix_last_row_and_column) {
@@ -844,7 +845,7 @@ bool DecompressAlphaMapInto(const uint8_t *raw_alpha, const size_t raw_size,
           output[fix_row * row_stride + (kAlphaSide - 2u) * pixel_stride];
     }
   }
-  return true;
+  return complete;
 }
 
 std::vector<uint8_t> DecompressAlphaMap(const uint8_t *raw_alpha, const size_t raw_size,

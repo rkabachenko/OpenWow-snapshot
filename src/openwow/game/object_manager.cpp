@@ -162,6 +162,26 @@ FieldUpdateBatch BuildFieldUpdateBatch(const CGObject_C *object,
   return batch;
 }
 
+FieldUpdateBatch BuildReplacementFieldUpdateBatch(
+    const CGObject_C &object, const UpdateFieldValues &post_image) {
+  FieldUpdateBatch batch;
+  batch.updated_fields.reserve(post_image.field_count);
+  batch.value_changes.reserve(post_image.values.size());
+  for (std::uint16_t field_index = 0; field_index < post_image.field_count;
+       ++field_index) {
+    const std::uint32_t old_value = object.GetUInt32(field_index);
+    const std::uint32_t new_value = post_image.GetValue(field_index);
+    if (old_value == new_value) {
+      continue;
+    }
+    batch.updated_fields.push_back(field_index);
+    batch.value_changes.push_back({.field_index = field_index,
+                                   .old_value = old_value,
+                                   .new_value = new_value});
+  }
+  return batch;
+}
+
 void FinalizePacketUpdatePromotion(ObjectManagerCallbacks &callbacks,
                                    CGObject_C &object) {
   object.FinalizePacketUpdatePromotion();
@@ -468,8 +488,10 @@ void ObjectManager::SynchronizeUnitTransportPassengerMembership(
 }
 
 void ObjectManager::AdvanceSplineMovement(
-    world::MovementSplineManager &spline_manager) {
-  ForEachUnit([&spline_manager, this](const ObjectGuid &guid, CGUnit_C &unit) {
+    WorldSession &session, const std::uint32_t current_tick_ms) {
+  auto &spline_manager = session.movement_spline_mgr();
+  ForEachUnit([&spline_manager, &session, current_tick_ms, this](
+                  const ObjectGuid &guid, CGUnit_C &unit) {
     auto *const spline = spline_manager.GetSpline(guid.GetRawValue());
     if (spline == nullptr) {
       if (unit.Movement().HasSplineMovementPoseOwnership()) {
@@ -502,9 +524,14 @@ void ObjectManager::AdvanceSplineMovement(
         spline->HasCoordinateParentBinding(), spline->GetCoordinateParent(),
         spline->GetCoordinateParentSeat(), spline->GetSplineFlags(),
         spline->GetTotalArcLength(), spline->GetDuration(),
-        spline->IsActive());
+        spline->IsActive(), spline->GetSplineId());
     if (spline->HasTriggeredAnimationTier()) {
       unit.Animation().ApplySplineAnimationTier(spline->GetAnimationId());
+    }
+    if (spline->IsFinished() && unit.IsActiveMover()) {
+      (void)unit.Movement().CompleteSplineMovement(
+          session, current_tick_ms, spline->GetSplineId(),
+          spline->GetSplineFlags());
     }
   });
 }
@@ -908,6 +935,10 @@ ObjectPresentationSnapshot ObjectManager::PublishPresentationSnapshot(
                          : nullptr;
     const std::uint32_t mount_display_id =
         unit != nullptr ? unit->Mount().CachedDisplayForSpell() : 0u;
+    const auto mount_animation =
+        unit != nullptr
+            ? unit->Animation().GetMountPlaybackRequest()
+            : UnitAnimationRuntime::MountPlaybackRequest{};
     std::uint32_t relation_mask = 0u;
     if (unit != nullptr && active_player != nullptr) {
 
@@ -938,7 +969,9 @@ ObjectPresentationSnapshot ObjectManager::PublishPresentationSnapshot(
         .x = world_position.x,
         .y = world_position.y,
         .z = world_position.z,
-        .facing = object->GetWorldFacing(),
+        .facing = unit != nullptr
+                      ? unit->Movement().WorldSmoothBodyFacing()
+                      : object->GetWorldFacing(),
         .scale = object->GetScale(),
         .display_id = object->GetDisplayId(),
         .health = object->GetHealth(),
@@ -946,6 +979,9 @@ ObjectPresentationSnapshot ObjectManager::PublishPresentationSnapshot(
         .level = object->GetLevel(),
         .movement_flags = object->GetMovementInfo().flags,
         .mount_display_id = mount_display_id,
+        .mount_animation_id = mount_animation.animation_id,
+        .mount_animation_looping = mount_animation.looping,
+        .mount_animation_serial = mount_animation.serial,
         .unit_flags = unit != nullptr ? unit->State().GetUnitFlags() : 0u,
         .unit_flags2 = unit != nullptr ? unit->State().GetUnitFlags2() : 0u,
         .creature_type =
@@ -1114,6 +1150,8 @@ UpdateObjectHandler ObjectManager::MakeHandler() {
 bool ObjectManager::HandleUpdateObject(const std::uint8_t *data, std::size_t len) {
   deferred_prepass_values_.clear();
   deferred_prepass_values_cursor_ = 0;
+  deferred_prepass_creates_.clear();
+  deferred_prepass_creates_cursor_ = 0;
   if (callbacks_.on_update_object_batch_started) {
     callbacks_.on_update_object_batch_started();
   }
@@ -1121,11 +1159,22 @@ bool ObjectManager::HandleUpdateObject(const std::uint8_t *data, std::size_t len
   const auto finish_batch = [this](const bool committed) {
     deferred_prepass_values_.clear();
     deferred_prepass_values_cursor_ = 0;
+    deferred_prepass_creates_.clear();
+    deferred_prepass_creates_cursor_ = 0;
     if (callbacks_.on_update_object_batch_finished) {
       callbacks_.on_update_object_batch_finished(committed);
     }
     SweepStalePendingObjects();
   };
+
+  if (!ValidateUpdateObjectPacketBeforeMutation(data, len)) {
+    openwow::diagnostics::Log(
+        openwow::diagnostics::LogLevel::kWarn,
+        "UpdateObject: validation rejected packet before state mutation payload=" +
+            std::to_string(len) + " bytes");
+    finish_batch(false);
+    return false;
+  }
 
   UpdateObjectHandler leading_out_of_range_handler;
   leading_out_of_range_handler.on_out_of_range =
@@ -1367,9 +1416,10 @@ void ObjectManager::OnCreate(const CreateObjectUpdate &upd) {
       };
   const bool was_preallocated = preallocated_create_objects_.erase(upd.guid) != 0;
   if (auto *existing = FindMutableForPacketUpdate(upd.guid)) {
-    const auto batch =
-        was_preallocated ? BuildFieldUpdateBatch(nullptr, upd.fields, true)
-                         : FieldUpdateBatch{};
+    const auto batch = was_preallocated
+                           ? BuildFieldUpdateBatch(nullptr, upd.fields, true)
+                           : ConsumeDeferredPrepassCreate(upd.guid)
+                                 .value_or(FieldUpdateBatch{});
     bool movement_applied = false;
     if (was_preallocated) {
 
@@ -1420,6 +1470,13 @@ void ObjectManager::OnCreate(const CreateObjectUpdate &upd) {
     if (was_preallocated && callbacks_.on_fields_changed &&
         !batch.updated_fields.empty()) {
       callbacks_.on_fields_changed(*existing, batch, was_preallocated);
+    } else if (!was_preallocated && !batch.value_changes.empty()) {
+      if (callbacks_.on_object_updated) {
+        callbacks_.on_object_updated(*existing);
+      }
+      if (callbacks_.on_fields_changed) {
+        callbacks_.on_fields_changed(*existing, batch, false);
+      }
     }
     return;
   }
@@ -1463,6 +1520,29 @@ void ObjectManager::OnCreate(const CreateObjectUpdate &upd) {
   }
 }
 
+std::optional<FieldUpdateBatch>
+ObjectManager::ConsumeDeferredPrepassCreate(const ObjectGuid guid) {
+  if (deferred_prepass_creates_cursor_ >= deferred_prepass_creates_.size()) {
+    openwow::diagnostics::Log(
+        openwow::diagnostics::LogLevel::kWarn,
+        "ObjectManager: missing deferred create post-image guid=" +
+            guid.ToString() + " stage=update-object-commit");
+    return std::nullopt;
+  }
+
+  auto &deferred = deferred_prepass_creates_[deferred_prepass_creates_cursor_];
+  if (deferred.guid != guid) {
+    openwow::diagnostics::Log(
+        openwow::diagnostics::LogLevel::kWarn,
+        "ObjectManager: deferred create order mismatch expected=" +
+            deferred.guid.ToString() + " actual=" + guid.ToString() +
+            " stage=update-object-commit");
+    return std::nullopt;
+  }
+  ++deferred_prepass_creates_cursor_;
+  return std::move(deferred.changed_fields);
+}
+
 void ObjectManager::ApplyPrepassValues(const ValuesUpdate &upd) {
   auto& deferred = deferred_prepass_values_.emplace_back();
   deferred.guid = upd.guid;
@@ -1479,7 +1559,7 @@ void ObjectManager::ApplyPrepassValues(const ValuesUpdate &upd) {
   if (promoted_from_pending) {
     FinalizePacketUpdatePromotion(callbacks_, *object);
   }
-  if (!batch.value_changes.empty()) {
+  if (!batch.updated_fields.empty()) {
     deferred.changed_fields = batch;
   }
 }
@@ -1519,7 +1599,7 @@ void ObjectManager::OnValues(const ValuesUpdate &upd) {
   if (callbacks_.on_object_updated && !batch.value_changes.empty())
     callbacks_.on_object_updated(*object);
 
-  if (callbacks_.on_fields_changed && !batch.value_changes.empty()) {
+  if (callbacks_.on_fields_changed && !batch.updated_fields.empty()) {
     callbacks_.on_fields_changed(*object, batch, false);
   }
 }
@@ -1787,6 +1867,57 @@ ObjectManager::ResolveFieldCountForTrackedObject(ObjectGuid guid) const {
       FieldCountForPlayer(guid == CGObject_C::GetActivePlayerGuid()));
 }
 
+bool ObjectManager::ValidateUpdateObjectPacketBeforeMutation(
+    const std::uint8_t *data, const std::size_t len) const {
+  std::unordered_map<ObjectGuid, std::uint16_t, ObjectGuid::Hash>
+      packet_create_field_counts;
+  bool conflicting_create_field_counts = false;
+
+  UpdateObjectHandler validation_handler;
+  validation_handler.resolve_values_field_count =
+      [this, &packet_create_field_counts](
+          const ObjectGuid guid) -> std::optional<std::uint16_t> {
+    if (const auto tracked = ResolveFieldCountForTrackedObject(guid);
+        tracked.has_value()) {
+      return tracked;
+    }
+    const auto discovered = packet_create_field_counts.find(guid);
+    return discovered != packet_create_field_counts.end()
+               ? std::optional<std::uint16_t>(discovered->second)
+               : std::nullopt;
+  };
+  validation_handler.on_create =
+      [&packet_create_field_counts, &conflicting_create_field_counts](
+          const CreateObjectUpdate &update) {
+    const auto field_count =
+        update.type_id == TypeID::kPlayer
+            ? FieldCountForPlayer(update.movement.IsSelf() ||
+                                  update.guid == CGObject_C::GetActivePlayerGuid())
+            : FieldCountFor(update.type_id);
+    const auto [found, inserted] =
+        packet_create_field_counts.emplace(update.guid, field_count);
+    if (!inserted && found->second != field_count) {
+      conflicting_create_field_counts = true;
+    }
+  };
+
+  if (!ParseUpdateObject(data, len, validation_handler) ||
+      conflicting_create_field_counts) {
+    if (conflicting_create_field_counts) {
+      openwow::diagnostics::Log(
+          openwow::diagnostics::LogLevel::kWarn,
+          "UpdateObject: conflicting create field widths in one packet payload=" +
+              std::to_string(len) + " bytes");
+    }
+    return false;
+  }
+
+  // The discovery pass can encounter a values block before the matching
+  // create block. Replaying with the complete packet-local type map verifies
+  // the exact field width that the later mutation passes will consume.
+  return ParseUpdateObject(data, len, validation_handler);
+}
+
 bool ObjectManager::PreallocateCreateObjects(const std::uint8_t *data, std::size_t len,
                                              std::vector<ObjectGuid> &created_shells) {
   UpdateObjectHandler handler;
@@ -1808,6 +1939,11 @@ bool ObjectManager::PreallocateCreateObjects(const std::uint8_t *data, std::size
 
     bool promoted_from_pending = false;
     if (auto *existing = FindMutableForPacketUpdate(upd.guid, &promoted_from_pending)) {
+      const auto expanded_fields = ExpandExistingCreateFields(upd.fields);
+      auto &deferred = deferred_prepass_creates_.emplace_back();
+      deferred.guid = upd.guid;
+      deferred.changed_fields =
+          BuildReplacementFieldUpdateBatch(*existing, expanded_fields);
       ApplyCreateFieldsToExistingObject(*existing, upd,
                                         true);
       if (promoted_from_pending) {

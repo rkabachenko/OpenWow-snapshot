@@ -449,6 +449,40 @@ AddonManager& AddonManager::Get() {
   return instance;
 }
 
+std::optional<openwow::vfs::MountPoint> AddonManager::ResolveBuiltinUiAddonMount(
+    const openwow::vfs::VirtualFileSystem& vfs, const std::string_view addon_name) {
+  const auto name = CanonicalizeAddonKey(addon_name);
+  if (name != "openwow_encounterjournal_loader" &&
+      name != "openwow_encounterjournal") {
+    return std::nullopt;
+  }
+
+  const std::string toc_path =
+      "/Interface/AddOns/" + std::string(addon_name) + "/" +
+      std::string(addon_name) + ".toc";
+  const auto resolved_toc = vfs.Resolve(toc_path);
+  if (!resolved_toc.has_value()) {
+    return std::nullopt;
+  }
+  for (const auto& mount : vfs.mounts()) {
+    // Only the shipped/development UI content root grants built-in identity.
+    // A same-named add-on in user Interface or ContentOverrides is not enough.
+    if (!mount.enabled || mount.id != "enhanced-override" ||
+        mount.kind != openwow::vfs::MountKind::kEnhancedOverride) {
+      continue;
+    }
+    openwow::vfs::VirtualFileSystem builtin_content;
+    builtin_content.Mount(mount);
+    const auto builtin_toc = builtin_content.Resolve(toc_path);
+    std::error_code ec;
+    if (builtin_toc.has_value() &&
+        std::filesystem::equivalent(*resolved_toc, *builtin_toc, ec) && !ec) {
+      return mount;
+    }
+  }
+  return std::nullopt;
+}
+
 void AddonManager::ScanAddons(const std::string& interfacePath) {
   bool has_addons_dir = true;
   {
@@ -568,6 +602,7 @@ std::vector<AddonInfo> AddonManager::DiscoverAddons(
     PopulateAddonInfoFromParsedToc(
         *toc, addon_name, directory, toc_path,
         static_cast<int>(addons.size()), info);
+    info.is_builtin_ui = ResolveBuiltinUiAddonMount(vfs, addon_name).has_value();
 
     info.toc_file_entry_count =
         TOCParser::CountVisibleFileEntries(*toc_text, true);

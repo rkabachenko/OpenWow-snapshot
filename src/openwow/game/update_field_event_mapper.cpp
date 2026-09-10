@@ -1,6 +1,8 @@
 
 #include "openwow/game/update_field_event_mapper.h"
 
+#include "openwow/game/player_unit_field_event_callbacks.h"
+
 #include <algorithm>
 #include <unordered_set>
 
@@ -8,34 +10,9 @@ namespace openwow::game {
 
 namespace evt {
 
-static constexpr const char* UNIT_HEALTH             = "UNIT_HEALTH";
-static constexpr const char* UNIT_MAXHEALTH          = "UNIT_MAXHEALTH";
-static constexpr const char* UNIT_MANA               = "UNIT_MANA";
-static constexpr const char* UNIT_RAGE               = "UNIT_RAGE";
-static constexpr const char* UNIT_FOCUS              = "UNIT_FOCUS";
-static constexpr const char* UNIT_ENERGY             = "UNIT_ENERGY";
-static constexpr const char* UNIT_HAPPINESS          = "UNIT_HAPPINESS";
-static constexpr const char* UNIT_RUNIC_POWER        = "UNIT_RUNIC_POWER";
-static constexpr const char* UNIT_MAXMANA            = "UNIT_MAXMANA";
-static constexpr const char* UNIT_MAXRAGE            = "UNIT_MAXRAGE";
-static constexpr const char* UNIT_MAXFOCUS           = "UNIT_MAXFOCUS";
-static constexpr const char* UNIT_MAXENERGY          = "UNIT_MAXENERGY";
-static constexpr const char* UNIT_MAXHAPPINESS       = "UNIT_MAXHAPPINESS";
-static constexpr const char* UNIT_MAXRUNIC_POWER     = "UNIT_MAXRUNIC_POWER";
-static constexpr const char* UNIT_LEVEL              = "UNIT_LEVEL";
 static constexpr const char* UNIT_FLAGS              = "UNIT_FLAGS";
-static constexpr const char* UNIT_DYNAMIC_FLAGS      = "UNIT_DYNAMIC_FLAGS";
-static constexpr const char* UNIT_TARGET             = "UNIT_TARGET";
 static constexpr const char* UNIT_MODEL_CHANGED      = "UNIT_MODEL_CHANGED";
 static constexpr const char* UNIT_STATS              = "UNIT_STATS";
-static constexpr const char* UNIT_ATTACK_POWER       = "UNIT_ATTACK_POWER";
-static constexpr const char* UNIT_ATTACK_SPEED       = "UNIT_ATTACK_SPEED";
-static constexpr const char* UNIT_DAMAGE             = "UNIT_DAMAGE";
-static constexpr const char* UNIT_RANGEDDAMAGE       = "UNIT_RANGEDDAMAGE";
-static constexpr const char* UNIT_RANGED_ATTACK_POWER= "UNIT_RANGED_ATTACK_POWER";
-static constexpr const char* UNIT_RESISTANCES        = "UNIT_RESISTANCES";
-static constexpr const char* UNIT_FACTION            = "UNIT_FACTION";
-static constexpr const char* UNIT_DISPLAYPOWER       = "UNIT_DISPLAYPOWER";
 static constexpr const char* UNIT_PORTRAIT_UPDATE    = "UNIT_PORTRAIT_UPDATE";
 static constexpr const char* UNIT_INVENTORY_CHANGED  = "UNIT_INVENTORY_CHANGED";
 static constexpr const char* UNIT_PET                = "UNIT_PET";
@@ -43,46 +20,15 @@ static constexpr const char* UNIT_DEFENSE            = "UNIT_DEFENSE";
 
 static constexpr const char* PLAYER_FLAGS_CHANGED    = "PLAYER_FLAGS_CHANGED";
 static constexpr const char* PLAYER_GUILD_UPDATE     = "PLAYER_GUILD_UPDATE";
+static constexpr const char* PLAYER_XP_UPDATE        = "PLAYER_XP_UPDATE";
+static constexpr const char* PLAYER_MONEY            = "PLAYER_MONEY";
+static constexpr const char* UPDATE_EXHAUSTION       = "UPDATE_EXHAUSTION";
 static constexpr const char* UNIT_QUEST_LOG_CHANGED  = "UNIT_QUEST_LOG_CHANGED";
-static constexpr const char* SPELLS_CHANGED          = "SPELLS_CHANGED";
+static constexpr const char* SKILL_LINES_CHANGED     = "SKILL_LINES_CHANGED";
 }
 
 static bool InRange(std::uint16_t field, std::uint16_t lo, std::uint16_t count) {
   return field >= lo && field < lo + count;
-}
-
-static std::uint8_t PowerTypeFromField(std::uint16_t field) {
-  if (field >= UNIT_FIELD_POWER1 && field <= UNIT_FIELD_POWER7)
-    return static_cast<std::uint8_t>(field - UNIT_FIELD_POWER1);
-  if (field >= UNIT_FIELD_MAXPOWER1 && field <= UNIT_FIELD_MAXPOWER7)
-    return static_cast<std::uint8_t>(field - UNIT_FIELD_MAXPOWER1);
-  return 0;
-}
-
-static const char* PowerEventName(std::uint8_t power_type) {
-  switch (power_type) {
-    case 0: return evt::UNIT_MANA;
-    case 1: return evt::UNIT_RAGE;
-    case 2: return evt::UNIT_FOCUS;
-    case 3: return evt::UNIT_ENERGY;
-    case 4: return evt::UNIT_HAPPINESS;
-    case 5: return nullptr;
-    case 6: return evt::UNIT_RUNIC_POWER;
-    default: return nullptr;
-  }
-}
-
-static const char* MaxPowerEventName(std::uint8_t power_type) {
-  switch (power_type) {
-    case 0: return evt::UNIT_MAXMANA;
-    case 1: return evt::UNIT_MAXRAGE;
-    case 2: return evt::UNIT_MAXFOCUS;
-    case 3: return evt::UNIT_MAXENERGY;
-    case 4: return evt::UNIT_MAXHAPPINESS;
-    case 5: return nullptr;
-    case 6: return evt::UNIT_MAXRUNIC_POWER;
-    default: return nullptr;
-  }
 }
 
 std::vector<std::uint16_t> ExtractFieldIndices(
@@ -118,48 +64,47 @@ std::vector<FieldEvent> MapChangedFieldsToEvents(
   std::unordered_set<const char*> seen;
   std::vector<FieldEvent> events;
 
-  auto emit = [&](const char* name, bool per_unit, std::uint8_t power = 0) {
+  auto emit = [&](const char* name, bool per_unit) {
     if (!name) return;
     if (seen.count(name)) return;
     seen.insert(name);
-    events.push_back({name, per_unit, guid_raw, power});
+    events.push_back({name, per_unit, guid_raw});
   };
 
   bool is_unit = (type_id == TypeID::kUnit || type_id == TypeID::kPlayer);
 
   if (is_unit) {
+    std::unordered_set<std::uint32_t> emitted_direct_event_ids;
     for (std::uint16_t f : updated_fields) {
-
-      if (f == UNIT_FIELD_HEALTH) {
-        emit(evt::UNIT_HEALTH, true);
-        continue;
-      }
-      if (f == UNIT_FIELD_MAXHEALTH) {
-        emit(evt::UNIT_MAXHEALTH, true);
-        continue;
-      }
-
-      if (f >= UNIT_FIELD_POWER1 && f <= UNIT_FIELD_POWER7) {
-        std::uint8_t pt = PowerTypeFromField(f);
-        const char* specific = PowerEventName(pt);
-        if (specific) emit(specific, true, pt);
-        continue;
+      if (f >= OBJECT_END) {
+        std::uint32_t event_id = 0;
+        const char* event_name = GetUnitFieldEventNameForUpdatedField(
+            static_cast<std::uint32_t>(f - OBJECT_END), &event_id);
+        if (event_name != nullptr &&
+            emitted_direct_event_ids.insert(event_id).second) {
+          events.push_back({event_name, true, guid_raw});
+        }
       }
 
-      if (f >= UNIT_FIELD_MAXPOWER1 && f <= UNIT_FIELD_MAXPOWER7) {
-        std::uint8_t pt = PowerTypeFromField(f);
-        const char* specific = MaxPowerEventName(pt);
-        if (specific) emit(specific, true, pt);
-        continue;
-      }
-
-      if (f == UNIT_FIELD_LEVEL) {
-        emit(evt::UNIT_LEVEL, true);
-        continue;
-      }
-
-      if (f == UNIT_FIELD_FLAGS || f == UNIT_FIELD_FLAGS_2) {
-        emit(evt::UNIT_FLAGS, true);
+      if (f == UNIT_FIELD_HEALTH || f == UNIT_FIELD_MAXHEALTH ||
+          (f >= UNIT_FIELD_POWER1 && f <= UNIT_FIELD_POWER7) ||
+          (f >= UNIT_FIELD_MAXPOWER1 && f <= UNIT_FIELD_MAXPOWER7) ||
+          f == UNIT_FIELD_LEVEL || f == UNIT_FIELD_FACTIONTEMPLATE ||
+          f == UNIT_FIELD_FLAGS || f == UNIT_FIELD_FLAGS_2 ||
+          f == UNIT_DYNAMIC_FLAGS || f == UNIT_FIELD_PETEXPERIENCE ||
+          f == UNIT_FIELD_PETNEXTLEVELEXP ||
+          (f >= UNIT_FIELD_ATTACK_POWER &&
+           f <= UNIT_FIELD_RANGED_ATTACK_POWER_MULTIPLIER) ||
+          (f >= UNIT_FIELD_BASEATTACKTIME &&
+           f <= UNIT_FIELD_RANGEDATTACKTIME) ||
+          (f >= UNIT_FIELD_MINDAMAGE && f <= UNIT_FIELD_MAXOFFHANDDAMAGE) ||
+          (f >= UNIT_FIELD_MINRANGEDDAMAGE &&
+           f <= UNIT_FIELD_MAXRANGEDDAMAGE) ||
+          (f >= UNIT_FIELD_STAT0 && f <= UNIT_FIELD_STAT4) ||
+          InRange(f, UNIT_FIELD_POWER_COST_MODIFIER, 7) ||
+          InRange(f, UNIT_FIELD_POWER_COST_MULTIPLIER, 7) ||
+          f == UNIT_FIELD_MAXHEALTHMODIFIER ||
+          f == UNIT_FIELD_TARGET || f == UNIT_FIELD_TARGET + 1) {
         continue;
       }
 
@@ -167,25 +112,10 @@ std::vector<FieldEvent> MapChangedFieldsToEvents(
         continue;
       }
 
-      if (f == UNIT_DYNAMIC_FLAGS) {
-        emit(evt::UNIT_DYNAMIC_FLAGS, true);
-        continue;
-      }
-
-      if (f == UNIT_FIELD_TARGET || f == UNIT_FIELD_TARGET + 1) {
-        emit(evt::UNIT_TARGET, true);
-        continue;
-      }
-
       if (f == UNIT_FIELD_DISPLAYID || f == UNIT_FIELD_NATIVEDISPLAYID ||
           f == UNIT_FIELD_MOUNTDISPLAYID) {
         emit(evt::UNIT_MODEL_CHANGED, true);
         emit(evt::UNIT_PORTRAIT_UPDATE, true);
-        continue;
-      }
-
-      if (f >= UNIT_FIELD_STAT0 && f <= UNIT_FIELD_STAT4) {
-        emit(evt::UNIT_STATS, true);
         continue;
       }
 
@@ -198,42 +128,9 @@ std::vector<FieldEvent> MapChangedFieldsToEvents(
         continue;
       }
 
-      if (f == UNIT_FIELD_ATTACK_POWER ||
-          f == UNIT_FIELD_ATTACK_POWER_MODS ||
-          f == UNIT_FIELD_ATTACK_POWER_MULTIPLIER) {
-        emit(evt::UNIT_ATTACK_POWER, true);
-        continue;
-      }
-
-      if (f == UNIT_FIELD_RANGED_ATTACK_POWER ||
-          f == UNIT_FIELD_RANGED_ATTACK_POWER_MODS ||
-          f == UNIT_FIELD_RANGED_ATTACK_POWER_MULTIPLIER) {
-        emit(evt::UNIT_RANGED_ATTACK_POWER, true);
-        continue;
-      }
-
-      if (f == UNIT_FIELD_BASEATTACKTIME || f == UNIT_FIELD_BASEATTACKTIME + 1 ||
-          f == UNIT_FIELD_RANGEDATTACKTIME) {
-        emit(evt::UNIT_ATTACK_SPEED, true);
-        continue;
-      }
-
-      if (f == UNIT_FIELD_MINDAMAGE || f == UNIT_FIELD_MAXDAMAGE ||
-          f == UNIT_FIELD_MINOFFHANDDAMAGE || f == UNIT_FIELD_MAXOFFHANDDAMAGE) {
-        emit(evt::UNIT_DAMAGE, true);
-        continue;
-      }
-
-      if (f == UNIT_FIELD_MINRANGEDDAMAGE || f == UNIT_FIELD_MAXRANGEDDAMAGE) {
-        emit(evt::UNIT_RANGEDDAMAGE, true);
-        continue;
-      }
-
       if (InRange(f, UNIT_FIELD_RESISTANCES, 7) ||
           InRange(f, UNIT_FIELD_RESISTANCEBUFFMODSPOSITIVE, 7) ||
           InRange(f, UNIT_FIELD_RESISTANCEBUFFMODSNEGATIVE, 7)) {
-        emit(evt::UNIT_RESISTANCES, true);
-
         if (f == UNIT_FIELD_RESISTANCES ||
             f == UNIT_FIELD_RESISTANCEBUFFMODSPOSITIVE ||
             f == UNIT_FIELD_RESISTANCEBUFFMODSNEGATIVE) {
@@ -242,32 +139,23 @@ std::vector<FieldEvent> MapChangedFieldsToEvents(
         continue;
       }
 
-      if (f == UNIT_FIELD_FACTIONTEMPLATE) {
-        emit(evt::UNIT_FACTION, true);
-        continue;
-      }
-
       if (f == UNIT_FIELD_BYTES_0) {
-        emit(evt::UNIT_DISPLAYPOWER, true);
         emit(evt::UNIT_PORTRAIT_UPDATE, true);
         continue;
       }
 
-      if (f == UNIT_FIELD_SUMMON || f == UNIT_FIELD_SUMMON + 1 ||
-          f == UNIT_FIELD_CHARM || f == UNIT_FIELD_CHARM + 1 ||
-          f == UNIT_FIELD_CRITTER || f == UNIT_FIELD_CRITTER + 1) {
+      if (f == UNIT_FIELD_CHARM || f == UNIT_FIELD_CHARM + 1 ||
+          f == UNIT_FIELD_SUMMON || f == UNIT_FIELD_SUMMON + 1) {
+        continue;
+      }
+
+      if (f == UNIT_FIELD_CRITTER || f == UNIT_FIELD_CRITTER + 1) {
         emit(evt::UNIT_PET, true);
         continue;
       }
 
       if (f == UNIT_NPC_FLAGS) {
         emit(evt::UNIT_FLAGS, true);
-        continue;
-      }
-
-      if (InRange(f, UNIT_FIELD_POWER_COST_MODIFIER, 7) ||
-          InRange(f, UNIT_FIELD_POWER_COST_MULTIPLIER, 7)) {
-        emit(evt::UNIT_STATS, true);
         continue;
       }
 
@@ -287,10 +175,17 @@ std::vector<FieldEvent> MapChangedFieldsToEvents(
     for (std::uint16_t f : updated_fields) {
 
       if (f == PLAYER_XP || f == PLAYER_NEXT_LEVEL_XP) {
+        events.push_back({evt::PLAYER_XP_UPDATE, false, guid_raw});
+        continue;
+      }
+
+      if (f == PLAYER_REST_STATE_EXPERIENCE) {
+        events.push_back({evt::UPDATE_EXHAUSTION, false, guid_raw});
         continue;
       }
 
       if (f == PLAYER_FIELD_COINAGE) {
+        events.push_back({evt::PLAYER_MONEY, false, guid_raw});
         continue;
       }
 
@@ -330,7 +225,7 @@ std::vector<FieldEvent> MapChangedFieldsToEvents(
 
       if (f >= PLAYER_SKILL_INFO_1_1 &&
           f < PLAYER_SKILL_INFO_1_1 + 128 * 3) {
-        emit(evt::SPELLS_CHANGED, false);
+        emit(evt::SKILL_LINES_CHANGED, false);
         continue;
       }
 

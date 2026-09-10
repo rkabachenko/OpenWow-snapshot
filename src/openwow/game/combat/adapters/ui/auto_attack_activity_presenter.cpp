@@ -17,14 +17,11 @@ void PresentAutoAttackActivityChange(
   }
 
   auto& dispatch = ::openwow::ui::game::ScriptEventDispatch::Get();
-  if (change.current == AutoAttackActivity::Active) {
-    dispatch.FirePlayerEnterCombat();
-  } else {
+  if (change.current == AutoAttackActivity::Inactive) {
     if (session.held_cursor() != nullptr) {
       session.held_cursor()->Clear();
     }
     CancelPendingCastsForActivePlayer(session);
-    dispatch.FirePlayerLeaveCombat();
   }
 
   if (::openwow::ui::game::detail::RefreshAllActionSlotValidation(session)) {

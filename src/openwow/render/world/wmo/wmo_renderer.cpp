@@ -7,6 +7,7 @@
 #include "openwow/render/api/packed_color.h"
 #include "openwow/render/resources/shaders/shader_registry.h"
 #include "openwow/render/resources/textures/texture_manager.h"
+#include "openwow/render/scene/shadow_data.h"
 #include "openwow/render/world/wmo/wmo_material_pipeline.h"
 #include "openwow/render/scene/occlusion/occluder_polygon_builder.h"
 #include "openwow/foundation/diagnostics/logging.h"
@@ -28,13 +29,14 @@ namespace wmo_vs_param {
 inline constexpr std::size_t kWorldColumn0 = 0u;
 inline constexpr std::size_t kWorldColumn1 = 1u;
 inline constexpr std::size_t kWorldColumn2 = 2u;
-inline constexpr std::size_t kSunDirection = 3u;
-inline constexpr std::size_t kLightAmbient = 4u;
-inline constexpr std::size_t kLightDiffuse = 5u;
-inline constexpr std::size_t kEmissiveColor = 6u;
-inline constexpr std::size_t kMaterialParams = 7u;
-inline constexpr std::size_t kExtraParams = 8u;
-inline constexpr std::size_t kCount = 9u;
+inline constexpr std::size_t kWorldColumn3 = 3u;
+inline constexpr std::size_t kSunDirection = 4u;
+inline constexpr std::size_t kLightAmbient = 5u;
+inline constexpr std::size_t kLightDiffuse = 6u;
+inline constexpr std::size_t kEmissiveColor = 7u;
+inline constexpr std::size_t kMaterialParams = 8u;
+inline constexpr std::size_t kExtraParams = 9u;
+inline constexpr std::size_t kCount = 10u;
 }
 
 namespace wmo_fs_param {
@@ -247,6 +249,8 @@ const RenderVec4 &ResolveDebugTint(WmoDebugGeometryMode mode) {
                                         model_mtx[6], model_mtx[7]};
   block[wmo_vs_param::kWorldColumn2] = {model_mtx[8], model_mtx[9],
                                         model_mtx[10], model_mtx[11]};
+  block[wmo_vs_param::kWorldColumn3] = {model_mtx[12], model_mtx[13],
+                                        model_mtx[14], model_mtx[15]};
   block[wmo_vs_param::kSunDirection] = {sun_direction[0], sun_direction[1],
                                         sun_direction[2], sun_direction[3]};
   block[wmo_vs_param::kLightAmbient] = light_ambient;
@@ -841,7 +845,7 @@ void WmoRenderer::ReleaseMergedGeometry() {
     }
     merged = {};
   }
-  merged_state_ = WmoMergedGeometryState::kAccumulating;
+  merged_state_ = kWmoMergedGeometryInitialState;
 }
 
 const WmoMergedGeometry& WmoRenderer::MergedGeometryFor(
@@ -1172,7 +1176,9 @@ const WmoSubmitTelemetry& WmoRenderer::Render(
     const std::uint16_t viewport_width,
     const std::uint16_t viewport_height,
     occlusion::OcclusionDepthBuffer* const occlusion,
-    bgfx::Encoder* const encoder) {
+    bgfx::Encoder* const encoder,
+    const bool shadow_caster_pass,
+    const WmoGroupRenderFilter group_filter) {
   WmoSubmitTelemetry& telemetry = submit_telemetry_;
   telemetry.view_id = view_id;
   telemetry.viewport_width = viewport_width;
@@ -1314,6 +1320,13 @@ const WmoSubmitTelemetry& WmoRenderer::Render(
     const WmoMaterialGpu* mat = &materials_[submitted.material_index];
     ++record_telemetry.material_ready_count;
 
+    const bool transition_batch =
+        submitted.region == WmoBatchMesh::Region::Transition;
+    if (shadow_caster_pass &&
+        (transition_batch || mat->blend_mode > 1u)) {
+      return;
+    }
+
     const uint32_t effective_shader = mat->effective_shader;
     bgfx::ProgramHandle prog = SelectShaderProgram(effective_shader);
     if (!bgfx::isValid(prog)) {
@@ -1329,8 +1342,6 @@ const WmoSubmitTelemetry& WmoRenderer::Render(
       state |= kWmoOneSidedCullState;
     }
 
-    const bool transition_batch =
-        submitted.region == WmoBatchMesh::Region::Transition;
     if (transition_batch) {
 
       state |= BlendStateForMode(9u);
@@ -1338,6 +1349,10 @@ const WmoSubmitTelemetry& WmoRenderer::Render(
               kWmoTransitionPassDepthTestState;
     } else if (mat) {
       state |= BlendStateForMode(mat->blend_mode);
+    }
+    if (shadow_caster_pass) {
+      state = BGFX_STATE_WRITE_Z | kWmoDefaultDepthTestState |
+              (state & BGFX_STATE_CULL_MASK);
     }
 
     bgfx::TextureHandle tex = fallback_tex;
@@ -1406,6 +1421,7 @@ const WmoSubmitTelemetry& WmoRenderer::Render(
                     static_cast<std::uint16_t>(wmo_fs_param::kCount));
     draw.setTexture(0, shaders.diffuse_sampler, tex, sampler_flags);
     bind_environment_sampler();
+    BindActiveWorldModelShadowState(!shadow_caster_pass, encoder);
     draw.setState(state);
     draw.submit(view_id, prog);
     ++record_telemetry.submit_count;
@@ -1445,6 +1461,7 @@ const WmoSubmitTelemetry& WmoRenderer::Render(
                       static_cast<std::uint16_t>(wmo_fs_param::kCount));
       draw.setTexture(0, shaders.diffuse_sampler, tex, sampler_flags);
       bind_environment_sampler();
+      BindActiveWorldModelShadowState(true, encoder);
       draw.setState(interior_state);
       draw.submit(view_id, prog);
       ++record_telemetry.submit_count;
@@ -1479,6 +1496,7 @@ const WmoSubmitTelemetry& WmoRenderer::Render(
                         static_cast<std::uint16_t>(wmo_fs_param::kCount));
         draw.setTexture(0, shaders.diffuse_sampler, tex, sampler_flags);
         bind_environment_sampler();
+        BindActiveWorldModelShadowState(true, encoder);
         draw.setState(additive_state);
         draw.submit(view_id, prog);
         ++record_telemetry.submit_count;
@@ -1509,6 +1527,12 @@ const WmoSubmitTelemetry& WmoRenderer::Render(
           world::WmoGroupPublicationStatus::kNoGeometry) {
         record_telemetry.skip_reasons |= kWmoSubmitSkipGpuNotReady;
       }
+      return;
+    }
+
+    if (group_filter == WmoGroupRenderFilter::kExteriorOnly &&
+        (gpu.flags & data::wmo::kMogpExterior) == 0u) {
+      record_telemetry.skip_reasons |= kWmoSubmitSkipGroupFilter;
       return;
     }
 

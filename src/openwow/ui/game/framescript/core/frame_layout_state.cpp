@@ -1,4 +1,5 @@
 #include "openwow/ui/game/framescript/core/frame_layout_state.h"
+#include "openwow/foundation/diagnostics/logging.h"
 #include "openwow/ui/animation/animation_coordinate_space.h"
 #include "openwow/ui/game/framescript/core/frame_alpha.h"
 #include "openwow/ui/game/framescript/core/frame_lua_receiver.h"
@@ -81,15 +82,31 @@ void SyncTrackedFrameDontSavePosition(lua_State *L, int self_idx, bool dont_save
 bool BeginTrackedFrameMoveSizing(lua_State *L, int self_idx, const std::string &frame_name,
                                  const int mode) {
   auto *manager = runtime::WorldUiRuntimeContext::FromLua(L);
-  if (manager == nullptr ||
-      !manager->input_router().BeginFrameMoveSizing(frame_name, mode)) {
+  if (manager == nullptr) {
+    LogFrameMoveSizingFailure(L, self_idx, mode == 4 ? "StartMoving" : "StartSizing",
+                                "world-ui-runtime-unavailable");
     return false;
   }
+  if (!manager->input_router().BeginFrameMoveSizing(frame_name, mode)) return false;
 
   lua_pushboolean(L, 1);
   lua_setfield(L, self_idx, "__ow_user_placed");
   SyncTrackedFrameUserPlaced(L, self_idx, true);
   return true;
+}
+
+void LogFrameMoveSizingFailure(lua_State* L, int self_idx,
+                                const char* operation, const char* reason) {
+  const openwow::ui::ScopedNeutralLuaExecutionTaint neutral_taint(L);
+  self_idx = lua_absindex(L, self_idx);
+  lua_pushliteral(L, "__ow_frame_key");
+  lua_rawget(L, self_idx);
+  const std::string name = lua_type(L, -1) == LUA_TSTRING
+      ? std::string(std::string_view(lua_tostring(L, -1)).substr(0, 256)) : "<untracked>";
+  lua_pop(L, 1);
+  openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kWarn,
+      std::string("UI move/sizing failed: source=FrameScript stage=") + operation +
+      " frame=" + name + " reason=" + reason);
 }
 
 void SyncTrackedRegionDrawLayer(lua_State *L, int self_idx,

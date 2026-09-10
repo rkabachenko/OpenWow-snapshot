@@ -16,6 +16,7 @@
 #include "openwow/data/formats/dbc/dbc_structures.h"
 #include "openwow/data/formats/m2/model_path.h"
 #include "openwow/foundation/diagnostics/logging.h"
+#include "openwow/foundation/diagnostics/performance_logging.h"
 #include "openwow/foundation/text/ascii.h"
 #include "openwow/game/object_manager.h"
 #include "openwow/game/objects/cgunit.h"
@@ -23,6 +24,7 @@
 #include "openwow/render/backend/bgfx/bgfx_text_cache.h"
 #include "openwow/render/backend/bgfx/bgfx_texture_lease.h"
 #include "openwow/render/models/characters/model_portrait.h"
+#include "openwow/render/models/characters/portrait_icon_texture.h"
 #include "openwow/render/models/characters/portrait_renderer.h"
 #include "openwow/render/resources/fonts/font_string_flags.h"
 #include "openwow/render/resources/textures/texture_manager.h"
@@ -359,12 +361,20 @@ void runtime::render::UiCompositor::Render(const UiCompositorFrame& compositor_f
     return std::nullopt;
   };
 
-  retained_layout_.RetryPendingNaturalSizes();
-  retained_layout_.SolveIfDirty();
-  if (frame_traversal_index_.order_dirty())
-    frame_traversal_index_.Rebuild(root_scale(), screen_height());
+  {
+    static openwow::diagnostics::PerformanceLogSite site;
+    const openwow::diagnostics::ScopedPerformanceLog phase(site, "ui.render_semantic_preparation");
+    retained_layout_.RetryPendingNaturalSizes();
+    retained_layout_.SolveIfDirty();
+    if (frame_traversal_index_.order_dirty())
+      frame_traversal_index_.Rebuild(root_scale(), screen_height());
 
-  frame_traversal_index_.RefreshRectCache();
+    frame_traversal_index_.RefreshRectCache();
+    frame_input_router_.ReplayMouseFocusIfDirty();
+  }
+
+  static openwow::diagnostics::PerformanceLogSite emit_site;
+  const openwow::diagnostics::ScopedPerformanceLog emit_phase(emit_site, "ui.render_emit");
 
   frame_input_router_.BeginHyperlinkHitTestFrame();
 
@@ -587,6 +597,10 @@ void runtime::render::UiCompositor::Render(const UiCompositorFrame& compositor_f
     const bool is_fontstring =
         frame.runtime_kind ==
         openwow::ui::framexml::UiFrame::RuntimeKind::FontString;
+    const bool is_simple_html =
+        frame.runtime_kind ==
+        openwow::ui::framexml::UiFrame::RuntimeKind::SimpleHtml;
+    const bool is_text_widget = is_fontstring || is_simple_html;
     const bool is_quest_poi =
         frame.runtime_kind ==
         openwow::ui::framexml::UiFrame::RuntimeKind::QuestPoiFrame;
@@ -703,7 +717,7 @@ void runtime::render::UiCompositor::Render(const UiCompositorFrame& compositor_f
       lua_rawgeti(lua_, LUA_REGISTRYINDEX, entry.lua_ref);
       if (lua_istable(lua_, -1)) {
         alpha_byte =
-            is_fontstring
+            is_text_widget
                 ? GetLuaFontStringAlphaByteOrDefault(lua_, -1, alpha_byte)
                 : GetLuaFrameAlphaByteOrDefault(lua_, -1, alpha_byte);
       }
@@ -769,83 +783,26 @@ void runtime::render::UiCompositor::Render(const UiCompositorFrame& compositor_f
     }
 
     if (is_status_bar_fill) {
-
       const auto owner_rect = retained_layout_.rects().find(frame.parent);
       auto* status_bar = frame_store_.FindStatusBar(frame.parent);
       if (owner_rect == retained_layout_.rects().end() ||
-          status_bar == nullptr || !has_lua_ref) {
+          status_bar == nullptr) {
         continue;
       }
-
-      const int top = lua_gettop(lua_);
-      lua_rawgeti(lua_, LUA_REGISTRYINDEX, entry.lua_ref);
-      if (lua_istable(lua_, -1) != 0) {
-        stateful_widgets::Rect owner_render_rect{
-            .x = static_cast<float>(owner_rect->second.x) +
-                 scroll_presentation.offset_x,
-            .y = static_cast<float>(owner_rect->second.y) +
-                 scroll_presentation.offset_y,
-            .width = static_cast<float>(owner_rect->second.width),
-            .height = static_cast<float>(owner_rect->second.height),
-        };
-        const auto status_bar_snapshot = status_bar->Snapshot();
-        const auto plan = stateful_widgets::BuildStatusBarRenderPlan(
-            status_bar_snapshot, owner_render_rect);
-        if (plan.visible) {
-          TextureRenderState& texture_state = texture_state_scratch_;
-          BuildTextureRenderStateInto(lua_, -1, frame, session_, vfs_,
-                                      portrait_renderer_, &portrait_view_id,
-                                      offscreen_view_end, &texture_state);
-
-          openwow::render::ui::Quad quad;
-          quad.x = plan.fill_rect.x;
-          quad.y = plan.fill_rect.y;
-          quad.w = plan.fill_rect.width;
-          quad.h = plan.fill_rect.height;
-          quad.blend = texture_state.blend;
-          quad.abgr = PackStraightTextureAbgr(
-              texture_state.color_r, texture_state.color_g,
-              texture_state.color_b, texture_state.color_a, alpha);
-          const auto status_uv = texture_state.uv_quad.ToUiRendererOrder();
-          for (std::size_t uv_index = 0u; uv_index < status_uv.size();
-               ++uv_index) {
-            quad.uv_quad[uv_index] = {status_uv[uv_index].u,
-                                      status_uv[uv_index].v};
-          }
-          quad.has_custom_uv_quad = true;
-          quad.desaturated = texture_state.desaturated;
-          quad.flip_texture_y =
-              texture_state.dynamic_texture_is_render_target &&
-              bgfx::getCaps()->originBottomLeft;
-          quad.sampler_flags = BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP;
-
-          bool submitted = false;
-          if (bgfx::isValid(texture_state.dynamic_texture)) {
-            quad.texture = texture_state.dynamic_texture;
-            submitted = ui_renderer_->Submit(quad);
-          } else if (!texture_state.texture_path.empty()) {
-            if (const UiTextureInfo* const texture =
-                    ResolvePassTexture(texture_state.texture_path);
-                texture != nullptr) {
-              quad.texture = TextureHandleFromInfo(*texture);
-              submitted =
-                  bgfx::isValid(quad.texture) && ui_renderer_->Submit(quad);
-            }
-          }
-          if (!submitted && (texture_state.solid_color_texture ||
-                             texture_state.has_gradient)) {
-            submitted = ui_renderer_->SubmitSolid(quad);
-          }
-          record_descendant_submissions(entry, submitted ? 1u : 0u);
-          if (submitted && frame.parent == "PlayerFrameHealthBar") {
-            telemetry.last_render_player_health_submitted = true;
-          } else if (submitted && frame.parent == "PlayerFrameManaBar") {
-            telemetry.last_render_player_power_submitted = true;
-          }
-        }
+      const stateful_widgets::Rect owner_render_rect{
+          .x = static_cast<float>(owner_rect->second.x) +
+               scroll_presentation.offset_x,
+          .y = static_cast<float>(owner_rect->second.y) +
+               scroll_presentation.offset_y,
+          .width = static_cast<float>(owner_rect->second.width),
+          .height = static_cast<float>(owner_rect->second.height),
+      };
+      const auto plan = stateful_widgets::BuildStatusBarRenderPlan(
+          status_bar->Snapshot(), owner_render_rect);
+      if (!plan.visible) {
+        continue;
       }
-      lua_settop(lua_, top);
-      continue;
+      render_rect = plan.fill_rect;
     }
 
     if (is_minimap) {
@@ -1538,7 +1495,7 @@ void runtime::render::UiCompositor::Render(const UiCompositorFrame& compositor_f
       continue;
     }
 
-    if (is_fontstring && text_cache_) {
+    if (is_text_widget && text_cache_) {
 
       openwow::render::BgfxTextKey& text_key = text_key_scratch_;
       std::string& text = text_key.text;
@@ -1697,8 +1654,11 @@ void runtime::render::UiCompositor::Render(const UiCompositorFrame& compositor_f
 
         text_key.abgr = 0xffffffffu;
         text_key.wrap_px = wrap_px;
+        // Intrinsic height is a measurement result, not a text clipping limit.
         text_key.max_height_px =
-            wrap_px > 0 ? std::max(0, static_cast<int>(render_rect.height)) : 0;
+            openwow::ui::FontStringHeightComesFromLayout(frame)
+                ? std::max(0, static_cast<int>(render_rect.height))
+                : 0;
         text_key.line_spacing_px = static_cast<int>(
             std::lround(line_spacing_px * text_render_scale));
         text_key.line_height_override_px = static_cast<int>(
@@ -1794,16 +1754,31 @@ void runtime::render::UiCompositor::Render(const UiCompositorFrame& compositor_f
     quad.v1 = frame.tex_bottom;
     quad.blend = texture_state.blend;
 
+    const float solid_r = texture_state.solid_color_texture
+                              ? texture_state.solid_color_r
+                              : 1.0F;
+    const float solid_g = texture_state.solid_color_texture
+                              ? texture_state.solid_color_g
+                              : 1.0F;
+    const float solid_b = texture_state.solid_color_texture
+                              ? texture_state.solid_color_b
+                              : 1.0F;
+    const float solid_a = texture_state.solid_color_texture
+                              ? texture_state.solid_color_a
+                              : 1.0F;
     quad.abgr = PackStraightTextureAbgr(
-        texture_state.color_r, texture_state.color_g, texture_state.color_b,
-        texture_state.color_a, alpha);
+        texture_state.color_r * solid_r,
+        texture_state.color_g * solid_g,
+        texture_state.color_b * solid_b,
+        texture_state.color_a * solid_a, alpha);
     if (texture_state.has_gradient) {
       quad.has_vertex_colors = true;
       for (std::size_t color_index = 0; color_index < quad.vertex_abgr.size();
            ++color_index) {
         const auto& color = texture_state.gradient_colors[color_index];
-        quad.vertex_abgr[color_index] =
-            PackStraightTextureAbgr(color.r, color.g, color.b, color.a, alpha);
+        quad.vertex_abgr[color_index] = PackStraightTextureAbgr(
+            color.r * solid_r, color.g * solid_g, color.b * solid_b,
+            color.a * solid_a, alpha);
       }
       quad.abgr = quad.vertex_abgr[0];
     }
@@ -1949,6 +1924,15 @@ void runtime::render::UiCompositor::Render(const UiCompositorFrame& compositor_f
                                          texture_state.dynamic_texture_width,
                                          texture_state.dynamic_texture_height);
       used_dynamic_texture = has_texture;
+      if (has_texture &&
+          texture_state.replace_dynamic_texture_alpha_with_portrait_mask) {
+        const UiTextureInfo* const portrait_mask = ResolvePassTexture(
+            std::string(openwow::render::kPortraitIconMaskTexturePath));
+        if (portrait_mask != nullptr) {
+          quad.mask_texture = TextureHandleFromInfo(*portrait_mask);
+          quad.replace_alpha_with_mask = true;
+        }
+      }
       if (has_texture && !is_texture && (frame.tile_x || frame.tile_y)) {
         continue;
       }
@@ -1968,7 +1952,16 @@ void runtime::render::UiCompositor::Render(const UiCompositorFrame& compositor_f
 
     if (has_texture) {
       const bool submitted = ui_renderer_->Submit(quad);
-      record_background_submission(entry, submitted);
+      if (is_status_bar_fill) {
+        record_descendant_submissions(entry, submitted ? 1u : 0u);
+        if (submitted && frame.parent == "PlayerFrameHealthBar") {
+          telemetry.last_render_player_health_submitted = true;
+        } else if (submitted && frame.parent == "PlayerFrameManaBar") {
+          telemetry.last_render_player_power_submitted = true;
+        }
+      } else {
+        record_background_submission(entry, submitted);
+      }
       if (submitted && entry.key.starts_with("WorldMapDetailTile")) {
         ++telemetry.last_render_world_map_detail_tile_submissions;
       }
@@ -1983,7 +1976,12 @@ void runtime::render::UiCompositor::Render(const UiCompositorFrame& compositor_f
                               : std::string_view{},
                    texture_state.solid_color_texture,
                    texture_state.has_gradient)) {
-      record_background_submission(entry, ui_renderer_->SubmitSolid(quad));
+      const bool submitted = ui_renderer_->SubmitSolid(quad);
+      if (is_status_bar_fill) {
+        record_descendant_submissions(entry, submitted ? 1u : 0u);
+      } else {
+        record_background_submission(entry, submitted);
+      }
     }
   }
 

@@ -14,6 +14,7 @@
 #include "openwow/ui/game/merchant_repair_cost.h"
 #include "openwow/ui/game/script_event_dispatch.h"
 #include "openwow/ui/game/tooltip_system.h"
+#include "openwow/ui/surfaces/game/runtime/npc_interaction_controller.h"
 
 extern "C" {
 #include <lua.hpp>
@@ -188,14 +189,9 @@ MerchantLuaAdapter::repair_quote() const {
 
 void MerchantLuaAdapter::CloseMerchant() const {
   if (!gossip().merchant().active()) return;
-  gossip().DismissAll();
-  deps().events.FireMerchantClosed();
-  if (auto* held = held_cursor();
-      held != nullptr &&
-      held->kind() ==
-          openwow::game::actions::held_cursor::Kind::MerchantItem) {
-    held->Clear();
-  }
+  CloseMerchantInteraction(
+      world_session(), gossip().merchant().snapshot().vendor_guid,
+      NpcInteractionClosureCause::UnitUnavailable);
 }
 
 void MerchantLuaAdapter::PresentMerchantUpdated() const {

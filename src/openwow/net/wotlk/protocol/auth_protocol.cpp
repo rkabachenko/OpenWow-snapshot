@@ -8,6 +8,7 @@
 #include "openwow/net/auth/login_pin_challenge.h"
 #include "openwow/net/auth/login_token_challenge.h"
 #include "openwow/net/transport/tcp_client.h"
+#include "openwow/foundation/diagnostics/logging.h"
 
 #include <algorithm>
 #include <array>
@@ -945,8 +946,9 @@ void AuthProtocol::ReconnectContext::Clear() {
   valid = false;
 }
 
-AuthProtocol::AuthProtocol()
-    : client_(std::make_unique<openwow::net::TcpClient>()) {}
+AuthProtocol::AuthProtocol(std::string locale)
+    : client_(std::make_unique<openwow::net::TcpClient>()),
+      locale_(std::move(locale)) {}
 
 AuthProtocol::~AuthProtocol() {
   Disconnect();
@@ -974,6 +976,20 @@ AuthResult AuthProtocol::Login(const std::string& host,
             .message = "Username/password cannot be empty."};
   }
 
+  const auto logon_challenge = BuildLogonChallengePacket(username);
+  if (logon_challenge.empty()) {
+    openwow::diagnostics::Log(
+        openwow::diagnostics::LogLevel::kError,
+        "AuthProtocol: cannot build C_AUTH_LOGON_CHALLENGE: invalid locale=" +
+            locale_);
+    return {.status = AuthStatus::kProtocolError,
+            .message = "Client locale is not a canonical four-character token."};
+  }
+
+  openwow::diagnostics::Log(
+      openwow::diagnostics::LogLevel::kInfo,
+      "AuthProtocol: C_AUTH_LOGON_CHALLENGE locale=" + locale_);
+
   if (!client_->Connect(host, port, timeout_ms, should_cancel)) {
     return fail(CancellationRequested(should_cancel)
                     ? CancelledAuthResult("Authentication cancelled.")
@@ -982,8 +998,7 @@ AuthResult AuthProtocol::Login(const std::string& host,
                                      "Unable to connect to auth server."});
   }
 
-  if (!client_->Write(BuildLogonChallengePacket(username), timeout_ms,
-                      should_cancel)) {
+  if (!client_->Write(logon_challenge, timeout_ms, should_cancel)) {
     return fail(CancellationRequested(should_cancel)
                     ? CancelledAuthResult("Authentication cancelled.")
                     : AuthResult{.status = AuthStatus::kNetworkError,
@@ -1204,8 +1219,21 @@ AuthResult AuthProtocol::ReconnectLocked(
                                  .message =
                                      "Unable to reconnect to auth server."});
   }
-  if (!client_->Write(BuildReconnectChallengePacket(), timeout_ms,
-                      should_cancel)) {
+  const auto reconnect_challenge = BuildReconnectChallengePacket();
+  if (reconnect_challenge.empty()) {
+    openwow::diagnostics::Log(
+        openwow::diagnostics::LogLevel::kError,
+        "AuthProtocol: cannot build C_AUTH_RECONNECT_CHALLENGE: invalid locale=" +
+            locale_);
+    return fail({
+        .status = AuthStatus::kProtocolError,
+        .message = "Client locale is not a canonical four-character token.",
+    });
+  }
+  openwow::diagnostics::Log(
+      openwow::diagnostics::LogLevel::kInfo,
+      "AuthProtocol: C_AUTH_RECONNECT_CHALLENGE locale=" + locale_);
+  if (!client_->Write(reconnect_challenge, timeout_ms, should_cancel)) {
     return fail(CancellationRequested(should_cancel)
                     ? CancelledAuthResult("Auth reconnect cancelled.")
                     : AuthResult{.status = AuthStatus::kNetworkError,
@@ -1427,12 +1455,12 @@ bool AuthProtocol::IsAuthenticated() const {
 
 std::vector<std::uint8_t> AuthProtocol::BuildLogonChallengePacket(
     const std::string& username) const {
-  return BuildRetailLogonChallengePacket(username);
+  return BuildRetailLogonChallengePacket(username, locale_);
 }
 
 std::vector<std::uint8_t> AuthProtocol::BuildReconnectChallengePacket() const {
   auto packet = BuildRetailLogonChallengePacket(
-      reconnect_.uppercase_account);
+      reconnect_.uppercase_account, locale_);
   if (!packet.empty()) {
     packet.front() = 0x02;
   }

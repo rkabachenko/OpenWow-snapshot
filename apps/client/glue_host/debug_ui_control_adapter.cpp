@@ -176,7 +176,7 @@ void DebugUiControlAdapter::Pump(openwow::ui::game::GameUIManager& game_ui) {
       if (request->cancelled) continue;
     }
     const auto& source = request->request;
-    const auto snapshot = game_ui.BuildDebugSnapshot({
+    const auto snapshot = game_ui.BuildResolvedDebugSnapshot({
         .selector = source.selector,
         .max_results = source.max_results,
         .include_lua = source.include_lua,

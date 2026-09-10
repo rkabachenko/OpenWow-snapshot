@@ -46,6 +46,7 @@ class PlayerInventoryReplicaSync {
   void FullResync();
 
   [[nodiscard]] std::vector<std::uint32_t> ConsumeChangedEntries();
+  [[nodiscard]] std::vector<std::uint32_t> ConsumeCountChangedEntries();
   [[nodiscard]] std::vector<ItemTemplateRefreshRequest> ConsumeItemTemplateRefreshes();
 
   [[nodiscard]] std::vector<std::int32_t> ConsumeChangedContainers();
@@ -75,6 +76,7 @@ class PlayerInventoryReplicaSync {
   std::unordered_map<uint64_t, int16_t> guid_to_slot_;
   std::unordered_map<uint64_t, BagSlotLocation> guid_to_bag_slot_;
   std::vector<std::uint32_t> changed_entries_;
+  std::vector<std::uint32_t> count_changed_entries_;
   std::vector<ItemTemplateRefreshRequest> item_template_refreshes_;
   std::vector<std::int32_t> changed_containers_;
   std::uint8_t unresolved_reference_diagnostics_{0};
@@ -101,6 +103,7 @@ class PlayerInventoryReplicaSync {
       uint8_t abs_slot);
   [[nodiscard]] std::uint32_t GetTrackedEntryByGuid(std::uint64_t guid) const;
   void TrackChangedEntry(std::uint32_t entry);
+  void TrackCountChange(const ItemInstance* previous, const ItemInstance* current);
   void TrackChangedRootSlot(std::uint8_t abs_slot);
   void TrackChangedBag(TrackedBagLocation bag);
   void TrackItemTemplateRefresh(std::uint64_t item_guid, std::uint32_t entry);

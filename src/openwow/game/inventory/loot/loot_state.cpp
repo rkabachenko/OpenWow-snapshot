@@ -289,9 +289,10 @@ void LootState::DiscardPendingRollAfterCacheFailure(
         return entry.roll_id == handle.roll_id &&
                entry.lifetime_token == handle.lifetime_token;
       });
-  if (it != pending_rolls_.end()) {
-    pending_rolls_.erase(it);
+  if (it == pending_rolls_.end()) {
+    return;
   }
+  pending_rolls_.erase(it);
 }
 
 std::vector<PendingRollStartEvent> LootState::NotifyItemTemplateReady(

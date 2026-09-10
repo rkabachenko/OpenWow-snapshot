@@ -468,6 +468,31 @@ std::optional<RayHit> TerrainCollision::RaycastTerrain(
   dy *= inv_len;
   dz *= inv_len;
 
+  // A vertical support ray stays in one authored terrain triangle. Solve it
+  // directly so short probes and hits exactly at either endpoint are retained.
+  if (dx == 0.0f && dy == 0.0f && dz < 0.0f) {
+    int cell_row, cell_col;
+    float fx, fy;
+    const ChunkData* chunk = ResolveChunk(ox, oy, cell_row, cell_col, fx, fy);
+    if (!chunk || IsTerrainHoleCell(chunk->holes, cell_row, cell_col)) {
+      return std::nullopt;
+    }
+    const float ground_z = chunk->base_z + InterpolateTerrainHeightDelta(
+        chunk->heights, cell_row, cell_col, fx, fy);
+    const float distance = (ground_z - oz) / dz;
+    if (distance < 0.0f || distance > max_dist) {
+      return std::nullopt;
+    }
+    const auto normal = ComputeTriangleNormal(*chunk, cell_row, cell_col, fx, fy);
+    RayHit hit;
+    hit.x = ox;
+    hit.y = oy;
+    hit.z = ground_z;
+    hit.distance = distance;
+    std::copy(normal.begin(), normal.end(), hit.normal);
+    return hit;
+  }
+
   constexpr float kCoarseStep = 0.5f;
   constexpr int kMaxCoarseSteps = 4000;
   constexpr int kBinaryRefinements = 12;

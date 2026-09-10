@@ -1,5 +1,6 @@
 
 #include "openwow/game/world_scene.h"
+#include "openwow/foundation/diagnostics/performance_logging.h"
 
 #include "openwow/audio/playback/sound_runtime.h"
 #include "openwow/runtime/time/game_clock.h"
@@ -84,6 +85,10 @@ void WorldScene::VisitDoodadCollisionTriangles(
 
 bool WorldScene::IsDoodadWorldEntryLoadDrained() const {
   return world_presentation_scene_.IsDoodadWorldEntryLoadDrained();
+}
+
+bool WorldScene::IsTerrainWorldEntryLoadDrained() const {
+  return world_presentation_scene_.IsTerrainWorldEntryLoadDrained();
 }
 
 std::uint64_t WorldScene::DoodadCollisionRevision() const noexcept {
@@ -689,6 +694,14 @@ WorldScene::WorldScene(render::TextureManager& texture_manager,
       [this](const render::GameObjectM2PresentationEvent& event) {
         game_object_m2_events_.push_back(event);
       });
+  object_renderer_->BindMountM2EventSink(
+      [this](const render::MountM2PresentationEvent& event) {
+        mount_m2_events_.push_back(event);
+      });
+  object_renderer_->BindMountAnimationCompletionSink(
+      [this](const UnitAnimationCompletionEvent& event) {
+        mount_animation_completions_.push_back(event);
+      });
 
   object_renderer_->SetAreaSceneReadinessResolver(
       [this](const render::RenderInstance& instance)
@@ -877,6 +890,8 @@ WorldScene::~WorldScene() {
   if (object_renderer_) {
     object_renderer_->BindUnitAnimationCompletionSink({});
     object_renderer_->BindGameObjectM2EventSink({});
+    object_renderer_->BindMountM2EventSink({});
+    object_renderer_->BindMountAnimationCompletionSink({});
   }
   world_presentation_scene_.BindWmoDoodadM2EventSink({});
   world_frame_.BindPickingScene(nullptr, nullptr);
@@ -949,6 +964,22 @@ bool WorldScene::RestoreRenderDeviceResources() {
   world_presentation_scene_.SetWeatherGroundHeightSampler(
       [this](const float x, const float y, const float z) {
         return collision_.GetGroundHeight(x, y, z);
+      });
+  world_presentation_scene_.SetWeatherCollisionSampler(
+      [this](const render::RenderVec3& origin,
+             const render::RenderVec3& direction,
+             const float maximum_distance)
+          -> std::optional<world::WeatherCollisionHit> {
+        const auto hit = collision_.Raycast(
+            origin[0], origin[1], origin[2], direction[0], direction[1],
+            direction[2], maximum_distance);
+        if (!hit) {
+          return std::nullopt;
+        }
+        return world::WeatherCollisionHit{
+            .position = {hit->x, hit->y, hit->z},
+            .normal = {hit->normal[0], hit->normal[1], hit->normal[2]},
+            .distance = hit->distance};
       });
 
   if (!particles_.Initialize()) {
@@ -1128,6 +1159,9 @@ void WorldScene::Update(const float dt, const float cam_x,
                         const float environment_detail,
                         const float weather_particle_density,
                         const bool use_weather_shaders) {
+  static openwow::diagnostics::PerformanceLogSite performance_site;
+  const openwow::diagnostics::ScopedPerformanceLog performance(
+      performance_site, "world.scene_update");
   if (!initialized_) return;
   last_frame_delta_seconds_ = dt;
 
@@ -1141,7 +1175,8 @@ void WorldScene::Update(const float dt, const float cam_x,
   world_presentation_scene_.Update(
       dt, {cam_x, cam_y, cam_z}, environment_detail,
       weather_particle_density, use_weather_shaders,
-      !world_map_.IsOutdoorsAtPosition(cam_x, cam_y, cam_z));
+      !world_map_.IsOutdoorsAtPosition(cam_x, cam_y, cam_z),
+      camera_.reference_facing());
   NameplateDamageFlashState::Get().Update(dt);
 
   water_particulates_.Update(
@@ -1161,6 +1196,9 @@ void WorldScene::Update(const float dt, const float cam_x,
 void WorldScene::PrepareFrame(const render::api::RendererContext* renderer_context,
                               const WorldSceneRenderCamera& render_camera,
                               const float* view_mtx, const float* proj_mtx) {
+  static openwow::diagnostics::PerformanceLogSite performance_site;
+  const openwow::diagnostics::ScopedPerformanceLog performance(
+      performance_site, "world.scene_prepare");
 
   frame_prepared_ = false;
   visible_entity_ids_.clear();
@@ -1187,7 +1225,10 @@ void WorldScene::PrepareFrame(const render::api::RendererContext* renderer_conte
       .view = matrices.view(),
       .projection = matrices.projection(),
       .near_clip = 0.5f,
-      .far_clip = render_camera.far_clip};
+      .far_clip = render_camera.far_clip,
+      .low_detail_far_clip =
+          render_camera.streaming_distance *
+          render_camera.horizon_far_clip_scale};
   presentation_snapshot_ = world_map_.PublishPresentationSnapshot(
       presentation_camera, render_camera.far_clip);
   presentation_snapshot_.shadows = shadow_settings_;
@@ -1260,14 +1301,32 @@ void WorldScene::Render(const render::api::RendererContext* renderer_context,
   const bool homogeneous_depth =
       renderer_context == nullptr ||
       renderer_context->Capabilities().homogeneous_depth;
-  const render::ViewProjection matrices =
-      render::ViewProjection::CopyOf(view_mtx, proj_mtx, homogeneous_depth);
+  const render::ViewProjection matrices = render::ViewProjection::CopyOf(
+      view_mtx, proj_mtx, homogeneous_depth);
   const render::BgfxColumnMajorViewProjection bgfx_matrices =
       matrices.AsBgfxColumnMajor();
 
   m2_system_.UpdateAllEffects(
       last_frame_delta_seconds_,
       ::openwow::render::RenderMatrix4x4View{view_mtx, 16u});
+  const auto& environment = presentation_snapshot_.environment;
+  const render::WorldM2SceneState world_m2_scene_state{
+      .light_direction = environment.model_light_direction,
+      .ambient_color = environment.model_ambient,
+      .diffuse_color = environment.model_diffuse,
+      .fog = {
+          .params = {environment.fog_start, environment.fog_end,
+                     environment.fog_density, 0.0f},
+          .color = environment.fog_color,
+      },
+      .receives_world_shadows =
+          presentation_snapshot_.shadows.enabled &&
+          presentation_snapshot_.shadows.quality >= 3u,
+  };
+  object_renderer_->SetWorldM2SceneState(world_m2_scene_state);
+  world_presentation_scene_.RenderShadows(
+      presentation_snapshot_, views.world.shadow, *object_renderer_,
+      object_presentation_snapshot_);
   world_presentation_scene_.Render(
       presentation_snapshot_, views.world, matrices,
       static_cast<std::uint16_t>(screen_w),
@@ -1330,7 +1389,8 @@ void WorldScene::Render(const render::api::RendererContext* renderer_context,
     (void)configure_world_view(shadow_view);
     blob_shadows_.Render(
         shadow_view, bgfx_matrices.view.data(),
-        bgfx_matrices.projection.data(), object_presentation_snapshot_, dbc_,
+        bgfx_matrices.projection.data(), object_presentation_snapshot_,
+        *object_renderer_,
         [this](const std::array<float, 6>& bounds,
                const openwow::world::CollisionFacetVisitor& visitor) {
 
@@ -1343,18 +1403,6 @@ void WorldScene::Render(const render::api::RendererContext* renderer_context,
 
   const std::uint8_t object_view = views.objects;
   object_renderer_->SetCameraPosition(cam_x, cam_y, cam_z);
-  const auto& environment = presentation_snapshot_.environment;
-  const render::WorldM2SceneState world_m2_scene_state{
-      .light_direction = environment.model_light_direction,
-      .ambient_color = environment.model_ambient,
-      .diffuse_color = environment.model_diffuse,
-      .fog = {
-          .params = {environment.fog_start, environment.fog_end,
-                     environment.fog_density, 0.0f},
-          .color = environment.fog_color,
-      },
-  };
-  object_renderer_->SetWorldM2SceneState(world_m2_scene_state);
   render::m2::M2BatchUniforms spell_visual_uniforms{};
   render::ApplyWorldM2SceneState(world_m2_scene_state,
                                  &spell_visual_uniforms);
@@ -1675,6 +1723,19 @@ void WorldScene::PublishObjectPresentation(
     unit->Animation().HandlePlaybackCompletion(
         world_session, completion.request_serial, completion.animation_id);
   }
+  auto mount_completions = std::move(mount_animation_completions_);
+  mount_animation_completions_.clear();
+  for (const auto& completion : mount_completions) {
+    const auto current_handle =
+        obj_mgr.GetObjectHandle(completion.owner.guid);
+    auto* const unit = obj_mgr.GetMutableUnit(completion.owner.guid);
+    if (unit == nullptr || !current_handle.has_value() ||
+        *current_handle != completion.owner) {
+      continue;
+    }
+    unit->Animation().HandleMountPlaybackCompletion(
+        world_session, completion.request_serial, completion.animation_id);
+  }
   object_presentation_snapshot_ =
       obj_mgr.PublishPresentationSnapshot(world_session);
   object_presentation_snapshot_.has_active_targeting_spell =
@@ -1712,6 +1773,20 @@ void WorldScene::SynchronizeObjectModelBindings(
     ObjectManager& obj_mgr, WorldSession& world_session) {
   if (!object_renderer_) {
     return;
+  }
+
+  auto mount_events = std::move(mount_m2_events_);
+  mount_m2_events_.clear();
+  for (const auto& event : mount_events) {
+    const auto current_handle = obj_mgr.GetObjectHandle(event.owner.guid);
+    if (!current_handle.has_value() || *current_handle != event.owner) {
+      continue;
+    }
+    UnitAnimationRuntime::AnimationEventCallback(
+        world_session, obj_mgr, event.owner.guid.GetRawValue(), 0u,
+        event.event.identifier, static_cast<std::int32_t>(event.event.data),
+        event.event.world_position.data(),
+        static_cast<std::int32_t>(event.event.bone));
   }
 
   auto game_object_events = std::move(game_object_m2_events_);
@@ -1759,6 +1834,14 @@ void WorldScene::SynchronizeObjectModelBindings(
       if (instance_id != 0u && object->IsUnit()) {
         static_cast<CGUnit_C*>(object)->Presentation().OnModelLoaded(
             world_session, instance_id);
+      }
+    }
+    if (object->IsUnit()) {
+      auto& unit = *static_cast<CGUnit_C*>(object);
+      const std::uint32_t mount_instance_id =
+          object_renderer_->QueryMountM2InstanceId(record.handle);
+      if (unit.Mount().OverlayM2InstanceId() != mount_instance_id) {
+        unit.Mount().SetOverlayM2InstanceId(mount_instance_id);
       }
     }
     if (object->IsGameObject()) {
@@ -2174,7 +2257,9 @@ void WorldScene::ClearObjectPresentation() {
   visible_entity_bounding_spheres_.clear();
   frame_prepared_ = false;
   unit_animation_completions_.clear();
+  mount_animation_completions_.clear();
   game_object_m2_events_.clear();
+  mount_m2_events_.clear();
   spell_visual_m2_events_.clear();
   spell_visual_deferred_impacts_.clear();
   for (const auto& [_, handles] : spell_visual_m2_sound_handles_) {
@@ -2199,6 +2284,8 @@ void WorldScene::SetObjectRendererFileLoader(
   const auto font_path = openwow::platform::BuildFontPath(
       openwow::core::LocaleSystem::GetFontForLocale(locale.GetLocale()));
 
+  unit_name_renderer_.SetFontPath(font_path);
+  unit_name_renderer_.SetFileLoader(loader);
   chat_bubble_presenter_.SetFontPath(font_path);
   chat_bubble_presenter_.SetFileLoader(loader);
   world_presentation_scene_.SetFileLoader(loader);

@@ -46,6 +46,7 @@ void ClearDressUpPreviewState(lua_State* lua, int frame_index);
 ReadTabardDesignValues(lua_State* lua, int frame_index);
 int LuaPlayerModelSetUnit(lua_State* lua);
 int LuaPlayerModelSetCreature(lua_State* lua);
+int LuaPlayerModelSetDisplayInfo(lua_State* lua);
 int LuaPlayerModelRefreshUnit(lua_State* lua);
 int LuaScriptTryOn(lua_State* lua);
 

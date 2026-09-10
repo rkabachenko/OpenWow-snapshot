@@ -62,7 +62,6 @@ struct QuestPOIRenderData {
 };
 
 struct QuestPOIWorldMapIconLayout {
-    bool turnInReady = false;
     std::int32_t objectiveIndex = 0;
     std::uint32_t mapId = 0;
     std::int32_t worldX = 0;
@@ -98,7 +97,8 @@ public:
     [[nodiscard]] uint32_t GetQuestIdByQuerySlot(std::size_t oneBasedIndex) const;
     void SetVisibleWorldMapQuestIds(std::vector<uint32_t> questIds);
     [[nodiscard]] uint32_t GetQuestIdByVisibleWorldMapIndex(std::size_t oneBasedIndex) const;
-    void SetWorldMapIconLayout(uint32_t questId, const QuestPOIWorldMapIconLayout& layout);
+    void SetWorldMapObjectiveMasks(std::unordered_map<uint32_t, std::int32_t> masks);
+    [[nodiscard]] std::int32_t GetWorldMapObjectiveMask(uint32_t questId) const;
     [[nodiscard]] std::optional<QuestPOIWorldMapIconLayout> GetWorldMapIconLayout(
         uint32_t questId) const;
     void ReplaceWorldMapIconLayouts(
@@ -143,6 +143,7 @@ private:
     std::unordered_set<uint32_t> activeQuests_;
     std::array<uint32_t, kMaxQuerySlots> querySlots_ = {};
     std::vector<uint32_t> visibleWorldMapQuestIds_;
+    std::unordered_map<uint32_t, std::int32_t> worldMapObjectiveMasks_;
     std::unordered_map<uint32_t, QuestPOIWorldMapIconLayout> worldMapIconLayouts_;
     float iconOverlapDistance_ = kDefaultIconOverlapDistance;
     float iconOverlapPushDistance_ = kDefaultIconOverlapPushDistance;

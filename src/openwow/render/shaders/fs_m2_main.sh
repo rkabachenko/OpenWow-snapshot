@@ -1,16 +1,18 @@
 
 #include <bgfx_shader.sh>
 #include "world_fog.sh"
+#include "world_shadow.sh"
 
 SAMPLER2D(s_m2Tex0,  0);
 SAMPLER2D(s_m2Tex1, 1);
 
-uniform vec4 u_m2FragmentParams[5];
+uniform vec4 u_m2FragmentParams[6];
 #define u_combinerMode   u_m2FragmentParams[0]
 #define u_m2AlphaRef     u_m2FragmentParams[1]
 #define u_materialFlags  u_m2FragmentParams[2]
 #define u_fogParams      u_m2FragmentParams[3]
 #define u_fogColor       u_m2FragmentParams[4]
+#define u_worldShadowReceiver u_m2FragmentParams[5]
 
 #if defined(OPENWOW_M2_FS_TEXTURE_COUNT) || defined(OPENWOW_M2_FS_OP1) || \
     defined(OPENWOW_M2_FS_OP2) || defined(OPENWOW_M2_FS_SPECIAL)
@@ -133,6 +135,10 @@ void main()
 
     if (result.a < u_m2AlphaRef.x) {
         discard;
+    }
+
+    if (u_worldShadowReceiver.x > 0.5) {
+        result.rgb = openwowApplyWorldShadow(result.rgb, v_worldPos);
     }
 
     if (u_materialFlags.y < 0.5) {

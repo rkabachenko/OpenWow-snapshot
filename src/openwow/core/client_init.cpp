@@ -33,6 +33,7 @@
 #include "openwow/data/streaming_init.h"
 #include "openwow/debug/diagnostics/debug_console.h"
 #include "openwow/game/client_config.h"
+#include "openwow/game/localization.h"
 #include "openwow/platform/diagnostics/crash_handler.h"
 #include "openwow/platform/process/os_platform.h"
 #include "openwow/platform/process/os_platform_internal.h"
@@ -55,6 +56,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #if defined(OPENWOW_HAS_STORMLIB) && OPENWOW_HAS_STORMLIB
@@ -236,18 +238,7 @@ std::filesystem::path ResolveRunOnceFilesystemPath(const std::string &filename) 
     return path;
   }
 
-  const auto &startup_state = openwow::data::GetStartupFileSystemState();
-  if (!startup_state.executable_base_path.empty()) {
-    return (BuildNativePath(startup_state.executable_base_path) / path).lexically_normal();
-  }
-
-  std::error_code ec;
-  const std::filesystem::path current_directory = std::filesystem::current_path(ec);
-  if (ec) {
-    return path;
-  }
-
-  return (current_directory / path).lexically_normal();
+  return openwow::data::ResolveStartupWritablePath(path);
 }
 
 std::filesystem::path ResolveStartupFilesystemPath(const std::string &path_text) {
@@ -256,18 +247,7 @@ std::filesystem::path ResolveStartupFilesystemPath(const std::string &path_text)
     return path;
   }
 
-  const auto &startup_state = openwow::data::GetStartupFileSystemState();
-  if (!startup_state.executable_base_path.empty()) {
-    return (BuildNativePath(startup_state.executable_base_path) / path).lexically_normal();
-  }
-
-  std::error_code ec;
-  const auto current_directory = std::filesystem::current_path(ec);
-  if (ec) {
-    return path;
-  }
-
-  return (current_directory / path).lexically_normal();
+  return openwow::data::ResolveStartupWritablePath(path);
 }
 
 std::array<char, 5> &MutableClientInitLocaleTag() {
@@ -355,7 +335,40 @@ bool ValidateClientInitProcessAffinityMask(const std::string &, const std::strin
   return false;
 }
 
-void SyncClientInitLocaleState(const std::string &locale) {
+std::optional<openwow::game::Locale> ParseClientLocalizationLocale(
+    const std::string_view locale) {
+  constexpr std::array<std::pair<std::string_view, openwow::game::Locale>, 12>
+      kLocales = {{
+          {"enUS", openwow::game::Locale::enUS},
+          {"enGB", openwow::game::Locale::enUS},
+          {"enCN", openwow::game::Locale::enUS},
+          {"enTW", openwow::game::Locale::enUS},
+          {"koKR", openwow::game::Locale::koKR},
+          {"frFR", openwow::game::Locale::frFR},
+          {"deDE", openwow::game::Locale::deDE},
+          {"zhCN", openwow::game::Locale::zhCN},
+          {"zhTW", openwow::game::Locale::zhTW},
+          {"esES", openwow::game::Locale::esES},
+          {"esMX", openwow::game::Locale::esMX},
+          {"ruRU", openwow::game::Locale::ruRU},
+      }};
+
+  for (const auto &[token, parsed] : kLocales) {
+    if (locale == token) {
+      return parsed;
+    }
+  }
+  return std::nullopt;
+}
+
+}
+
+bool SynchronizeClientLocaleState(const std::string &locale) {
+  const auto localization_locale = ParseClientLocalizationLocale(locale);
+  if (!localization_locale.has_value()) {
+    return false;
+  }
+
   StoreClientInitLocaleTag(locale);
   SetClientInitCVar("locale", locale);
   SetClientInitCVar("textLocale", locale);
@@ -363,7 +376,11 @@ void SyncClientInitLocaleState(const std::string &locale) {
   const std::string audio_locale = GetClientInitCVar("useEnglishAudio") == "0" ? locale : "enUS";
   SetClientInitCVar("audioLocale", audio_locale);
   openwow::game::ClientConfig::Get().SetLocale(locale);
+  openwow::game::Localization::Get().SetLocale(*localization_locale);
+  return true;
 }
+
+namespace {
 
 std::vector<std::string> CollectRunOnceEntryNames() {
   std::vector<std::string> entry_names;
@@ -515,15 +532,24 @@ constexpr std::size_t kInitFileSystemModuleDirectoryCapacity = 0x104;
 
 static void InitFileSystem() {
   const auto command_line = openwow::platform::OS_GetCommandLine();
-  const auto base_path_from_args = GetCommandLineArgument(command_line, 2);
+  auto base_path_from_args = GetCommandLineArgument(command_line, 2);
   auto module_directory = openwow::platform::OS_GetModuleDirectory();
   if (module_directory.size() >= kInitFileSystemModuleDirectoryCapacity) {
     module_directory.resize(kInitFileSystemModuleDirectoryCapacity - 1);
+  }
+  const auto &startup_state = openwow::data::GetStartupFileSystemState();
+  std::string writable_base_path;
+  if (!startup_state.executable_base_path.empty()) {
+    base_path_from_args = BuildNativePath(startup_state.executable_base_path).string();
+  }
+  if (!startup_state.writable_base_path.empty()) {
+    writable_base_path = BuildNativePath(startup_state.writable_base_path).string();
   }
   openwow::data::InitializeStartupFileSystem(
       {
           .command_line_base_path = base_path_from_args,
           .module_directory = std::move(module_directory),
+          .writable_base_path = std::move(writable_base_path),
           .archive_data_path = "Data",
       },
       [](const std::string &path) {
@@ -1200,8 +1226,14 @@ void RegisterClientInitCVars() {
 
 std::string ResolveClientInitLocale(const std::string &preferred_locale) {
   const auto &startup_state = openwow::data::GetStartupFileSystemState();
-  return openwow::data::DetectLocaleRing(preferred_locale, startup_state.archive_data_path,
-                                         startup_state.retail_install_path_cache);
+  const std::string detected_locale = openwow::data::DetectLocaleRing(
+      preferred_locale, startup_state.archive_data_path,
+      startup_state.retail_install_path_cache);
+  const bool has_common_archive_layout = openwow::data::HasCommonArchiveLayout(
+      startup_state.archive_data_path,
+      startup_state.retail_install_path_cache);
+  return openwow::data::ResolveWowIniArchiveLocale(
+      detected_locale, has_common_archive_layout);
 }
 
 std::string BuildClientInitLocaleDataPath(const std::string &locale) {
@@ -1275,6 +1307,7 @@ void ResetClientInitStateForTests() {
     cvars.SetCVar("audioLocale", "enUS", true);
   }
   openwow::game::ClientConfig::Get().SetLocale("enUS");
+  openwow::game::Localization::Get().SetLocale(openwow::game::Locale::enUS);
   MutableWoWMainInitRuntimeState() = {};
   SetInitTimerTimeSourceForTests({});
 }
@@ -1672,7 +1705,9 @@ bool ClientInit() {
 
   std::string locale = cvars.GetCVar("locale");
   if (locale == "****") {
-    SyncClientInitLocaleState("enUS");
+    if (!SynchronizeClientLocaleState("enUS")) {
+      return false;
+    }
     locale = "enUS";
   }
 
@@ -1694,7 +1729,9 @@ bool ClientInit() {
   });
 
   locale = detail::ResolveClientInitLocale(locale);
-  SyncClientInitLocaleState(locale);
+  if (!SynchronizeClientLocaleState(locale)) {
+    return false;
+  }
 
   const std::string locale_path = detail::BuildClientInitLocaleDataPath(locale);
   ClientInit__callee_421B50(locale_path.c_str());
@@ -1702,7 +1739,9 @@ bool ClientInit() {
   sub_423D70();
 
   if (const std::string final_locale = cvars.GetCVar("locale"); !final_locale.empty()) {
-    SyncClientInitLocaleState(final_locale);
+    if (!SynchronizeClientLocaleState(final_locale)) {
+      return false;
+    }
   }
 
   const std::string video_options_version = cvars.GetCVar("videoOptionsVersion");

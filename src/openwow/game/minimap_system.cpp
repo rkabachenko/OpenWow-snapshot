@@ -435,6 +435,21 @@ void MinimapSystem::SetBlipHalfExtents(
   vehicleStateBlipHalfExtent_ = std::max(vehicleStateBlipHalfExtent, 0.0f);
 }
 
+float MinimapSystem::GetPresentedBlipHalfExtent() const noexcept {
+  return blipHalfExtent_ > 0.0f ? blipHalfExtent_
+                                : directionalArrowLayout_.iconHalfExtent;
+}
+
+float MinimapSystem::GetPresentedObjectInfoHalfExtent(
+    const std::uint32_t categoryIndex) const noexcept {
+  if (categoryIndex >= kFirstVehicleStateBlipCategoryIndex &&
+      categoryIndex <= kLastVehicleStateBlipCategoryIndex &&
+      vehicleStateBlipHalfExtent_ > 0.0f) {
+    return vehicleStateBlipHalfExtent_;
+  }
+  return GetPresentedBlipHalfExtent();
+}
+
 void MinimapSystem::SetZoom(float level) {
   if (!std::isfinite(level)) {
     zoom_ = kDefaultZoom;

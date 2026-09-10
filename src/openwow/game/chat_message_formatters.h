@@ -60,11 +60,11 @@ void HandleXPGainPacket(const WorldSession& session, const void* packet_data,
 
 void FormatOpenLockMessage(const WorldSession& session,
                            std::uint64_t caster_guid,
-                           const std::string& skill_name,
-                           int required_skill);
+                           const std::string& spell_name,
+                           const std::string& object_name);
 
 void HandleOpenLockEvent(WorldSession& session, std::uint64_t caster_guid,
-                         std::uint64_t target_guid, int spell_index);
+                         std::uint64_t target_guid, std::uint32_t spell_id);
 
 class QueryCache;
 [[nodiscard]] std::optional<std::string>

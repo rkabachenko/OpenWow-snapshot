@@ -306,11 +306,20 @@ void FormatHonorGain(WorldSession& session, std::uint64_t victim_guid,
 
 void FormatFeedPetLog(WorldSession& session, std::uint64_t caster_guid,
                       int item_entry) {
+  const auto owner = session.lifetime_token();
   const auto* item_template = session.query_cache().GetOrRequestItemTemplate(
       static_cast<std::uint32_t>(item_entry),
       QueryCache::QueryRequestOptions{
-          .callback = [&session, caster_guid, item_entry](const bool success) {
-            if (!success) {
+          .callback = [owner, &session, caster_guid, item_entry](const bool success) {
+            if (owner.expired()) {
+              return;
+            }
+            if (!success || session.query_cache().GetItemTemplate(
+                                static_cast<std::uint32_t>(item_entry)) == nullptr) {
+              diagnostics::Log(diagnostics::LogLevel::kWarn,
+                  "Spell chat item query failed operation=feed-pet caster=" +
+                      std::to_string(caster_guid) + " item=" + std::to_string(item_entry) +
+                      (success ? " reason=callback has no record" : " reason=query failed"));
               return;
             }
             FormatFeedPetLog(session, caster_guid, item_entry);
@@ -327,8 +336,11 @@ void FormatFeedPetLog(WorldSession& session, std::uint64_t caster_guid,
     const std::string fmt = GetGlobalString("FEEDPET_LOG_FIRSTPERSON");
     FormatRuntimeStringTemplateInto(buf, sizeof(buf), fmt.c_str(), item_template->name.c_str());
   } else {
-    const auto* player_info = session.query_cache().GetPlayerName(caster_guid);
+    const auto* player_info = session.query_cache().GetOrRequestPlayerName(caster_guid);
     if (player_info == nullptr) {
+      diagnostics::Log(diagnostics::LogLevel::kDebug,
+          "Spell chat suppressed operation=feed-pet caster=" + std::to_string(caster_guid) +
+              " item=" + std::to_string(item_entry) + " reason=player name unavailable");
       return;
     }
     const std::string fmt = GetGlobalString("FEEDPET_LOG_THIRDPERSON");
@@ -369,11 +381,20 @@ void FormatTradeskillLog(WorldSession& session,
     return;
   }
 
+  const auto owner = session.lifetime_token();
   const auto* item_template = session.query_cache().GetOrRequestItemTemplate(
       static_cast<std::uint32_t>(item_entry),
       QueryCache::QueryRequestOptions{
-          .callback = [&session, caster_guid, item_entry](const bool success) {
-            if (!success) {
+          .callback = [owner, &session, caster_guid, item_entry](const bool success) {
+            if (owner.expired()) {
+              return;
+            }
+            if (!success || session.query_cache().GetItemTemplate(
+                                static_cast<std::uint32_t>(item_entry)) == nullptr) {
+              diagnostics::Log(diagnostics::LogLevel::kWarn,
+                  "Spell chat item query failed operation=create-item caster=" +
+                      std::to_string(caster_guid) + " item=" + std::to_string(item_entry) +
+                      (success ? " reason=callback has no record" : " reason=query failed"));
               return;
             }
             FormatTradeskillLog(session, caster_guid, item_entry);
@@ -518,8 +539,8 @@ void HandleXPGainPacket(const WorldSession& session, const void* packet_data,
 
 void FormatOpenLockMessage(const WorldSession& session,
                            std::uint64_t caster_guid,
-                           const std::string& skill_name,
-                           int required_skill) {
+                           const std::string& spell_name,
+                           const std::string& object_name) {
   const auto active_guid =
       session.objects().GetActivePlayerGuid().GetRawValue();
 
@@ -527,13 +548,13 @@ void FormatOpenLockMessage(const WorldSession& session,
   if (caster_guid == active_guid) {
     const std::string fmt = GetGlobalString("OPEN_LOCK_SELF");
     FormatRuntimeStringTemplateInto(buf, sizeof(buf), fmt.c_str(),
-                  skill_name.c_str(), required_skill);
+                  spell_name.c_str(), object_name.c_str());
   } else {
     const std::string caster_name =
         ResolveCombatLogActorName(session, caster_guid);
     const std::string fmt = GetGlobalString("OPEN_LOCK_OTHER");
     FormatRuntimeStringTemplateInto(buf, sizeof(buf), fmt.c_str(),
-                  caster_name.c_str(), skill_name.c_str(), required_skill);
+                  caster_name.c_str(), spell_name.c_str(), object_name.c_str());
   }
 
   DisplayFormattedChat(session.objects(), buf, ChatDisplayType::kCombatSkill);
@@ -541,102 +562,53 @@ void FormatOpenLockMessage(const WorldSession& session,
 
 void HandleOpenLockEvent(WorldSession& session,
                          std::uint64_t caster_guid, std::uint64_t target_guid,
-                         int spell_index) {
+                         std::uint32_t spell_id) {
+  const auto* const dbc = session.GetDbcLoader();
+  const auto* spell = dbc != nullptr ? dbc->spell().LookupEntry(spell_id) : nullptr;
+  if (spell == nullptr) {
+    diagnostics::Log(diagnostics::LogLevel::kWarn,
+        "Spell chat preparation failed operation=open-lock spell=" +
+            std::to_string(spell_id) + " target=" + std::to_string(target_guid) +
+            " reason=missing Spell record");
+    return;
+  }
+  if (spell->spell_name.empty() || (spell->attributes & 0x180u) != 0) {
+    return;
+  }
   const auto* const target =
       session.objects().GetObjectByGUID(ObjectGuid(target_guid));
   if (target == nullptr) {
+    diagnostics::Log(diagnostics::LogLevel::kDebug,
+        "Spell chat suppressed operation=open-lock spell=" + std::to_string(spell_id) +
+            " target=" + std::to_string(target_guid) + " reason=target no longer visible");
     return;
   }
 
-  const auto* const dbc = session.GetDbcLoader();
-  if (dbc == nullptr) {
-    return;
-  }
-
-  auto resolve_skill_name = [dbc](std::uint32_t skill_line_id) -> std::string {
-    if (skill_line_id != 0) {
-      if (const auto* skill = dbc->skill_line().LookupEntry(skill_line_id);
-          skill != nullptr && !skill->name.empty()) {
-        return std::string(skill->name);
-      }
-    }
-    return Localization::Get().GetString("UNKNOWN", "UNKNOWN");
-  };
-
+  const auto entry = target->GetEntry();
+  std::string object_name;
   if (target->IsItem()) {
-    const auto entry = target->GetEntry();
     const auto* item_template = session.query_cache().GetOrRequestItemTemplate(
-        entry, QueryCache::QueryRequestOptions{
-                   .callback = [&session, caster_guid, target_guid, spell_index](
-                                   const bool success) {
-                     if (success) {
-                       HandleOpenLockEvent(session, caster_guid, target_guid,
-                                           spell_index);
-                     }
-                   }});
-    if (item_template == nullptr || item_template->required_skill == 0 ||
-        item_template->required_skill_rank == 0) {
-      return;
+        entry);
+    if (item_template != nullptr) {
+      object_name = item_template->name;
     }
-
-    FormatOpenLockMessage(
-        session, caster_guid, resolve_skill_name(item_template->required_skill),
-        static_cast<int>(item_template->required_skill_rank));
-    return;
-  }
-
-  if (!target->IsGameObject()) {
-    return;
-  }
-
-  const auto* game_object = static_cast<const CGGameObject_C*>(target);
-  if (game_object->GetTemplateInfo() == nullptr) {
-    const auto entry = game_object->GetEntry();
+  } else if (target->IsGameObject()) {
     const auto* template_info = session.query_cache().GetOrRequestGameObjectTemplate(
-        entry, QueryCache::QueryRequestOptions{
-                   .context = target_guid,
-                   .callback = [&session, caster_guid, target_guid, spell_index](
-                                   const bool success) {
-                     if (success) {
-                       HandleOpenLockEvent(session, caster_guid, target_guid,
-                                           spell_index);
-                     }
-                   }});
-    if (template_info == nullptr) {
-      return;
+        entry, QueryCache::QueryRequestOptions{.context = target_guid});
+    if (template_info != nullptr) {
+      object_name = template_info->name;
     }
-  }
-
-  const auto* lock = game_object->GetLockEntry();
-  if (lock == nullptr) {
+  } else {
     return;
   }
-
-  std::string skill_name;
-  std::uint32_t required_skill = 0;
-  for (std::size_t slot = 0; slot < lock->type.size(); ++slot) {
-    if (lock->type[slot] == 2u) {
-      required_skill = lock->skill[slot] != 0u
-                           ? lock->skill[slot]
-                           : 5u * game_object->GetLevel();
-      if (const auto* lock_type = dbc->lock_type().LookupEntry(lock->index[slot]);
-          lock_type != nullptr && !lock_type->name.empty()) {
-        skill_name.assign(lock_type->name);
-      }
-      break;
-    }
-  }
-
-  if (required_skill == 0) {
+  if (object_name.empty()) {
+    diagnostics::Log(diagnostics::LogLevel::kDebug,
+        "Spell chat suppressed operation=open-lock spell=" + std::to_string(spell_id) +
+            " target=" + std::to_string(target_guid) + " entry=" + std::to_string(entry) +
+            " reason=object name unavailable");
     return;
   }
-
-  if (skill_name.empty()) {
-    skill_name = Localization::Get().GetString("LOCKED", "Locked");
-  }
-
-  FormatOpenLockMessage(session, caster_guid, skill_name,
-                        static_cast<int>(required_skill));
+  FormatOpenLockMessage(session, caster_guid, std::string(spell->spell_name), object_name);
 }
 
 std::optional<std::string>

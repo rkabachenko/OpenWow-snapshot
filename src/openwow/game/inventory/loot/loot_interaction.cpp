@@ -163,9 +163,8 @@ bool LootInteraction::HandleLootRemoved(const std::uint8_t wire_slot) {
     if (items.size() == old_size) {
       return true;
     }
-    if (!HasLootItems()) {
-      CloseLootWindow();
-    }
+    // The session publishes the final slot removal before it closes the
+    // retained window and releases the source.
   }
   return true;
 }
@@ -370,9 +369,11 @@ LootInteraction::AutoLootPlan LootInteraction::TakePendingAutoLootPlan() {
 
   const bool had_gold = loot_window_->gold > 0;
   const bool has_gold_slot = loot_window_->gold_slot_reserved;
+  // Auto-loot only schedules outbound requests here. The retained snapshot is
+  // changed by the corresponding server confirmations so FrameXML and the
+  // interaction animation observe the same lifetime.
   if (had_gold) {
     plan.loot_money = true;
-    loot_window_->gold = 0;
   }
 
   const std::vector<LootItem> items = loot_window_->items;
@@ -400,11 +401,6 @@ LootInteraction::AutoLootPlan LootInteraction::TakePendingAutoLootPlan() {
     }
 
     plan.loot_slots.push_back(item.slot_index);
-    RemoveLocalLootSlot(item.slot_index);
-  }
-
-  if (!HasLootItems()) {
-    CloseLootWindow();
   }
 
   plan.remains_open = HasLootItems();
@@ -425,21 +421,6 @@ void LootInteraction::Clear() {
   pending_auto_loot_ = false;
   cached_loot_type_ = LootType::kNone;
   pending_source_.reset();
-}
-
-void LootInteraction::RemoveLocalLootSlot(std::uint8_t slot) {
-  if (!loot_window_) {
-    return;
-  }
-
-  RemovePendingQueriesForSlot(slot);
-  auto& items = loot_window_->items;
-  items.erase(
-      std::remove_if(items.begin(), items.end(),
-                     [slot](const LootItem& item) {
-                       return item.slot_index == slot;
-                     }),
-      items.end());
 }
 
 std::optional<std::size_t> LootInteraction::FindFirstFreeDisplayIndex() const {

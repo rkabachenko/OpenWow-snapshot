@@ -22,6 +22,7 @@
 #include "openwow/world/camera/world_camera.h"
 #include "openwow/game/chat_display.h"
 #include "openwow/game/chat_message_formatters.h"
+#include "openwow/game/combat_log_internal.h"
 #include "openwow/game/combat/application/client_control_transition.h"
 #include "openwow/game/combat/adapters/ui/auto_attack_activity_presenter.h"
 #include "openwow/game/comsat_client.h"
@@ -146,6 +147,25 @@ void LogQuestDialogTransition(const std::string &what,
   openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kInfo, line.str());
 }
 
+void LogMalformedQuestPacket(const std::string_view opcode,
+                             const std::size_t payload_size) {
+  openwow::diagnostics::Log(
+      openwow::diagnostics::LogLevel::kWarn,
+      "quest replication reject malformed " + std::string(opcode) +
+          " bytes=" + std::to_string(payload_size));
+}
+
+void PublishPendingQuestWatchUpdate(WorldSession &session) {
+  const auto quest_id = session.quests().TakeQuestWatchUpdateQuestId();
+  if (!quest_id.has_value()) {
+    return;
+  }
+
+  const int visible_index =
+      ui::game::detail::FindVisibleQuestIndexById(session, *quest_id);
+  ui::game::ScriptEventDispatch::Get().FireQuestWatchUpdate(visible_index);
+}
+
 }
 
 QuestDialogCloseState GetActiveQuestDialogCloseState(const QuestManager &quests) {
@@ -168,7 +188,7 @@ QuestDialogCloseState GetActiveQuestDialogCloseState(const QuestManager &quests)
   } else if (quests.has_active_request()) {
     state.close_on_decline = quests.active_request().close_on_decline;
   } else if (quests.has_active_details()) {
-    state.close_on_decline = quests.active_details().auto_accept;
+    state.close_on_decline = quests.active_details().activate_accept;
   }
   return state;
 }
@@ -194,14 +214,13 @@ void CloseQuestDialogLikeIda58CA70(WorldSession &session, const QuestDialogClose
     return;
   }
 
-  if (!session.gossip().has_gossip() && dialog.interaction_guid.GetRawValue() != 0) {
-    ui::game::ApplyNpcInteractionCloseFeedback(
+  session.quests().CloseQuestFrameInteraction();
+  SyncQuestNpcUnitToken(session);
+  if (session.gossip().gossip_guid().IsEmpty()) {
+    ui::game::HandleNpcInteractionLoss(
         session, dialog.interaction_guid,
         ui::game::NpcInteractionClosureCause::UnitUnavailable);
   }
-
-  session.quests().CloseQuestFrameInteraction();
-  SyncQuestNpcUnitToken(session);
 
   LogQuestDialogTransition("quest dialog close", dialog.quest_id,
                            dialog.interaction_guid.GetRawValue());
@@ -333,6 +352,31 @@ void DisplayQuestgiverQuestFailedMessage(WorldSession &session, const QuestFaile
 constexpr int kQuestRewardItemSystemMessage = 162;
 constexpr int kQuestRewardMultipleItemsSystemMessage = 163;
 
+void LogQuestRewardPresentationFailure(const std::uint32_t quest_id,
+                                       const std::uint32_t item_id,
+                                       const std::string_view reason) {
+  diagnostics::Log(diagnostics::LogLevel::kWarn,
+      "Quest reward presentation failed opcode=SMSG_QUESTGIVER_QUEST_COMPLETE quest=" +
+          std::to_string(quest_id) + " item=" + std::to_string(item_id) +
+          " reason=" + std::string(reason));
+}
+
+void DisplayQuestCompletionChatReward(WorldSession &session,
+                                      const std::uint32_t quest_id,
+                                      const char *format_key, const int amount,
+                                      const int chat_type) {
+  const auto format = Localization::Get().GetString(format_key, "");
+  if (format.empty()) {
+    LogQuestRewardPresentationFailure(quest_id, 0,
+        "missing localized format " + std::string(format_key));
+    return;
+  }
+  std::array<char, 3000> text{};
+  FormatRuntimeStringTemplateInto(text.data(), text.size(), format.c_str(), amount);
+  ChatFrame_DisplayMessage(session.objects(), text.data(), chat_type,
+      nullptr, 0, nullptr, nullptr, nullptr, 0, 0, 0, 0, 0, nullptr);
+}
+
 std::string BuildQuestCompletionItemLink(const std::uint32_t item_id,
                                          const ItemTemplate &item_template) {
   if (item_id == 0 || item_template.name.empty()) {
@@ -361,6 +405,8 @@ void DisplayQuestCompletionRewardItemMessage(WorldSession &session, const std::u
                        return;
                      }
                      if (!success || session.query_cache().GetItemTemplate(item_id) == nullptr) {
+                       LogQuestRewardPresentationFailure(0, item_id,
+                           success ? "item cache callback has no record" : "item query failed");
                        return;
                      }
                      DisplayQuestCompletionRewardItemMessage(session, item_id, item_count,
@@ -372,6 +418,7 @@ void DisplayQuestCompletionRewardItemMessage(WorldSession &session, const std::u
 
   const auto item_link = BuildQuestCompletionItemLink(item_id, *item_template);
   if (item_link.empty()) {
+    LogQuestRewardPresentationFailure(0, item_id, "item record has no display name");
     return;
   }
 
@@ -384,28 +431,70 @@ void DisplayQuestCompletionRewardItemMessage(WorldSession &session, const std::u
   ui::game::DisplaySystemMessage(kQuestRewardItemSystemMessage, item_link.c_str());
 }
 
-void DisplayQuestCompletionRewardItemMessages(WorldSession &session, const std::uint32_t quest_id,
-                                              const std::uint32_t selected_reward_item_id) {
-  if (quest_id == 0) {
-    return;
-  }
-
+void DisplayQuestCompletionRewards(WorldSession &session, const QuestCompleteInfo complete,
+                                    const std::uint32_t selected_reward_item_id) {
+  const auto quest_id = complete.quest_id;
   const auto owner = session.lifetime_token();
   const auto *quest_template = session.quests().GetOrRequestTemplate(
       quest_id, QuestManager::QueryRequestOptions{
                     .dedupe_callbacks = false,
-                    .callback = [owner, &session, quest_id, selected_reward_item_id](const bool success) {
+                    .callback = [owner, &session, complete, selected_reward_item_id](const bool success) {
                       if (owner.expired()) {
                         return;
                       }
+                      const auto quest_id = complete.quest_id;
                       if (!success || session.quests().GetTemplate(quest_id) == nullptr) {
+                        LogQuestRewardPresentationFailure(quest_id, 0,
+                            success ? "quest cache callback has no record" : "quest query failed");
                         return;
                       }
-                      DisplayQuestCompletionRewardItemMessages(session, quest_id,
-                                                               selected_reward_item_id);
+                      DisplayQuestCompletionRewards(session, complete, selected_reward_item_id);
                     }});
   if (quest_template == nullptr) {
     return;
+  }
+
+  if (quest_template->title.empty()) {
+    LogQuestRewardPresentationFailure(quest_id, 0, "quest record has no title");
+  } else {
+    ui::game::DisplaySystemMessage(147, quest_template->title.c_str());
+  }
+  const int sound_result =
+      session.sound_runtime().PlaySoundKitByName("igQuestListComplete");
+  diagnostics::Log(
+      sound_result == 0 || sound_result == 9 || sound_result == 17
+          ? diagnostics::LogLevel::kInfo : diagnostics::LogLevel::kWarn,
+      "quest feedback stage=completion source=SMSG_QUESTGIVER_QUEST_COMPLETE quest=" +
+          std::to_string(quest_id) + " sound=igQuestListComplete result=" +
+          std::to_string(sound_result) + " queued=" + std::to_string(sound_result == 0) +
+          " allSound=" + std::to_string(ui::game::CVarSystem::Instance().GetCVarBool("Sound_EnableAllSound")) +
+          " sfx=" + std::to_string(ui::game::CVarSystem::Instance().GetCVarBool("Sound_EnableSFX")));
+  if (complete.xp_reward != 0) {
+    ui::game::DisplaySystemMessage(161, static_cast<std::int32_t>(complete.xp_reward));
+  }
+  if (static_cast<std::int32_t>(complete.money_reward) > 0) {
+    const auto money = MoneyDisplay::FormatLocalizedCoinText(complete.money_reward, ", ");
+    if (money.empty()) {
+      LogQuestRewardPresentationFailure(quest_id, 0, "money format unavailable");
+    } else {
+      ui::game::DisplaySystemMessage(164, money.c_str());
+    }
+  }
+  if (static_cast<std::int32_t>(complete.honor_reward) > 0) {
+    const auto honor = static_cast<int>(complete.honor_reward / 10u);
+    DisplayQuestCompletionChatReward(session, quest_id, "COMBATLOG_HONORAWARD",
+                                    honor, ChatDisplayType::kCombatHonor);
+    CombatLog_FireCombatTextSD(CombatTextMsgIdx::kHonorGained, honor);
+  }
+  if (static_cast<std::int32_t>(complete.talent_reward) > 0) {
+    DisplayQuestCompletionChatReward(session, quest_id, "LEVEL_UP_CHAR_POINTS",
+        static_cast<int>(complete.talent_reward), ChatDisplayType::kMoney);
+  }
+  if (static_cast<std::int32_t>(complete.arena_points) > 0) {
+    DisplayQuestCompletionChatReward(session, quest_id, "COMBATLOG_ARENAPOINTSAWARD",
+        static_cast<int>(complete.arena_points), ChatDisplayType::Value(ChatMsg::kArenaPoints));
+    CombatLog_FireCombatTextSD(CombatTextMsgIdx::kArenaPointsGained,
+                             static_cast<int>(complete.arena_points));
   }
 
   for (const auto &reward_item : quest_template->reward_items) {
@@ -419,12 +508,18 @@ void DisplayQuestCompletionRewardItemMessages(WorldSession &session, const std::
   if (selected_reward_item_id != 0) {
     DisplayQuestCompletionRewardItemMessage(session, selected_reward_item_id, 1, false);
   }
+  const auto dialog = GetActiveQuestDialogCloseState(session.quests());
+  const auto keep_dialog_open =
+      dialog.is_open && ShouldKeepQuestDialogOpenAfterTurnIn(session, quest_id);
+  CloseQuestDialogLikeIda58CA70(session, dialog, keep_dialog_open, false);
 }
 
 }
 
 void WorldSession::HandleQuestQueryResponse(const net::wotlk::WorldPacket &pkt) {
-  quests_.HandleQuestQueryResponse(pkt.payload.data(), pkt.payload.size());
+  if (!quests_.HandleQuestQueryResponse(pkt.payload.data(), pkt.payload.size())) {
+    LogMalformedQuestPacket("SMSG_QUEST_QUERY_RESPONSE", pkt.payload.size());
+  }
 }
 
 bool WorldSession::HandleQuestGiverQuestDetails(const net::wotlk::WorldPacket &pkt) {
@@ -435,34 +530,40 @@ bool WorldSession::HandleQuestGiverQuestDetails(const net::wotlk::WorldPacket &p
 
   if (!quests_.HandleQuestGiverQuestDetails(pkt.payload.data(),
                                              pkt.payload.size())) {
-    openwow::diagnostics::Log(
-        openwow::diagnostics::LogLevel::kWarn,
-        "interaction reject malformed SMSG_QUESTGIVER_QUEST_DETAILS bytes=" +
-            std::to_string(pkt.payload.size()));
+    LogMalformedQuestPacket("SMSG_QUESTGIVER_QUEST_DETAILS", pkt.payload.size());
     return false;
   }
 
   if (quests_.has_active_details()) {
     const auto &details = quests_.active_details();
-    if (!details.emotes.empty()) {
-      if (auto *unit = map_runtime_.objects().GetMutableUnit(details.npc_guid)) {
-        constexpr std::uint32_t kNpcFlagTrainer = 0x00000010u;
-        if ((unit->State().GetNpcFlags() & kNpcFlagTrainer) == 0) {
-          unit->Animation().EmoteQueueHandler(
-              reinterpret_cast<const std::uint32_t *>(details.emotes.data()),
-              static_cast<std::int32_t>(details.emotes.size()));
-        }
+    if (auto *unit = map_runtime_.objects().GetMutableUnit(details.npc_guid)) {
+      if (!unit->IsPlayer()) {
+        unit->Animation().EmoteQueueHandler(
+            reinterpret_cast<const std::uint32_t *>(details.emotes.data()),
+            static_cast<std::int32_t>(details.emotes.size()));
       }
     }
   }
 
+  std::string transition = "quest dialog details";
+  if (quests_.has_active_details()) {
+    const auto &details = quests_.active_details();
+    std::ostringstream context;
+    context << transition << " flags=0x" << std::hex << std::uppercase
+            << static_cast<std::uint32_t>(details.quest_flags) << std::dec
+            << " activateAccept=" << (details.activate_accept ? 1 : 0)
+            << " startCheat=" << details.accept_packet_value;
+    transition = context.str();
+  }
   LogQuestDialogTransition(
-      "quest dialog details",
+      transition,
       quests_.has_active_details() ? quests_.active_details().quest_id : 0u,
       quests_.has_active_details()
           ? quests_.active_details().npc_guid.GetRawValue()
           : 0ull);
 
+  ui::game::StoreNpcInteractionTarget(
+      *this, quests_.quest_frame_interaction_state().interaction_guid);
   SyncQuestNpcUnitToken(*this);
   ui::game::ScriptEventDispatch::Get().FireQuestDetail();
   return true;
@@ -471,21 +572,16 @@ bool WorldSession::HandleQuestGiverQuestDetails(const net::wotlk::WorldPacket &p
 bool WorldSession::HandleQuestGiverOfferReward(const net::wotlk::WorldPacket &pkt) {
   if (!quests_.HandleQuestGiverOfferReward(pkt.payload.data(),
                                              pkt.payload.size())) {
-    openwow::diagnostics::Log(
-        openwow::diagnostics::LogLevel::kWarn,
-        "interaction reject malformed SMSG_QUESTGIVER_OFFER_REWARD bytes=" +
-            std::to_string(pkt.payload.size()));
+    LogMalformedQuestPacket("SMSG_QUESTGIVER_OFFER_REWARD", pkt.payload.size());
     return false;
   }
 
   if (quests_.has_active_reward()) {
     const auto &reward = quests_.active_reward();
-    if (!reward.emotes.empty()) {
-      if (auto *unit = map_runtime_.objects().GetMutableUnit(reward.npc_guid)) {
-        unit->Animation().EmoteQueueHandler(
-            reinterpret_cast<const std::uint32_t *>(reward.emotes.data()),
-            static_cast<std::int32_t>(reward.emotes.size()));
-      }
+    if (auto *unit = map_runtime_.objects().GetMutableUnit(reward.npc_guid)) {
+      unit->Animation().EmoteQueueHandler(
+          reinterpret_cast<const std::uint32_t *>(reward.emotes.data()),
+          static_cast<std::int32_t>(reward.emotes.size()));
     }
   }
 
@@ -496,6 +592,8 @@ bool WorldSession::HandleQuestGiverOfferReward(const net::wotlk::WorldPacket &pk
           ? quests_.active_reward().npc_guid.GetRawValue()
           : 0ull);
 
+  ui::game::StoreNpcInteractionTarget(
+      *this, quests_.quest_frame_interaction_state().interaction_guid);
   SyncQuestNpcUnitToken(*this);
   ui::game::ScriptEventDispatch::Get().FireQuestComplete();
   return true;
@@ -504,21 +602,16 @@ bool WorldSession::HandleQuestGiverOfferReward(const net::wotlk::WorldPacket &pk
 bool WorldSession::HandleQuestGiverRequestItems(const net::wotlk::WorldPacket &pkt) {
   if (!quests_.HandleQuestGiverRequestItems(pkt.payload.data(),
                                             pkt.payload.size())) {
-    openwow::diagnostics::Log(
-        openwow::diagnostics::LogLevel::kWarn,
-        "interaction reject malformed SMSG_QUESTGIVER_REQUEST_ITEMS bytes=" +
-            std::to_string(pkt.payload.size()));
+    LogMalformedQuestPacket("SMSG_QUESTGIVER_REQUEST_ITEMS", pkt.payload.size());
     return false;
   }
 
   if (quests_.has_active_request()) {
     const auto &request = quests_.active_request();
-    if (!request.emotes.empty()) {
-      if (auto *unit = map_runtime_.objects().GetMutableUnit(request.npc_guid)) {
-        unit->Animation().EmoteQueueHandler(
-            reinterpret_cast<const std::uint32_t *>(request.emotes.data()),
-            static_cast<std::int32_t>(request.emotes.size()));
-      }
+    if (auto *unit = map_runtime_.objects().GetMutableUnit(request.npc_guid)) {
+      unit->Animation().EmoteQueueHandler(
+          reinterpret_cast<const std::uint32_t *>(request.emotes.data()),
+          static_cast<std::int32_t>(request.emotes.size()));
     }
   }
 
@@ -529,6 +622,8 @@ bool WorldSession::HandleQuestGiverRequestItems(const net::wotlk::WorldPacket &p
           ? quests_.active_request().npc_guid.GetRawValue()
           : 0ull);
 
+  ui::game::StoreNpcInteractionTarget(
+      *this, quests_.quest_frame_interaction_state().interaction_guid);
   SyncQuestNpcUnitToken(*this);
   ui::game::ScriptEventDispatch::Get().FireQuestProgress();
   return true;
@@ -549,10 +644,25 @@ constexpr std::uint32_t kNpcFlagQuestGiver = 0x00000002u;
   return false;
 }
 
+void ApplyQuestgiverServerStatus(WorldObject &obj, const OverlayDisplayType status,
+                                 const char *source) {
+  if (obj.GetOverlayDisplayType() != status &&
+      openwow::diagnostics::IsLogEnabled(openwow::diagnostics::LogLevel::kDebug)) {
+    openwow::diagnostics::Log(
+        openwow::diagnostics::LogLevel::kDebug,
+        "NPC interaction status stage=server-state source=" + std::string(source) +
+            " guid=" + obj.GetGuid().ToString() +
+            " old=" + std::to_string(static_cast<std::uint32_t>(obj.GetOverlayDisplayType())) +
+            " new=" + std::to_string(static_cast<std::uint32_t>(status)));
+  }
+  obj.SetQuestGiverIconStatus(status);
+}
+
 }
 
 bool WorldSession::HandleQuestGiverStatus(const net::wotlk::WorldPacket &pkt) {
   if (!quests_.HandleQuestGiverStatus(pkt.payload.data(), pkt.payload.size())) {
+    LogMalformedQuestPacket("SMSG_QUESTGIVER_STATUS", pkt.payload.size());
     return false;
   }
 
@@ -565,8 +675,8 @@ bool WorldSession::HandleQuestGiverStatus(const net::wotlk::WorldPacket &pkt) {
       if (auto *obj = map_runtime_.objects().GetMutable(guid)) {
 
         if (IsQuestGiverStatusEligible(*obj)) {
-          obj->SetQuestGiverIconStatus(static_cast<OverlayDisplayType>(
-              static_cast<std::uint8_t>(*status)));
+          ApplyQuestgiverServerStatus(*obj, static_cast<OverlayDisplayType>(
+              static_cast<std::uint8_t>(*status)), "SMSG_QUESTGIVER_STATUS");
         }
       }
     }
@@ -576,40 +686,47 @@ bool WorldSession::HandleQuestGiverStatus(const net::wotlk::WorldPacket &pkt) {
 
 bool WorldSession::HandleQuestGiverStatusMultiple(const net::wotlk::WorldPacket &pkt) {
   if (!quests_.HandleQuestGiverStatusMultiple(pkt.payload.data(), pkt.payload.size())) {
+    LogMalformedQuestPacket("SMSG_QUESTGIVER_STATUS_MULTIPLE", pkt.payload.size());
     return false;
   }
 
-  for (const auto &entry : quests_.quest_giver_statuses()) {
-    if (auto *obj = map_runtime_.objects().GetMutable(entry.guid)) {
-
-      if (IsQuestGiverStatusEligible(*obj)) {
-        obj->SetQuestGiverIconStatus(
-            static_cast<OverlayDisplayType>(static_cast<std::uint8_t>(entry.status)));
-      }
+  map_runtime_.objects().EnumVisibleObjectsMutable([this](WorldObject &obj) {
+    if (!IsQuestGiverStatusEligible(obj)) {
+      return;
     }
-  }
+
+    const auto status = quests_.FindQuestGiverStatus(obj.GetGuid());
+    ApplyQuestgiverServerStatus(obj,
+        status.has_value()
+            ? static_cast<OverlayDisplayType>(
+                  static_cast<std::uint8_t>(*status))
+            : OverlayDisplayType::kNone, "SMSG_QUESTGIVER_STATUS_MULTIPLE");
+  });
   return true;
 }
 
 bool WorldSession::HandleQuestUpdateComplete(const net::wotlk::WorldPacket &pkt) {
   if (quests_.HandleQuestUpdateComplete(pkt.payload.data(), pkt.payload.size())) {
-    ui::game::ScriptEventDispatch::Get().FireQuestLogUpdate();
+    PublishPendingQuestWatchUpdate(*this);
     return true;
   }
+  LogMalformedQuestPacket("SMSG_QUESTUPDATE_COMPLETE", pkt.payload.size());
   return false;
 }
 
 bool WorldSession::HandleQuestUpdateAddKill(const net::wotlk::WorldPacket &pkt) {
   if (quests_.HandleQuestUpdateAddKill(pkt.payload.data(), pkt.payload.size())) {
-    ui::game::ScriptEventDispatch::Get().FireQuestLogUpdate();
+    PublishPendingQuestWatchUpdate(*this);
     return true;
   }
+  LogMalformedQuestPacket("SMSG_QUESTUPDATE_ADD_KILL", pkt.payload.size());
   return false;
 }
 
 void WorldSession::HandleQuestConfirmAccept(const net::wotlk::WorldPacket &pkt) {
   if (!quests_.HandleQuestConfirmAccept(pkt.payload.data(), pkt.payload.size()) ||
       !quests_.has_pending_confirm_accept()) {
+    LogMalformedQuestPacket("SMSG_QUEST_CONFIRM_ACCEPT", pkt.payload.size());
     return;
   }
 
@@ -623,7 +740,6 @@ void WorldSession::HandleQuestLogFull(const net::wotlk::WorldPacket & ) {
 }
 
 bool WorldSession::HandleQuestGiverQuestComplete(const net::wotlk::WorldPacket &pkt) {
-  const auto dialog = GetActiveQuestDialogCloseState(quests_);
   PacketReader reader(pkt.payload.data(), pkt.payload.size());
   QuestCompleteInfo complete{};
   if (!reader.ReadU32(complete.quest_id) ||
@@ -632,15 +748,13 @@ bool WorldSession::HandleQuestGiverQuestComplete(const net::wotlk::WorldPacket &
       !reader.ReadU32(complete.honor_reward) ||
       !reader.ReadU32(complete.talent_reward) ||
       !reader.ReadU32(complete.arena_points) || reader.Remaining() != 0) {
+    LogMalformedQuestPacket("SMSG_QUESTGIVER_QUEST_COMPLETE", pkt.payload.size());
     return false;
   }
   last_quest_complete_ = complete;
   const auto quest_id = last_quest_complete_.quest_id;
   const auto selected_reward_item_id = quests_.TakePendingRewardSelectionItem(quest_id);
-  DisplayQuestCompletionRewardItemMessages(*this, quest_id, selected_reward_item_id);
-  const auto keep_dialog_open =
-      dialog.is_open && ShouldKeepQuestDialogOpenAfterTurnIn(*this, quest_id);
-  CloseQuestDialogLikeIda58CA70(*this, dialog, keep_dialog_open, false);
+  DisplayQuestCompletionRewards(*this, complete, selected_reward_item_id);
   return true;
 }
 
@@ -669,7 +783,10 @@ bool WorldSession::HandleQuestGiverQuestList(const net::wotlk::WorldPacket &pkt)
       }
       if (parsed && reader.Remaining() == 0) {
         last_quest_list_ = std::move(quest_list);
-        quests_.ShowQuestGreeting(last_quest_list_.greeting);
+        const ObjectGuid giver(last_quest_list_.npc_guid);
+        quests_.ShowQuestGreeting(giver, last_quest_list_.greeting);
+        ui::game::StoreNpcInteractionTarget(*this, giver);
+        SyncQuestNpcUnitToken(*this);
         LogQuestDialogTransition(
             "quest dialog greeting entries=" +
                 std::to_string(last_quest_list_.quests.size()),
@@ -679,11 +796,13 @@ bool WorldSession::HandleQuestGiverQuestList(const net::wotlk::WorldPacket &pkt)
       }
     }
   }
+  LogMalformedQuestPacket("SMSG_QUESTGIVER_QUEST_LIST", pkt.payload.size());
   return false;
 }
 
 bool WorldSession::HandleQuestPoiQueryResponse(const net::wotlk::WorldPacket &pkt) {
   if (!quests_.HandleQuestPoiQueryResponse(pkt.payload.data(), pkt.payload.size())) {
+    LogMalformedQuestPacket("SMSG_QUEST_POI_QUERY_RESPONSE", pkt.payload.size());
     return false;
   }
   auto &poi_data = QuestPOIData::Get();
@@ -721,12 +840,15 @@ bool WorldSession::HandleQuestPoiQueryResponse(const net::wotlk::WorldPacket &pk
 }
 
 void WorldSession::HandleQuestPushResult(const net::wotlk::WorldPacket &pkt) {
-  quests_.HandleQuestPushResult(pkt.payload.data(), pkt.payload.size());
+  if (!quests_.HandleQuestPushResult(pkt.payload.data(), pkt.payload.size())) {
+    LogMalformedQuestPacket("MSG_QUEST_PUSH_RESULT", pkt.payload.size());
+  }
 }
 
 void WorldSession::HandleQuestGiverQuestFailed(const net::wotlk::WorldPacket &pkt) {
   const auto dialog = GetActiveQuestDialogCloseState(quests_);
   if (!quests_.HandleQuestGiverQuestFailed(pkt.payload.data(), pkt.payload.size())) {
+    LogMalformedQuestPacket("SMSG_QUESTGIVER_QUEST_FAILED", pkt.payload.size());
     return;
   }
   DisplayQuestgiverQuestFailedMessage(*this, *quests_.last_quest_failed());
@@ -735,6 +857,7 @@ void WorldSession::HandleQuestGiverQuestFailed(const net::wotlk::WorldPacket &pk
 
 void WorldSession::HandleQuestUpdateFailed(const net::wotlk::WorldPacket &pkt) {
   if (!quests_.HandleQuestUpdateFailed(pkt.payload.data(), pkt.payload.size())) {
+    LogMalformedQuestPacket("SMSG_QUESTUPDATE_FAILED", pkt.payload.size());
     return;
   }
 
@@ -742,12 +865,26 @@ void WorldSession::HandleQuestUpdateFailed(const net::wotlk::WorldPacket &pkt) {
 }
 
 void WorldSession::HandleQuestUpdateAddPvpKill(const net::wotlk::WorldPacket &pkt) {
-  quests_.HandleQuestUpdateAddPvpKill(pkt.payload.data(), pkt.payload.size());
+  if (quests_.HandleQuestUpdateAddPvpKill(pkt.payload.data(), pkt.payload.size())) {
+    const auto &kill = quests_.last_pvp_kill();
+    if (kill.has_value() && quests_.GetTemplate(kill->quest_id) == nullptr) {
+      openwow::diagnostics::Log(
+          openwow::diagnostics::LogLevel::kWarn,
+          "quest update references unresolved template "
+          "opcode=SMSG_QUESTUPDATE_ADD_PVP_KILL quest=" +
+              std::to_string(kill->quest_id));
+    }
+    PublishPendingQuestWatchUpdate(*this);
+    return;
+  }
+  LogMalformedQuestPacket("SMSG_QUESTUPDATE_ADD_PVP_KILL", pkt.payload.size());
 }
 
 void WorldSession::HandleQuestForceRemove(const net::wotlk::WorldPacket &pkt) {
-  if (!quests_.HandleQuestForceRemove(pkt.payload.data(), pkt.payload.size()))
+  if (!quests_.HandleQuestForceRemove(pkt.payload.data(), pkt.payload.size())) {
+    LogMalformedQuestPacket("SMSG_QUEST_FORCE_REMOVE", pkt.payload.size());
     return;
+  }
 
   const auto *tmpl = quests_.GetTemplate(quests_.force_remove_quest());
   if (tmpl) {
@@ -759,6 +896,7 @@ void WorldSession::HandleQuestForceRemove(const net::wotlk::WorldPacket &pkt) {
 void WorldSession::HandleQuestgiverQuestInvalid(const net::wotlk::WorldPacket &pkt) {
   const auto dialog = GetActiveQuestDialogCloseState(quests_);
   if (!quests_.HandleQuestgiverQuestInvalid(pkt.payload.data(), pkt.payload.size())) {
+    LogMalformedQuestPacket("SMSG_QUESTGIVER_QUEST_INVALID", pkt.payload.size());
     return;
   }
   DisplayQuestgiverQuestInvalidMessage(quests_.quest_invalid_reason());
@@ -766,11 +904,14 @@ void WorldSession::HandleQuestgiverQuestInvalid(const net::wotlk::WorldPacket &p
 }
 
 void WorldSession::HandleQuestUpdateAddItem(const net::wotlk::WorldPacket &pkt) {
-  quests_.HandleQuestUpdateAddItem(pkt.payload.data(), pkt.payload.size());
+  if (!quests_.HandleQuestUpdateAddItem(pkt.payload.data(), pkt.payload.size())) {
+    LogMalformedQuestPacket("SMSG_QUESTUPDATE_ADD_ITEM", pkt.payload.size());
+  }
 }
 
 void WorldSession::HandleQuestUpdateFailedTimer(const net::wotlk::WorldPacket &pkt) {
   if (!quests_.HandleQuestUpdateFailedTimer(pkt.payload.data(), pkt.payload.size())) {
+    LogMalformedQuestPacket("SMSG_QUESTUPDATE_FAILEDTIMER", pkt.payload.size());
     return;
   }
 

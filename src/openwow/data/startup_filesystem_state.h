@@ -19,6 +19,7 @@ struct StartupFileSystemState {
   std::uint32_t forwarded_storm_open_flags{0};
   std::uint32_t client_init_archive_gate{0};
   std::string executable_base_path;
+  std::string writable_base_path;
   std::string archive_data_path;
   std::string locale_data_path;
   std::string retail_install_path_cache;
@@ -27,6 +28,7 @@ struct StartupFileSystemState {
 struct InitFileSystemInputs {
   std::string command_line_base_path;
   std::string module_directory;
+  std::string writable_base_path;
   std::string archive_data_path{"Data"};
 };
 
@@ -51,6 +53,14 @@ void ClearStartupBasePathInitFlag();
 void SetStartupStormOpenFlags(std::uint32_t flags);
 
 void SetStartupExecutableBasePath(const std::string& path);
+
+std::filesystem::path ResolveStartupContentPath(
+    const std::filesystem::path& relative_path = {});
+
+void SetStartupWritableBasePath(const std::string& path);
+
+std::filesystem::path ResolveStartupWritablePath(
+    const std::filesystem::path& relative_path = {});
 
 void SetStartupArchiveDataPath(const std::string& path);
 

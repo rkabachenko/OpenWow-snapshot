@@ -1,5 +1,7 @@
 #include "openwow/data/login_resource_validator.h"
 
+#include "openwow/data/derived_texture_cache.h"
+
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -25,6 +27,10 @@ namespace {
 constexpr const char* kDefaultStartupLocale = "enUS";
 
 constexpr const char* kSplitLayoutLocaleToken = "----";
+
+#if defined(OPENWOW_PLATFORM_IOS)
+constexpr char kLowerHexDigits[] = "0123456789abcdef";
+#endif
 
 std::optional<std::filesystem::path> ResolveExistingRelativePathCaseInsensitive(
     const std::filesystem::path& root,
@@ -157,6 +163,73 @@ openwow::vfs::VirtualFileSystem BuildLoginVfs(const std::string& game_data_root,
             });
         }
       }
+
+#if defined(OPENWOW_PLATFORM_IOS)
+      const fs::path derived_texture_packs =
+          extracted_data_dir / "OpenWoWDerived" / "iOSPacks";
+      const fs::path derived_texture_pack_manifest =
+          derived_texture_packs / "texture-packs-v1.manifest";
+      std::size_t mounted_texture_pack_count = 0u;
+      for (std::size_t shard = 0u;
+           shard < kDerivedTextureCachePackShardCount; ++shard) {
+        const fs::path archive =
+            derived_texture_packs / MakeDerivedTextureCachePackFilename(shard);
+        std::error_code archive_ec;
+        if (!fs::is_regular_file(archive, archive_ec) || archive_ec) {
+          continue;
+        }
+        vfs.Mount({
+            .id = "ios-derived-textures-" + std::to_string(shard),
+            .kind = openwow::vfs::MountKind::kMpqArchive,
+            .source_root = archive,
+            .lookup_path_prefix =
+                std::string("/OpenWoWDerived/iOS/Textures/") +
+                kLowerHexDigits[shard],
+            .prewarm = false,
+            .priority = kLooseDataDirectoryPriority + 5,
+            .enabled = true,
+        });
+        ++mounted_texture_pack_count;
+      }
+      std::error_code manifest_ec;
+      const bool has_texture_pack_manifest =
+          fs::is_regular_file(derived_texture_pack_manifest, manifest_ec) &&
+          !manifest_ec;
+      const bool has_complete_texture_pack_set =
+          mounted_texture_pack_count == kDerivedTextureCachePackShardCount &&
+          has_texture_pack_manifest;
+      if (!has_complete_texture_pack_set) {
+        Log(LogLevel::kWarn,
+            "[iOS] Derived texture packs incomplete under " +
+                derived_texture_packs.string() + ": found " +
+                std::to_string(mounted_texture_pack_count) + "/" +
+                std::to_string(kDerivedTextureCachePackShardCount) +
+                " archives, manifest=" +
+                (has_texture_pack_manifest ? "present" : "missing") +
+                "; missing textures will use the retail decode path");
+      } else {
+        const fs::path legacy_texture_cache =
+            extracted_data_dir / "OpenWoWDerived" / "iOS";
+        std::error_code legacy_ec;
+        if (fs::is_directory(legacy_texture_cache, legacy_ec) &&
+            !legacy_ec) {
+          const std::uintmax_t removed_entries =
+              fs::remove_all(legacy_texture_cache, legacy_ec);
+          if (legacy_ec) {
+            Log(LogLevel::kError,
+                "[iOS] Failed to remove legacy loose texture cache " +
+                    legacy_texture_cache.string() + " after removing " +
+                    std::to_string(removed_entries) + " entries: " +
+                    legacy_ec.message());
+          } else {
+            Log(LogLevel::kInfo,
+                "[iOS] Removed legacy loose texture cache " +
+                    legacy_texture_cache.string() + " (" +
+                    std::to_string(removed_entries) + " entries)");
+          }
+        }
+      }
+#endif
     }
 
     const bool has_common_archive =
@@ -180,6 +253,20 @@ openwow::vfs::VirtualFileSystem BuildLoginVfs(const std::string& game_data_root,
             .streaming_ready = IsStreamingInitialized(),
             .progress = std::move(progress),
         });
+  }
+
+  const auto runtime_override_root =
+      ResolveStartupWritablePath("ContentOverrides");
+  std::error_code runtime_override_ec;
+  if (fs::is_directory(runtime_override_root, runtime_override_ec) &&
+      !runtime_override_ec) {
+    vfs.Mount({
+        .id = "runtime-override",
+        .kind = openwow::vfs::MountKind::kEnhancedOverride,
+        .source_root = runtime_override_root,
+        .priority = kRuntimeOverridePriority,
+        .enabled = true,
+    });
   }
 
   if (!enhanced_assets_root.empty()) {

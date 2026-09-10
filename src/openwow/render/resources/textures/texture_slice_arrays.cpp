@@ -1,6 +1,7 @@
 #include "openwow/render/resources/textures/texture_slice_arrays.h"
 
 #include "openwow/data/blp/blp_texture_loader.h"
+#include "openwow/core/platform_runtime_policy.h"
 #include "openwow/foundation/diagnostics/logging.h"
 #include "openwow/render/resources/textures/texture_manager.h"
 
@@ -197,6 +198,8 @@ bool UploadSliceChain(const bgfx::TextureHandle handle, const std::uint16_t slic
       return Bc2AlphaIsUniform(unit) && BlockColorIsUniform(unit + 8u);
     case BlpUploadFormat::kBc3:
       return Bc3AlphaIsUniform(unit) && BlockColorIsUniform(unit + 8u);
+    case BlpUploadFormat::kAstc4x4:
+      return false;
   }
   return false;
 }
@@ -360,8 +363,18 @@ bool TextureSliceArrays::Initialize() {
                      (caps->supported & BGFX_CAPS_TEXTURE_2D_ARRAY) != 0u &&
                      caps->limits.maxTextureLayers > 1u;
   if (pool_->supported) {
+    constexpr auto runtime_policy =
+        openwow::core::GetPlatformRuntimePolicy();
     pool_->slices_per_array = static_cast<std::uint16_t>(
-        std::min<std::uint32_t>(kSlicesPerArray, caps->limits.maxTextureLayers));
+        std::min({static_cast<std::uint32_t>(kSlicesPerArray),
+                  static_cast<std::uint32_t>(runtime_policy.texture_array_slices),
+                  caps->limits.maxTextureLayers}));
+    if (runtime_policy.constrained_mobile_runtime) {
+      diagnostics::Log(
+          diagnostics::LogLevel::kInfo,
+          "TextureSliceArrays: constrained capacity=" +
+              std::to_string(pool_->slices_per_array));
+    }
   }
   return pool_->supported;
 }

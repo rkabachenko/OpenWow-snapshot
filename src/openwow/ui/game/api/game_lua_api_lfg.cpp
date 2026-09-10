@@ -52,6 +52,7 @@ constexpr std::uint8_t kLfgHealerRoleMask = 0x04u;
 constexpr std::uint8_t kLfgDamageRoleMask = 0x08u;
 constexpr std::uint8_t kLfgCombatRoleMask =
     kLfgTankRoleMask | kLfgHealerRoleMask | kLfgDamageRoleMask;
+constexpr const char *kLfgSelectedRolesCVar = "lfgSelectedRoles";
 constexpr std::uint32_t kLfgRoleCheckFreeAttempts = 2;
 constexpr double kLfgRoleCheckResetSeconds = 10.0;
 constexpr int kLfgRoleSelectionRequiredMessage = 0x2BD;
@@ -107,6 +108,26 @@ std::uint8_t FilterSelectedRolesForSession(openwow::game::WorldSession *session,
                                            std::uint8_t requested_roles) {
   const auto class_id = GetLocalPlayerClassId(session);
   return ::openwow::game::LFGSystem::FilterRolesForClass(class_id, requested_roles);
+}
+
+std::uint8_t ReadPersistedLfgRoles(openwow::game::WorldSession *session) {
+  const auto roles = static_cast<std::uint8_t>(
+      CVarSystem::Instance().GetCVarInt(kLfgSelectedRolesCVar));
+  return FilterSelectedRolesForSession(session, roles);
+}
+
+std::uint8_t RestorePersistedLfgRoles(openwow::game::WorldSession *session) {
+  const auto roles = ReadPersistedLfgRoles(session);
+  auto &lfg = ::openwow::game::LFGSystem::Get();
+  if (lfg.GetRoles() != roles) {
+    lfg.SetRoles(roles);
+  }
+  return roles;
+}
+
+void PersistLfgRoles(const std::uint8_t roles) {
+  (void)CVarSystem::Instance().SetCVar(kLfgSelectedRolesCVar,
+                                      std::to_string(roles), true);
 }
 
 struct LfgRoleCheckThrottleState {
@@ -780,7 +801,7 @@ bool TrySendLfgJoin(lua_State *L, openwow::game::WorldSession &session,
     return false;
   }
 
-  const auto roles = FilterSelectedRolesForSession(&session, lfg.GetRoles());
+  const auto roles = RestorePersistedLfgRoles(&session);
   if ((roles & kLfgCombatRoleMask) == 0) {
     DisplaySystemMessage(kLfgRoleSelectionRequiredMessage);
     return false;
@@ -1470,11 +1491,10 @@ int LuaCompleteLFGRoleCheck(lua_State *L) {
     return 0;
   }
 
-  auto &lfg = ::openwow::game::LFGSystem::Get();
   std::uint8_t roles = 0;
 
   if (ScriptReadBoolArgOrDefault(L, 1, false)) {
-    roles = FilterSelectedRolesForSession(session, lfg.GetRoles());
+    roles = RestorePersistedLfgRoles(session);
     if ((roles & kLfgCombatRoleMask) == 0) {
       DisplaySystemMessage(kLfgRoleSelectionRequiredMessage);
       lua_pushwowbool(L, false);
@@ -1506,6 +1526,7 @@ int LuaSetLFGRoles(lua_State *L) {
   const auto filtered_mask = FilterSelectedRolesForSession(session, mask);
   auto &lfg = ::openwow::game::LFGSystem::Get();
   lfg.SetRoles(filtered_mask);
+  PersistLfgRoles(filtered_mask);
 
   if (auto *dispatcher = GetEvents(L)) {
     dispatcher->FireEvent(openwow::ui::game::events::LFG_ROLE_UPDATE);
@@ -1530,7 +1551,7 @@ int LuaGetLFGRoles(lua_State *L) {
     return 4;
   }
 
-  const std::uint8_t mask = ::openwow::game::LFGSystem::Get().GetRoles();
+  const std::uint8_t mask = RestorePersistedLfgRoles(GetWorldSession(L));
   FrameScript_PushBoolean(L, (mask & kLfgLeaderRoleMask) != 0);
   FrameScript_PushBoolean(L, (mask & kLfgTankRoleMask) != 0);
   FrameScript_PushBoolean(L, (mask & kLfgHealerRoleMask) != 0);

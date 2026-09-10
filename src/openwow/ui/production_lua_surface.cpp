@@ -61,6 +61,7 @@
 #include "openwow/ui/display/settings/adapters/production_display_settings_runtime.h"
 #include "openwow/ui/frame_script_standard_globals.h"
 #include "openwow/ui/game/api/game_lua_api_globals.h"
+#include "openwow/ui/game/api/openwow_encounter_journal_lua.h"
 #include "openwow/game/actions/macros/adapters/lua/macro_lua_api.h"
 #include "openwow/ui/game/runtime/world_lua_runtime.h"
 #include "openwow/ui/game/secure_execution.h"
@@ -203,11 +204,12 @@ std::vector<lua::NativeBindingCatalog> WorldNativeModuleCatalogs(
   catalogs.reserve(plan.before_frame_script_types.size() +
                    shared_type_modules.size() +
                    world_widget_subtype_modules.size() +
-                   plan.after_frame_script_types.size());
+                   plan.after_frame_script_types.size() + 1u);
   AppendCatalogs(catalogs, std::move(plan.before_frame_script_types));
   AppendCatalogs(catalogs, std::move(shared_type_modules));
   AppendCatalogs(catalogs, std::move(world_widget_subtype_modules));
   AppendCatalogs(catalogs, std::move(plan.after_frame_script_types));
+  AppendCatalog(catalogs, game::EncounterJournalNativeBindingCatalog());
   return catalogs;
 }
 

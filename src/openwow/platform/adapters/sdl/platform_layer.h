@@ -11,7 +11,8 @@ enum class PlatformOS : uint8_t {
     Windows = 0,
     MacOS   = 1,
     Linux   = 2,
-    Unknown = 3
+    iOS     = 3,
+    Unknown = 4
 };
 
 enum class PlatformArch : uint8_t {

@@ -50,6 +50,9 @@ struct ObjectPresentationRecord {
   std::uint32_t level{0};
   std::uint32_t movement_flags{0};
   std::uint32_t mount_display_id{0};
+  std::uint16_t mount_animation_id{render::AnimId::kStand};
+  bool mount_animation_looping{true};
+  std::uint64_t mount_animation_serial{1u};
   std::uint32_t unit_flags{0};
   std::uint32_t unit_flags2{0};
   std::uint32_t creature_type{0};

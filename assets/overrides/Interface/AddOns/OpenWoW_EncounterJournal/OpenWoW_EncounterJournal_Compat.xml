@@ -1,0 +1,377 @@
+<Ui xmlns="http://www.blizzard.com/wow/ui/"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.blizzard.com/wow/ui/ ..\FrameXML\UI.xsd">
+    <!-- Shared FrameXML pieces introduced between 3.3.5a and 4.3.4. -->
+    <Font name="QuestFont_Super_Huge" inherits="GameFontNormalHuge" virtual="true">
+        <FontHeight><AbsValue val="24"/></FontHeight>
+        <Color r="1" g=".82" b="0"/>
+    </Font>
+    <Font name="GameFontNormalMed3" inherits="GameFontNormal" virtual="true">
+        <FontHeight><AbsValue val="14"/></FontHeight>
+        <Shadow><Offset><AbsDimension x="1" y="-1"/></Offset><Color r="0" g="0" b="0"/></Shadow>
+        <Color r="1" g=".82" b="0"/>
+    </Font>
+    <Font name="GameFontNormalLarge2" inherits="GameFontNormalLarge" virtual="true">
+        <FontHeight><AbsValue val="16"/></FontHeight>
+        <Shadow><Offset><AbsDimension x="1" y="-1"/></Offset><Color r="0" g="0" b="0"/></Shadow>
+        <Color r="1" g=".82" b="0"/>
+    </Font>
+    <Font name="QuestTitleFontBlackShadow" inherits="GameFontNormalLarge" virtual="true">
+        <FontHeight><AbsValue val="18"/></FontHeight>
+        <Shadow><Offset><AbsDimension x="1" y="-1"/></Offset><Color r="0" g="0" b="0"/></Shadow>
+        <Color r="1" g=".82" b="0"/>
+    </Font>
+
+    <Texture name="UI-Frame-Portrait" file="Interface\FrameGeneral\UI-Frame" virtual="true">
+        <Size x="78" y="78"/>
+        <TexCoords left="0.00781250" right="0.61718750" top="0.00781250" bottom="0.61718750"/>
+    </Texture>
+    <Texture name="UI-Frame-TopCornerRight" file="Interface\FrameGeneral\UI-Frame" virtual="true">
+        <Size x="33" y="33"/>
+        <TexCoords left="0.63281250" right="0.89062500" top="0.00781250" bottom="0.26562500"/>
+    </Texture>
+    <Texture name="UI-Frame-InnerTopRight" file="Interface\FrameGeneral\UI-Frame" virtual="true">
+        <Size x="6" y="6"/>
+        <TexCoords left="0.90625000" right="0.95312500" top="0.21875000" bottom="0.26562500"/>
+    </Texture>
+    <Texture name="UI-Frame-TopLeftCorner" file="Interface\FrameGeneral\UI-Frame" virtual="true">
+        <Size x="32" y="32"/>
+        <TexCoords left="0.63281250" right="0.88281250" top="0.28125000" bottom="0.53125000"/>
+    </Texture>
+    <Texture name="UI-Frame-InnerTopLeft" file="Interface\FrameGeneral\UI-Frame" virtual="true">
+        <Size x="6" y="6"/>
+        <TexCoords left="0.63281250" right="0.67968750" top="0.54687500" bottom="0.59375000"/>
+    </Texture>
+    <Texture name="UI-Frame-InnerBotLeftCorner" file="Interface\FrameGeneral\UI-Frame" virtual="true">
+        <Size x="6" y="6"/>
+        <TexCoords left="0.69531250" right="0.74218750" top="0.54687500" bottom="0.59375000"/>
+    </Texture>
+    <Texture name="UI-Frame-InnerBotRight" file="Interface\FrameGeneral\UI-Frame" virtual="true">
+        <Size x="6" y="6"/>
+        <TexCoords left="0.75781250" right="0.80468750" top="0.54687500" bottom="0.59375000"/>
+    </Texture>
+    <Texture name="UI-Frame-BotCornerLeft" file="Interface\FrameGeneral\UI-Frame" virtual="true">
+        <Size x="14" y="14"/>
+        <TexCoords left="0.00781250" right="0.11718750" top="0.63281250" bottom="0.74218750"/>
+    </Texture>
+    <Texture name="UI-Frame-BotCornerRight" file="Interface\FrameGeneral\UI-Frame" virtual="true">
+        <Size x="11" y="11"/>
+        <TexCoords left="0.13281250" right="0.21875000" top="0.89843750" bottom="0.98437500"/>
+    </Texture>
+    <Texture name="UI-Frame-TopCornerLeft" file="Interface\FrameGeneral\UI-Frame" virtual="true">
+        <Size x="14" y="14"/>
+        <TexCoords left="0.00781250" right="0.11718750" top="0.74218750" bottom="0.63281250"/>
+    </Texture>
+    <Texture name="UI-Frame-TopCornerRightSimple" file="Interface\FrameGeneral\UI-Frame" virtual="true">
+        <Size x="11" y="11"/>
+        <TexCoords left="0.13281250" right="0.21875000" top="0.98437500" bottom="0.89843750"/>
+    </Texture>
+    <Texture name="!UI-Frame-InnerRightTile" file="Interface\FrameGeneral\!UI-Frame" virtual="true" vertTile="true">
+        <Size x="3" y="256"/>
+        <TexCoords left="0.01562500" right="0.06250000" top="0" bottom="1"/>
+    </Texture>
+    <Texture name="!UI-Frame-InnerLeftTile" file="Interface\FrameGeneral\!UI-Frame" virtual="true" vertTile="true">
+        <Size x="3" y="256"/>
+        <TexCoords left="0.09375000" right="0.14062500" top="0" bottom="1"/>
+    </Texture>
+    <Texture name="!UI-Frame-RightTile" file="Interface\FrameGeneral\!UI-Frame" virtual="true" vertTile="true">
+        <Size x="10" y="256"/>
+        <TexCoords left="0.17187500" right="0.32812500" top="0" bottom="1"/>
+    </Texture>
+    <Texture name="!UI-Frame-LeftTile" file="Interface\FrameGeneral\!UI-Frame" virtual="true" vertTile="true">
+        <Size x="16" y="256"/>
+        <TexCoords left="0.35937500" right="0.60937500" top="0" bottom="1"/>
+    </Texture>
+    <Texture name="_UI-Frame-InnerBotTile" file="Interface\FrameGeneral\_UI-Frame" virtual="true" horizTile="true">
+        <Size x="256" y="3"/>
+        <TexCoords left="0" right="1" top="0.00781250" bottom="0.03125000"/>
+    </Texture>
+    <Texture name="_UI-Frame-InnerTopTile" file="Interface\FrameGeneral\_UI-Frame" virtual="true" horizTile="true">
+        <Size x="256" y="3"/>
+        <TexCoords left="0" right="1" top="0.08593750" bottom="0.10937500"/>
+    </Texture>
+    <Texture name="_UI-Frame-Bot" file="Interface\FrameGeneral\_UI-Frame" virtual="true" horizTile="true">
+        <Size x="256" y="9"/>
+        <TexCoords left="0" right="1" top="0.20312500" bottom="0.27343750"/>
+    </Texture>
+    <Texture name="_UI-Frame-Top" file="Interface\FrameGeneral\_UI-Frame" virtual="true" horizTile="true">
+        <Size x="256" y="9"/>
+        <TexCoords left="0" right="1" top="0.27343750" bottom="0.20312500"/>
+    </Texture>
+    <Texture name="_UI-Frame-TitleTileBg" file="Interface\FrameGeneral\_UI-Frame" virtual="true" horizTile="true">
+        <Size x="256" y="17"/>
+        <TexCoords left="0" right="1" top="0.28906250" bottom="0.42187500"/>
+    </Texture>
+    <!-- The 4.3.4 PortraitFrame source refers to this spelling. -->
+    <Texture name="_UI-Frame-TitleTileBG" inherits="_UI-Frame-TitleTileBg" virtual="true"/>
+    <Texture name="_UI-Frame-TitleTile" file="Interface\FrameGeneral\_UI-Frame" virtual="true" horizTile="true">
+        <Size x="256" y="28"/>
+        <TexCoords left="0" right="1" top="0.43750000" bottom="0.65625000"/>
+    </Texture>
+    <Texture name="_UI-Frame-TopTileStreaks" file="Interface\FrameGeneral\_UI-Frame" virtual="true" horizTile="true">
+        <Size x="256" y="37"/>
+        <TexCoords left="0" right="1" top="0.67187500" bottom="0.96093750"/>
+    </Texture>
+
+    <Frame name="PortraitFrameTemplate" virtual="true" mixin="OpenWoWPortraitFrameMixin">
+        <Size x="338" y="424"/>
+        <Layers>
+            <Layer level="BACKGROUND" textureSubLevel="-6">
+                <Texture name="$parentBg" file="Interface\FrameGeneral\UI-Background-Rock" horizTile="true" vertTile="true">
+                    <Anchors><Anchor point="TOPLEFT" x="2" y="-21"/><Anchor point="BOTTOMRIGHT" x="-2" y="2"/></Anchors>
+                </Texture>
+                <Texture name="$parentTitleBg" inherits="_UI-Frame-TitleTileBG">
+                    <Anchors><Anchor point="TOPLEFT" x="2" y="-3"/><Anchor point="TOPRIGHT" x="-25" y="-3"/></Anchors>
+                </Texture>
+            </Layer>
+            <Layer level="OVERLAY" textureSubLevel="-1">
+                <Texture name="$parentPortrait" parentKey="portrait">
+                    <Size x="60" y="60"/><Anchors><Anchor point="TOPLEFT" x="-6" y="7"/></Anchors>
+                </Texture>
+            </Layer>
+            <Layer level="OVERLAY">
+                <Texture name="$parentPortraitFrame" inherits="UI-Frame-Portrait" parentKey="portraitFrame">
+                    <Anchors><Anchor point="TOPLEFT" x="-14" y="11"/></Anchors>
+                </Texture>
+                <Texture name="$parentTopRightCorner" inherits="UI-Frame-TopCornerRight">
+                    <Anchors><Anchor point="TOPRIGHT" x="0" y="1"/></Anchors>
+                </Texture>
+                <Texture name="$parentTopLeftCorner" inherits="UI-Frame-TopLeftCorner" hidden="true" parentKey="topLeftCorner">
+                    <Anchors><Anchor point="TOPLEFT" x="-6" y="1"/></Anchors>
+                </Texture>
+                <Texture name="$parentTopBorder" inherits="_UI-Frame-TitleTile" parentKey="topBorderBar">
+                    <Anchors>
+                        <Anchor point="TOPLEFT" relativeTo="$parentPortraitFrame" relativePoint="TOPRIGHT" x="0" y="-10"/>
+                        <Anchor point="TOPRIGHT" relativeTo="$parentTopRightCorner" relativePoint="TOPLEFT"/>
+                    </Anchors>
+                </Texture>
+                <FontString name="$parentTitleText" inherits="GameFontNormal" text="" parentKey="TitleText">
+                    <Anchors><Anchor point="TOP" x="0" y="-4"/><Anchor point="LEFT" x="60"/><Anchor point="RIGHT" x="-60"/></Anchors>
+                </FontString>
+            </Layer>
+            <Layer level="BORDER">
+                <Texture name="$parentTopTileStreaks" inherits="_UI-Frame-TopTileStreaks" parentKey="TopTileStreaks">
+                    <Anchors><Anchor point="TOPLEFT" x="0" y="-21"/><Anchor point="TOPRIGHT" x="-2" y="-21"/></Anchors>
+                </Texture>
+                <Texture name="$parentBotLeftCorner" inherits="UI-Frame-BotCornerLeft">
+                    <Anchors><Anchor point="BOTTOMLEFT" x="-6" y="-5"/></Anchors>
+                </Texture>
+                <Texture name="$parentBotRightCorner" inherits="UI-Frame-BotCornerRight">
+                    <Anchors><Anchor point="BOTTOMRIGHT" x="0" y="-5"/></Anchors>
+                </Texture>
+                <Texture name="$parentBottomBorder" inherits="_UI-Frame-Bot">
+                    <Anchors>
+                        <Anchor point="BOTTOMLEFT" relativeTo="$parentBotLeftCorner" relativePoint="BOTTOMRIGHT"/>
+                        <Anchor point="BOTTOMRIGHT" relativeTo="$parentBotRightCorner" relativePoint="BOTTOMLEFT"/>
+                    </Anchors>
+                </Texture>
+                <Texture name="$parentLeftBorder" inherits="!UI-Frame-LeftTile" parentKey="leftBorderBar">
+                    <Anchors>
+                        <Anchor point="TOPLEFT" relativeTo="$parentPortraitFrame" relativePoint="BOTTOMLEFT" x="8"/>
+                        <Anchor point="BOTTOMLEFT" relativeTo="$parentBotLeftCorner" relativePoint="TOPLEFT"/>
+                    </Anchors>
+                </Texture>
+                <Texture name="$parentRightBorder" inherits="!UI-Frame-RightTile">
+                    <Anchors>
+                        <Anchor point="TOPRIGHT" relativeTo="$parentTopRightCorner" relativePoint="BOTTOMRIGHT" x="1"/>
+                        <Anchor point="BOTTOMRIGHT" relativeTo="$parentBotRightCorner" relativePoint="TOPRIGHT"/>
+                    </Anchors>
+                </Texture>
+            </Layer>
+        </Layers>
+        <Frames>
+            <Button name="$parentCloseButton" inherits="UIPanelCloseButton">
+                <Anchors><Anchor point="TOPRIGHT" x="4" y="5"/></Anchors>
+            </Button>
+        </Frames>
+    </Frame>
+
+    <Frame name="InsetFrameTemplate" virtual="true">
+        <Size x="64" y="64"/>
+        <Layers>
+            <Layer level="BACKGROUND" textureSubLevel="-5">
+                <Texture name="$parentBg" file="Interface\FrameGeneral\UI-Background-Marble" horizTile="true" vertTile="true" parentKey="Bg">
+                    <Anchors><Anchor point="TOPLEFT"/><Anchor point="BOTTOMRIGHT"/></Anchors>
+                </Texture>
+            </Layer>
+            <Layer level="BORDER" textureSubLevel="-5">
+                <Texture name="$parentInsetTopLeftCorner" inherits="UI-Frame-InnerTopLeft" parentKey="InsetBorderTopLeft">
+                    <Anchors><Anchor point="TOPLEFT" relativeTo="$parentBg"/></Anchors>
+                </Texture>
+                <Texture name="$parentInsetTopRightCorner" inherits="UI-Frame-InnerTopRight" parentKey="InsetBorderTopRight">
+                    <Anchors><Anchor point="TOPRIGHT" relativeTo="$parentBg"/></Anchors>
+                </Texture>
+                <Texture name="$parentInsetBotLeftCorner" inherits="UI-Frame-InnerBotLeftCorner" parentKey="InsetBorderBottomLeft">
+                    <Anchors><Anchor point="BOTTOMLEFT" relativeTo="$parentBg" y="-1"/></Anchors>
+                </Texture>
+                <Texture name="$parentInsetBotRightCorner" inherits="UI-Frame-InnerBotRight" parentKey="InsetBorderBottomRight">
+                    <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentBg" y="-1"/></Anchors>
+                </Texture>
+                <Texture name="$parentInsetTopBorder" inherits="_UI-Frame-InnerTopTile" parentKey="InsetBorderTop">
+                    <Anchors>
+                        <Anchor point="TOPLEFT" relativeTo="$parentInsetTopLeftCorner" relativePoint="TOPRIGHT"/>
+                        <Anchor point="TOPRIGHT" relativeTo="$parentInsetTopRightCorner" relativePoint="TOPLEFT"/>
+                    </Anchors>
+                </Texture>
+                <Texture name="$parentInsetBottomBorder" inherits="_UI-Frame-InnerBotTile" parentKey="InsetBorderBottom">
+                    <Anchors>
+                        <Anchor point="BOTTOMLEFT" relativeTo="$parentInsetBotLeftCorner" relativePoint="BOTTOMRIGHT"/>
+                        <Anchor point="BOTTOMRIGHT" relativeTo="$parentInsetBotRightCorner" relativePoint="BOTTOMLEFT"/>
+                    </Anchors>
+                </Texture>
+                <Texture name="$parentInsetLeftBorder" inherits="!UI-Frame-InnerLeftTile" parentKey="InsetBorderLeft">
+                    <Anchors>
+                        <Anchor point="TOPLEFT" relativeTo="$parentInsetTopLeftCorner" relativePoint="BOTTOMLEFT"/>
+                        <Anchor point="BOTTOMLEFT" relativeTo="$parentInsetBotLeftCorner" relativePoint="TOPLEFT"/>
+                    </Anchors>
+                </Texture>
+                <Texture name="$parentInsetRightBorder" inherits="!UI-Frame-InnerRightTile" parentKey="InsetBorderRight">
+                    <Anchors>
+                        <Anchor point="TOPRIGHT" relativeTo="$parentInsetTopRightCorner" relativePoint="BOTTOMRIGHT"/>
+                        <Anchor point="BOTTOMRIGHT" relativeTo="$parentInsetBotRightCorner" relativePoint="TOPRIGHT"/>
+                    </Anchors>
+                </Texture>
+            </Layer>
+        </Layers>
+    </Frame>
+
+    <ScrollFrame name="UIPanelScrollFrameCodeTemplate" virtual="true">
+        <Scripts>
+            <OnLoad>ScrollFrame_OnLoad(self);</OnLoad>
+            <OnScrollRangeChanged>ScrollFrame_OnScrollRangeChanged(self, xrange, yrange);</OnScrollRangeChanged>
+            <OnVerticalScroll>
+                local scrollbar = _G[self:GetName().."ScrollBar"];
+                scrollbar:SetValue(offset);
+                local min, max = scrollbar:GetMinMaxValues();
+                if offset == 0 then _G[scrollbar:GetName().."ScrollUpButton"]:Disable(); else _G[scrollbar:GetName().."ScrollUpButton"]:Enable(); end
+                if scrollbar:GetValue() == max then _G[scrollbar:GetName().."ScrollDownButton"]:Disable(); else _G[scrollbar:GetName().."ScrollDownButton"]:Enable(); end
+            </OnVerticalScroll>
+            <OnMouseWheel>ScrollFrameTemplate_OnMouseWheel(self, delta);</OnMouseWheel>
+        </Scripts>
+    </ScrollFrame>
+
+    <Slider name="MinimalScrollBarTemplate" virtual="true">
+        <Size x="22" y="0"/>
+        <Layers><Layer level="BACKGROUND"><Texture name="$parentTrack" parentKey="trackBG">
+            <Anchors><Anchor point="TOPLEFT" x="0" y="17"/><Anchor point="BOTTOMRIGHT" x="0" y="-17"/></Anchors>
+            <Color r="0" g="0" b="0" a="1"/>
+        </Texture></Layer></Layers>
+        <Frames>
+            <Button name="$parentScrollUpButton" inherits="UIPanelScrollUpButtonTemplate">
+                <Anchors><Anchor point="TOP" x="0" y="15"/></Anchors>
+                <Scripts><OnClick>local parent = self:GetParent(); local scrollStep = parent.scrollStep or (parent:GetHeight() / 2); parent:SetValue(parent:GetValue() - scrollStep); PlaySound("UChatScrollButton");</OnClick></Scripts>
+            </Button>
+            <Button name="$parentScrollDownButton" inherits="UIPanelScrollDownButtonTemplate">
+                <Anchors><Anchor point="BOTTOM" x="0" y="-15"/></Anchors>
+                <Scripts><OnClick>local parent = self:GetParent(); local scrollStep = parent.scrollStep or (parent:GetHeight() / 2); parent:SetValue(parent:GetValue() + scrollStep); PlaySound("UChatScrollButton");</OnClick></Scripts>
+            </Button>
+        </Frames>
+        <Scripts><OnValueChanged>self:GetParent():SetVerticalScroll(value);</OnValueChanged></Scripts>
+        <ThumbTexture name="$parentThumbTexture" inherits="UIPanelScrollBarButton" file="Interface\Buttons\UI-ScrollBar-Knob">
+            <Size x="18" y="24"/><TexCoords left="0.20" right="0.80" top="0.125" bottom="0.875"/>
+        </ThumbTexture>
+    </Slider>
+
+    <EditBox name="SearchBoxTemplate" inherits="InputBoxTemplate" autoFocus="false" virtual="true">
+        <Layers><Layer level="OVERLAY">
+            <Texture name="$parentSearchIcon" file="Interface\Common\UI-Searchbox-Icon" parentKey="searchIcon">
+                <Size x="14" y="14"/><Anchors><Anchor point="LEFT" x="4" y="-2"/></Anchors>
+            </Texture>
+        </Layer></Layers>
+        <Frames>
+            <Button name="$parentClearButton" parentKey="clearButton" hidden="true">
+                <Size x="17" y="17"/><Anchors><Anchor point="RIGHT" x="-3" y="0"/></Anchors>
+                <Layers><Layer level="ARTWORK"><Texture file="Interface\FriendsFrame\ClearBroadcastIcon" alpha="0.5" parentKey="texture">
+                    <Size x="17" y="17"/><Anchors><Anchor point="TOPLEFT"/></Anchors>
+                </Texture></Layer></Layers>
+                <Scripts>
+                    <OnEnter>self.texture:SetAlpha(1.0);</OnEnter>
+                    <OnLeave>self.texture:SetAlpha(0.5);</OnLeave>
+                    <OnMouseDown>if self:IsEnabled() then self.texture:SetPoint("TOPLEFT", 1, -1); end</OnMouseDown>
+                    <OnMouseUp>self.texture:SetPoint("TOPLEFT", 0, 0);</OnMouseUp>
+                    <OnClick>
+                        PlaySound("igMainMenuOptionCheckBoxOn");
+                        local editBox = self:GetParent();
+                        if editBox.clearFunc then editBox.clearFunc(editBox); end
+                        editBox:SetText("");
+                        if not editBox:HasFocus() then editBox:GetScript("OnEditFocusLost")(editBox); end
+                        editBox:ClearFocus();
+                    </OnClick>
+                </Scripts>
+            </Button>
+        </Frames>
+        <Scripts>
+            <OnLoad function="SearchBoxTemplate_OnLoad"/>
+            <OnEscapePressed function="EditBox_ClearFocus"/>
+            <OnEditFocusLost function="SearchBoxTemplate_OnEditFocusLost"/>
+            <OnEditFocusGained function="SerachBoxTemplate_OnEditFocusGained"/>
+        </Scripts>
+    </EditBox>
+
+    <Texture name="HybridScrollBarButton" virtual="true">
+        <TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/>
+    </Texture>
+    <Slider name="HybridScrollBarTrimTemplate" virtual="true">
+        <Size x="20" y="0"/>
+        <Anchors><Anchor point="TOPLEFT" relativePoint="TOPRIGHT" x="0" y="-18"/><Anchor point="BOTTOMLEFT" relativePoint="BOTTOMRIGHT" x="0" y="16"/></Anchors>
+        <Layers>
+            <Layer level="BACKGROUND"><Texture name="$parentBG" setAllPoints="true" hidden="true" parentKey="trackBG"><Color r="0" g="0" b="0" a=".85"/></Texture></Layer>
+            <Layer level="ARTWORK">
+                <Texture name="$parentTop" file="Interface\PaperDollInfoFrame\UI-Character-ScrollBar">
+                    <Size x="24" y="48"/><Anchors><Anchor point="TOPLEFT" x="-4" y="17"/></Anchors><TexCoords left="0" right="0.45" top="0" bottom=".20"/>
+                </Texture>
+                <Texture name="$parentBottom" file="Interface\PaperDollInfoFrame\UI-Character-ScrollBar">
+                    <Size x="24" y="64"/><Anchors><Anchor point="BOTTOMLEFT" x="-4" y="-15"/></Anchors><TexCoords left="0.515625" right="0.97" top="0.1440625" bottom="0.4140625"/>
+                </Texture>
+                <Texture name="$parentMiddle" file="Interface\PaperDollInfoFrame\UI-Character-ScrollBar">
+                    <Anchors><Anchor point="TOPLEFT" relativeTo="$parentTop" relativePoint="BOTTOMLEFT"/><Anchor point="BOTTOMRIGHT" relativeTo="$parentBottom" relativePoint="TOPRIGHT"/></Anchors>
+                    <TexCoords left="0" right="0.45" top="0.1640625" bottom="1"/>
+                </Texture>
+            </Layer>
+        </Layers>
+        <Frames>
+            <Button name="$parentScrollUpButton" inherits="UIPanelScrollUpButtonTemplate">
+                <Anchors><Anchor point="BOTTOM" relativePoint="TOP" x="0" y="-2"/></Anchors>
+                <Scripts><OnLoad>self:GetParent():GetParent().scrollUp = self; self:Disable(); self:RegisterForClicks("LeftButtonUp", "LeftButtonDown"); self.direction = 1;</OnLoad><OnClick>HybridScrollFrameScrollButton_OnClick(self, button, down);</OnClick></Scripts>
+            </Button>
+            <Button name="$parentScrollDownButton" inherits="UIPanelScrollDownButtonTemplate">
+                <Anchors><Anchor point="TOP" relativePoint="BOTTOM" x="0" y="2"/></Anchors>
+                <Scripts><OnLoad>self:GetParent():GetParent().scrollDown = self; self:Disable(); self:RegisterForClicks("LeftButtonUp", "LeftButtonDown"); self.direction = -1;</OnLoad><OnClick>HybridScrollFrameScrollButton_OnClick(self, button, down);</OnClick></Scripts>
+            </Button>
+        </Frames>
+        <Scripts><OnLoad>self:GetParent().scrollBar = self;</OnLoad><OnValueChanged>HybridScrollFrame_OnValueChanged(self:GetParent(), value);</OnValueChanged></Scripts>
+        <ThumbTexture name="$parentThumbTexture" inherits="HybridScrollBarButton" file="Interface\Buttons\UI-ScrollBar-Knob" parentKey="thumbTexture">
+            <Size x="18" y="24"/><TexCoords left="0.20" right="0.80" top="0.125" bottom="0.875"/>
+        </ThumbTexture>
+    </Slider>
+
+    <Slider name="MinimalHybridScrollBarTemplate" virtual="true">
+        <Size x="22" y="0"/>
+        <Layers><Layer level="BACKGROUND"><Texture name="$parentTrack" parentKey="trackBG">
+            <Anchors><Anchor point="TOPLEFT" x="0" y="17"/><Anchor point="BOTTOMRIGHT" x="0" y="-17"/></Anchors><Color r="0" g="0" b="0" a="1"/>
+        </Texture></Layer></Layers>
+        <Frames>
+            <Button name="$parentScrollUpButton" inherits="UIPanelScrollUpButtonTemplate">
+                <Anchors><Anchor point="TOP" x="0" y="15"/></Anchors>
+                <Scripts><OnLoad>self:GetParent():GetParent().scrollUp = self; self:Disable(); self:RegisterForClicks("LeftButtonUp", "LeftButtonDown"); self.direction = 1;</OnLoad><OnClick>HybridScrollFrameScrollButton_OnClick(self, button, down);</OnClick></Scripts>
+            </Button>
+            <Button name="$parentScrollDownButton" inherits="UIPanelScrollDownButtonTemplate">
+                <Anchors><Anchor point="BOTTOM" x="0" y="-15"/></Anchors>
+                <Scripts><OnLoad>self:GetParent():GetParent().scrollDown = self; self:Disable(); self:RegisterForClicks("LeftButtonUp", "LeftButtonDown"); self.direction = -1;</OnLoad><OnClick>HybridScrollFrameScrollButton_OnClick(self, button, down);</OnClick></Scripts>
+            </Button>
+        </Frames>
+        <Scripts><OnLoad>self:GetParent().scrollBar = self;</OnLoad><OnValueChanged>HybridScrollFrame_OnValueChanged(self:GetParent(), value);</OnValueChanged></Scripts>
+        <ThumbTexture name="$parentThumbTexture" inherits="HybridScrollBarButton" file="Interface\Buttons\UI-ScrollBar-Knob" parentKey="thumbTexture">
+            <Size x="18" y="24"/><TexCoords left="0.20" right="0.80" top="0.125" bottom="0.875"/>
+        </ThumbTexture>
+    </Slider>
+
+    <ScrollFrame name="HybridScrollFrameTemplate" virtual="true">
+        <Scripts><OnLoad>HybridScrollFrame_OnLoad(self);</OnLoad><OnMouseWheel>HybridScrollFrame_OnMouseWheel(self, delta);</OnMouseWheel></Scripts>
+        <ScrollChild><Frame name="$parentScrollChild"><Scripts><OnLoad>HybridScrollFrameScrollChild_OnLoad(self);</OnLoad></Scripts></Frame></ScrollChild>
+    </ScrollFrame>
+
+    <!-- ModelFrames.xml carries unrelated character-preview behavior. The
+         journal only requires the shared PlayerModel base contract. -->
+    <PlayerModel name="ModelTemplate" virtual="true"/>
+</Ui>

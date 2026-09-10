@@ -208,6 +208,19 @@ int SetTypedLuaScriptRegionShown(lua_State *L, const char *expected_type,
   return 0;
 }
 
+int LuaRegion_SetShown(lua_State *L) {
+  const int self_index = ValidateFrameScriptSelf(L);
+  const bool shown = lua_toboolean(L, 2) != 0;
+
+  lua_getfield(L, self_index, shown ? "Show" : "Hide");
+  if (lua_isfunction(L, -1) == 0) {
+    return luaL_error(L, "Wrong object type for member function");
+  }
+  lua_pushvalue(L, self_index);
+  lua_call(L, 1, 0);
+  return 0;
+}
+
 int ValidateFrameSelf(lua_State *L) {
   return ValidateFrameObjectSelf(L, "Frame");
 }

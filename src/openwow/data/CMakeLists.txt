@@ -25,6 +25,7 @@ openwow_add_component(openwow_data_runtime
   wdb_cache.cpp
   wdb_persistence.cpp
   texture_cache.cpp
+  derived_texture_cache.cpp
   blp/blp_texture_loader.cpp
   spell_dbc_store.cpp
   cache/quest_cache_record.cpp

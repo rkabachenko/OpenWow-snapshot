@@ -188,7 +188,7 @@ public:
   void SynchronizeUnitTransportPassengerMembership(
       const CGUnit_C &unit, const MovementInfo &previous_movement);
 
-  void AdvanceSplineMovement(world::MovementSplineManager &spline_manager);
+  void AdvanceSplineMovement(WorldSession &session, std::uint32_t current_tick_ms);
   void AdvanceMovementEvents(WorldSession &session,
                              std::uint32_t current_tick_ms);
   void AdvanceVisualState(std::uint32_t current_tick_ms, float elapsed_seconds);
@@ -450,8 +450,15 @@ private:
     std::optional<FieldUpdateBatch> changed_fields;
   };
 
+  struct DeferredPrepassCreate {
+    ObjectGuid guid;
+    FieldUpdateBatch changed_fields;
+  };
+
   std::vector<DeferredPrepassValues> deferred_prepass_values_;
   std::size_t deferred_prepass_values_cursor_{0};
+  std::vector<DeferredPrepassCreate> deferred_prepass_creates_;
+  std::size_t deferred_prepass_creates_cursor_{0};
   ObjectGuid local_player_guid_;
   ObjectGuid active_player_corpse_guid_;
   ObjectGuid target_;
@@ -478,6 +485,8 @@ private:
   void DestroyActiveObject(ObjectGuid guid, bool destroy_packet_death_cleanup);
   [[nodiscard]] std::optional<std::uint16_t>
   ResolveFieldCountForTrackedObject(ObjectGuid guid) const;
+  [[nodiscard]] bool ValidateUpdateObjectPacketBeforeMutation(
+      const std::uint8_t *data, std::size_t len) const;
   [[nodiscard]] bool PreallocateCreateObjects(const std::uint8_t *data, std::size_t len,
                                               std::vector<ObjectGuid> &created_shells);
   void ClearPreallocatedCreateMarkers(const std::vector<ObjectGuid> &created_shells);
@@ -500,6 +509,8 @@ private:
       CGObject_C &object, const CreateObjectUpdate &upd);
 
   void OnCreate(const CreateObjectUpdate &upd);
+  [[nodiscard]] std::optional<FieldUpdateBatch>
+  ConsumeDeferredPrepassCreate(ObjectGuid guid);
   void ApplyPrepassValues(const ValuesUpdate &upd);
   [[nodiscard]] std::optional<FieldUpdateBatch>
   ConsumeDeferredPrepassValues(ObjectGuid guid);

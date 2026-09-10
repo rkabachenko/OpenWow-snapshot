@@ -2,6 +2,7 @@
 
 #include "openwow/data/model/m2_external_sequence_tracks.h"
 #include "openwow/foundation/diagnostics/logging.h"
+#include "openwow/core/platform_runtime_policy.h"
 #include "openwow/runtime/scheduling/thread_pool_system.h"
 
 #include <algorithm>
@@ -81,8 +82,11 @@ struct M2SequenceStreamer::Impl {
 
     if (!pool_initialized) {
       const std::uint32_t hardware_threads = std::thread::hardware_concurrency();
+      constexpr auto runtime_policy =
+          openwow::core::GetPlatformRuntimePolicy();
       const std::uint32_t worker_count = std::clamp(
-          hardware_threads == 0u ? 2u : hardware_threads / 2u, 2u, 4u);
+          hardware_threads == 0u ? 2u : hardware_threads / 2u, 1u,
+          runtime_policy.resource_worker_limit);
       pool.Initialize(worker_count);
       pool_initialized = true;
     }

@@ -43,7 +43,7 @@ struct RectDDC {
 
 using ResolvedRectMap = std::unordered_map<std::string_view, RectDDC>;
 
-void ApplyScreenClamp(const UiFrame &frame, float viewport_width, float viewport_height,
+void ApplyScreenClamp(const UiFrame &frame, const RectDDC& bounds,
                       float effective_scale, RectDDC *rect) {
   if (rect == nullptr || !frame.clamped_to_screen.value_or(false)) {
     return;
@@ -57,10 +57,10 @@ void ApplyScreenClamp(const UiFrame &frame, float viewport_width, float viewport
   };
   openwow::ui::ClampRectEdgesYUpPreservingSpan(
       &edges, openwow::ui::RectBoundsYUp{
-                  .min_x = -(frame.clamp_rect_inset_left * effective_scale),
-                  .min_y = -(frame.clamp_rect_inset_bottom * effective_scale),
-                  .max_x = viewport_width - frame.clamp_rect_inset_right * effective_scale,
-                  .max_y = viewport_height - frame.clamp_rect_inset_top * effective_scale,
+                  .min_x = bounds.min_x - frame.clamp_rect_inset_left * effective_scale,
+                  .min_y = bounds.min_y - frame.clamp_rect_inset_bottom * effective_scale,
+                  .max_x = bounds.max_x - frame.clamp_rect_inset_right * effective_scale,
+                  .max_y = bounds.max_y - frame.clamp_rect_inset_top * effective_scale,
               });
   rect->min_x = edges.left;
   rect->min_y = edges.top;
@@ -73,9 +73,6 @@ bool IsDefined(float v) {
 }
 
 float SynthesizeHorizontalSide(float center, float opposite, float size) {
-  if (IsDefined(center) && IsDefined(opposite)) {
-    return center + center - opposite;
-  }
   if (IsDefined(opposite) && size != 0.0F) {
     return opposite + size;
   }
@@ -123,7 +120,12 @@ bool ShouldDumpLayoutTrace() {
 std::optional<RectDDC> ResolveRectDDC(const UiFrame &frame,
                                       const ResolvedRectMap &out,
                                       float viewport_width, float viewport_height,
-                                      float effective_scale) {
+                                      float effective_scale, const RectDDC& hud_bounds) {
+  const RectDDC full_viewport{0.0F, 0.0F, viewport_width, viewport_height};
+  const bool world_frame = openwow::text::EqualsIgnoreCaseAscii(frame.kind, "WorldFrame");
+  const bool full_world_root = world_frame &&
+      (hud_bounds.min_x != 0.0F || hud_bounds.min_y != 0.0F ||
+       hud_bounds.max_x != viewport_width || hud_bounds.max_y != viewport_height);
   const auto apply_layout_offset = [&](RectDDC rect) {
     const float offset_x = frame.layout_offset_x * effective_scale;
     const float offset_y = frame.layout_offset_y * effective_scale;
@@ -138,6 +140,9 @@ std::optional<RectDDC> ResolveRectDDC(const UiFrame &frame,
     const std::string_view target =
         openwow::ui::framexml::detail::SetAllPointsTargetName(frame);
 
+    if (full_world_root && target == "UIParent") {
+      return apply_layout_offset(full_viewport);
+    }
     const auto it = out.find(target);
     if (it == out.end()) {
 
@@ -163,8 +168,13 @@ std::optional<RectDDC> ResolveRectDDC(const UiFrame &frame,
     return false;
   };
   const auto lookup_anchor_rect =
-      [&out](
+      [&out, full_world_root, &full_viewport](
           const std::string_view name) -> std::optional<openwow::ui::framexml::detail::AnchorRect> {
+    if (full_world_root && name == "UIParent") {
+      return openwow::ui::framexml::detail::AnchorRect{
+          full_viewport.min_x, full_viewport.min_y,
+          full_viewport.max_x, full_viewport.max_y};
+    }
     const auto it = out.find(name);
     if (it == out.end()) {
       return std::nullopt;
@@ -233,18 +243,18 @@ std::optional<RectDDC> ResolveRectDDC(const UiFrame &frame,
   if (width <= 0.0f && frame.rel_width.has_value()) {
     const std::string_view parent_name =
         frame.parent.empty() ? std::string_view{"UIParent"} : frame.parent;
-    const auto parent_it = out.find(parent_name);
-    if (parent_it != out.end()) {
-      const float parent_w = parent_it->second.max_x - parent_it->second.min_x;
+    const auto parent_rect = lookup_anchor_rect(parent_name);
+    if (parent_rect.has_value()) {
+      const float parent_w = parent_rect->max_x - parent_rect->min_x;
       width = parent_w * frame.rel_width.value();
     }
   }
   if (height <= 0.0f && frame.rel_height.has_value()) {
     const std::string_view parent_name =
         frame.parent.empty() ? std::string_view{"UIParent"} : frame.parent;
-    const auto parent_it = out.find(parent_name);
-    if (parent_it != out.end()) {
-      const float parent_h = parent_it->second.max_y - parent_it->second.min_y;
+    const auto parent_rect = lookup_anchor_rect(parent_name);
+    if (parent_rect.has_value()) {
+      const float parent_h = parent_rect->max_y - parent_rect->min_y;
       height = parent_h * frame.rel_height.value();
     }
   }
@@ -323,13 +333,34 @@ std::optional<RectDDC> ResolveRectDDC(const UiFrame &frame,
   if (rect.max_y < rect.min_y)
     std::swap(rect.max_y, rect.min_y);
   rect = apply_layout_offset(rect);
-  ApplyScreenClamp(frame, viewport_width, viewport_height, effective_scale, &rect);
+  ApplyScreenClamp(frame, world_frame ? full_viewport : hud_bounds, effective_scale, &rect);
   return rect;
 }
 
 void MergeFromTemplate(UiFrame *frame, const UiFrame &templ) {
   if (frame->parent.empty() && !templ.parent.empty()) {
     frame->parent = templ.parent;
+  }
+  if (frame->parent_keys.empty()) {
+    frame->parent_keys = templ.parent_keys;
+  } else if (!templ.parent_keys.empty()) {
+    auto merged = templ.parent_keys;
+    merged.insert(merged.end(), frame->parent_keys.begin(), frame->parent_keys.end());
+    frame->parent_keys = std::move(merged);
+  }
+  if (frame->parent_arrays.empty()) {
+    frame->parent_arrays = templ.parent_arrays;
+  } else if (!templ.parent_arrays.empty()) {
+    auto merged = templ.parent_arrays;
+    merged.insert(merged.end(), frame->parent_arrays.begin(), frame->parent_arrays.end());
+    frame->parent_arrays = std::move(merged);
+  }
+  if (frame->mixins.empty()) {
+    frame->mixins = templ.mixins;
+  } else if (!templ.mixins.empty()) {
+    auto merged = templ.mixins;
+    merged.insert(merged.end(), frame->mixins.begin(), frame->mixins.end());
+    frame->mixins = std::move(merged);
   }
   if (!frame->width.has_value() && templ.width.has_value()) {
     frame->width = templ.width;
@@ -518,7 +549,8 @@ void SolveExpandedLayout(
     const std::span<const UiFrame *const> frames, const int viewport_width,
     const int viewport_height, const float ui_scale,
     ResolvedRectMap *const ddc_out,
-    std::vector<std::optional<FrameRect>> *const positional_rects) {
+    std::vector<std::optional<FrameRect>> *const positional_rects,
+    const ViewportInsets insets, const float ui_parent_scale) {
   if (positional_rects != nullptr) {
     positional_rects->assign(frames.size(), std::nullopt);
   }
@@ -526,12 +558,12 @@ void SolveExpandedLayout(
   ResolvedRectMap &ddc = *ddc_out;
   ddc.reserve(frames.size() + 1);
 
-  ddc.insert_or_assign("UIParent", RectDDC{
-                                       .min_x = 0.0F,
-                                       .min_y = 0.0F,
-                                       .max_x = static_cast<float>(viewport_width),
-                                       .max_y = static_cast<float>(viewport_height),
-                                   });
+  const RectDDC hud_bounds{
+      .min_x = static_cast<float>(insets.left),
+      .min_y = static_cast<float>(insets.bottom),
+      .max_x = static_cast<float>(viewport_width - insets.right),
+      .max_y = static_cast<float>(viewport_height - insets.top)};
+  ddc.insert_or_assign("UIParent", hud_bounds);
 
   std::unordered_map<std::string_view, std::size_t> index_by_name;
   index_by_name.reserve(frames.size() * 2);
@@ -557,7 +589,7 @@ void SolveExpandedLayout(
       if (frame == nullptr) {
         break;
       }
-      eff *= frame->scale;
+      eff *= ResolveLocalFrameScale(frame->name, frame->scale, ui_parent_scale);
       current = frame->parent;
     }
     return eff;
@@ -594,6 +626,7 @@ void SolveExpandedLayout(
     scale_states[index] = ScaleResolveState::Visiting;
     const UiFrame& frame = *frames[index];
     float parent_scale = ui_scale;
+    if (frame.parent == "UIParent") parent_scale *= ui_parent_scale;
     if (!frame.parent.empty()) {
       if (const auto parent = index_by_name.find(frame.parent);
           parent != index_by_name.end()) {
@@ -606,7 +639,8 @@ void SolveExpandedLayout(
         parent_scale = effective_scales[parent->second];
       }
     }
-    effective_scales[index] = parent_scale * frame.scale;
+    effective_scales[index] = parent_scale *
+        ResolveLocalFrameScale(frame.name, frame.scale, ui_parent_scale);
     scale_states[index] = ScaleResolveState::Complete;
     return true;
   };
@@ -660,11 +694,15 @@ void SolveExpandedLayout(
                              : std::string_view{frame.parent});
     }
 
-    const auto rect = ResolveRectDDC(
-        frame, ddc, static_cast<float>(viewport_width),
-        static_cast<float>(viewport_height),
-        names_are_unique ? effective_scales[index]
-                         : compute_effective_scale(frame.name));
+    // The platform owns the inset root surface. Its children keep their
+    // authored anchors; normal desktop root semantics are unchanged.
+    const auto rect = frame.name == "UIParent" && insets != ViewportInsets{}
+        ? std::optional<RectDDC>(hud_bounds)
+        : ResolveRectDDC(
+              frame, ddc, static_cast<float>(viewport_width),
+              static_cast<float>(viewport_height),
+              names_are_unique ? effective_scales[index]
+                               : compute_effective_scale(frame.name), hud_bounds);
     if (rect.has_value()) {
       ddc.insert_or_assign(frame.name, *rect);
       if (positional_rects != nullptr) {
@@ -690,22 +728,24 @@ void SolveExpandedLayout(
 void ResolveExpandedLayoutInto(
     const std::span<const UiFrame *const> frames, const int viewport_width,
     const int viewport_height, const float ui_scale,
-    std::vector<std::optional<FrameRect>> *const out_rects) {
+    std::vector<std::optional<FrameRect>> *const out_rects,
+    const ViewportInsets insets, const float ui_parent_scale) {
   if (out_rects == nullptr) {
     return;
   }
   ResolvedRectMap ddc;
   SolveExpandedLayout(frames, viewport_width, viewport_height, ui_scale, &ddc,
-                      out_rects);
+                      out_rects, insets, ui_parent_scale);
 }
 
 openwow::ui::TransparentStringMap<FrameRect>
 ResolveExpandedLayout(const std::span<const UiFrame *const> frames,
                       const int viewport_width, const int viewport_height,
-                      const float ui_scale) {
+                      const float ui_scale, const ViewportInsets insets,
+                      const float ui_parent_scale) {
   ResolvedRectMap ddc;
   SolveExpandedLayout(frames, viewport_width, viewport_height, ui_scale, &ddc,
-                      nullptr);
+                      nullptr, insets, ui_parent_scale);
 
   openwow::ui::TransparentStringMap<FrameRect> out;
   out.reserve(frames.size() + 1);
@@ -721,7 +761,8 @@ ResolveExpandedLayout(const std::span<const UiFrame *const> frames,
 
 openwow::ui::TransparentStringMap<FrameRect> ResolveLayout(
     const std::vector<UiFrame> &frames, const int viewport_width,
-    const int viewport_height, const float ui_scale) {
+    const int viewport_height, const float ui_scale, const ViewportInsets insets,
+    const float ui_parent_scale) {
 
   auto expanded = frames;
   ResolveInheritance(&expanded);
@@ -731,7 +772,7 @@ openwow::ui::TransparentStringMap<FrameRect> ResolveLayout(
     expanded_frames.push_back(&frame);
   }
   return ResolveExpandedLayout(expanded_frames, viewport_width,
-                               viewport_height, ui_scale);
+                               viewport_height, ui_scale, insets, ui_parent_scale);
 }
 
 std::vector<UiFrame> SortByRenderOrder(const std::vector<UiFrame> &frames) {

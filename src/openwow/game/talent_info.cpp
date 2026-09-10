@@ -842,6 +842,10 @@ std::optional<TalentInfoEntry> TalentInfoStore::FindTalentDefinitionByID(
 }
 
 void TalentInfoStore::LoadFromDbc(const openwow::data::dbc::DbcLoader &dbc) {
+  initialized_ = false;
+  FreeTabArrays(false);
+  FreeTabArrays(true);
+  ClearInspectTabArray();
   ClearDBC();
 
   for (const auto &tab : dbc.talent_tab().entries()) {
@@ -960,6 +964,7 @@ uint32_t TalentInfoStore::GetActiveGroupIndex() const {
 }
 
 void TalentInfoStore::ShutdownClearGameUiData() {
+  initialized_ = false;
   FreeTabArrays(false);
   FreeTabArrays(true);
   ClearAllGroups(false);

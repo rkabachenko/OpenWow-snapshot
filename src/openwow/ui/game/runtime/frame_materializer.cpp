@@ -9,11 +9,13 @@
 #include "openwow/ui/game/framescript/core/frame_alpha.h"
 #include "openwow/ui/game/framescript/core/frame_region_factory.h"
 #include "openwow/ui/game/framescript/core/frame_runtime_identity.h"
+#include "openwow/ui/game/framescript/core/frame_script_invocation.h"
 #include "openwow/ui/game/framescript/core/lua_script_object_access.h"
 #include "openwow/ui/game/framescript/widgets/button_method_support.h"
 #include "openwow/ui/game/framescript/widgets/edit_box_methods.h"
 #include "openwow/ui/game/framescript/widgets/edit_box_state.h"
 #include "openwow/ui/game/runtime/frame_input_router.h"
+#include "openwow/ui/game/runtime/frame_script_handler_fields.h"
 #include "openwow/ui/game/runtime/frame_store.h"
 #include "openwow/ui/game/runtime/frame_template_expander.h"
 #include "openwow/ui/game/runtime/frame_traversal_index.h"
@@ -103,11 +105,33 @@ void InitializeRuntimeMetadata(UiFrame& frame) {
   frame.runtime_uses_mouse_wheel = false;
   frame.runtime_uses_keyboard = frame.enable_keyboard;
   for (const auto& handler : frame.script_handlers) {
-
+    frame.runtime_uses_mouse |= std::any_of(
+        runtime::kMouseCategoryHandlerFields.begin(),
+        runtime::kMouseCategoryHandlerFields.end(),
+        [&](const runtime::FrameScriptHandlerFields& input_handler) {
+          return openwow::text::EqualsIgnoreCaseAscii(
+              handler.event, input_handler.direct);
+        });
     frame.runtime_uses_mouse_wheel |=
         openwow::text::EqualsIgnoreCaseAscii(handler.event, "OnMouseWheel");
   }
   frame.runtime_state_initialized = true;
+}
+
+void ApplyImplicitAuthoredTextureGeometry(UiFrame& frame) {
+  if (openwow::ui::framexml::DeriveUiFrameRuntimeKind(frame.kind) !=
+          openwow::ui::framexml::UiFrame::RuntimeKind::Texture ||
+      frame.set_all_points || frame.set_all_points_explicit ||
+      !frame.anchors.empty() || frame.width.has_value() ||
+      frame.height.has_value() || frame.rel_width.has_value() ||
+      frame.rel_height.has_value()) {
+    return;
+  }
+
+  // Build 12340 makes an authored Texture with no explicit geometry fill its
+  // owner. Stock FrameXML relies on this for ItemButton icon regions and many
+  // other textures whose file is assigned later from Lua.
+  frame.set_all_points = true;
 }
 
 void LinkToParent(lua_State* state, int frame, int parent) {
@@ -140,9 +164,7 @@ void ResolveImplicitAnchors(lua_State* state, int frame_index, int parent_index,
   }
   const int anchors = lua_absindex(state, -1);
   for (std::size_t i = 0; i < frame.anchors.size(); ++i) {
-    if (frame.anchors[i].relative_to_explicit ||
-        !frame.anchors[i].relative_to.empty())
-      continue;
+    if (frame.anchors[i].relative_to_explicit) continue;
     lua_rawgeti(state, anchors, static_cast<lua_Integer>(i + 1));
     if (lua_istable(state, -1) != 0) {
       lua_pushvalue(state, parent_index);
@@ -254,24 +276,23 @@ void FrameMaterializer::SyncRuntimeMetadata(int frame_index, UiFrame& frame) {
     return result;
   };
   const auto has_handler = [&](const char* handler) {
-    std::string field = "__ow_script_";
-    field += handler;
-    lua_getfield(lua_, frame_index, field.c_str());
-    bool found = lua_isfunction(lua_, -1);
-    lua_pop(lua_, 1);
-    if (!found) {
-      lua_getfield(lua_, frame_index, handler);
-      found = lua_isfunction(lua_, -1);
-      lua_pop(lua_, 1);
-    }
+    const bool found = PushFrameScriptHandler(lua_, frame_index, handler);
+    if (found) lua_pop(lua_, 1);
     return found;
   };
   auto mouse = optional_boolean("__ow_mouse_enabled");
   if (!mouse.has_value()) mouse = optional_boolean("__ow_enableMouse");
 
+  const bool has_mouse_handler = std::any_of(
+      runtime::kMouseCategoryHandlerFields.begin(),
+      runtime::kMouseCategoryHandlerFields.end(),
+      [&](const runtime::FrameScriptHandlerFields& handler) {
+        return has_handler(handler.direct);
+      });
   frame.runtime_uses_mouse =
       mouse.value_or(
-          openwow::ui::framexml::StockConstructorEnablesMouse(frame.kind));
+          openwow::ui::framexml::StockConstructorEnablesMouse(frame.kind) ||
+          has_mouse_handler);
   frame.runtime_uses_mouse_wheel = optional_boolean("__ow_mousewheel_enabled")
                                        .value_or(has_handler("OnMouseWheel"));
   auto keyboard = optional_boolean("__ow_keyboard_enabled");
@@ -521,6 +542,9 @@ int FrameMaterializer::InstantiateFrameTree(UiFrame root,
   auto plan = BuildExpandedFramePlan(std::move(root), std::move(local_children),
                                      templates_, parent_scope);
   if (plan.frames.empty()) return LUA_NOREF;
+  for (auto& frame : plan.frames) {
+    ApplyImplicitAuthoredTextureGeometry(frame);
+  }
   ++metrics_.tree_plans;
   metrics_.tree_source_nodes += plan.source_nodes;
   metrics_.tree_inherited_nodes += plan.inherited_nodes;
@@ -598,7 +622,9 @@ int FrameMaterializer::InstantiateFrameTree(UiFrame root,
       }
     }
     if (plan.frames[i].region_role ==
-        UiFrame::RegionRole::MessageFontDefinition) {
+            UiFrame::RegionRole::MessageFontDefinition ||
+        plan.frames[i].region_role ==
+            UiFrame::RegionRole::SimpleHtmlFontDefinition) {
       const auto parent = plan.parents[i];
       if (parent < refs.size() && refs[parent] != LUA_NOREF) {
         const int top = lua_gettop(lua_);
@@ -624,6 +650,33 @@ int FrameMaterializer::InstantiateFrameTree(UiFrame root,
                                         parent_index != 0);
     if (parent_pushed) lua_pop(lua_, 1);
   }
+
+  // <ScrollChild> is structural FrameXML syntax rather than a runtime widget.
+  // Its direct child is already parented to the ScrollFrame and marked as part
+  // of the scroll subtree by the parser; publish the corresponding script
+  // object relationship so GetScrollChild() observes the authored child.
+  for (std::size_t owner = 0; owner < plan.frames.size(); ++owner) {
+    if (refs[owner] == LUA_NOREF ||
+        !openwow::text::EqualsIgnoreCaseAscii(plan.frames[owner].kind,
+                                              "ScrollFrame")) {
+      continue;
+    }
+    for (const std::size_t child : plan.children[owner]) {
+      if (child >= refs.size() || refs[child] == LUA_NOREF ||
+          plan.frames[child].scroll_child_membership_count <=
+              plan.frames[owner].scroll_child_membership_count) {
+        continue;
+      }
+      const int top = lua_gettop(lua_);
+      lua_rawgeti(lua_, LUA_REGISTRYINDEX, refs[owner]);
+      lua_rawgeti(lua_, LUA_REGISTRYINDEX, refs[child]);
+      if (lua_istable(lua_, -2) && lua_istable(lua_, -1)) {
+        lua_setfield(lua_, -2, "__ow_sf_child");
+      }
+      lua_settop(lua_, top);
+      break;
+    }
+  }
   if (record_default_declarations) {
     for (std::size_t i = 0; i < plan.frames.size(); ++i)
       if (refs[i] != LUA_NOREF && !plan.frames[i].name.empty())
@@ -635,6 +688,8 @@ int FrameMaterializer::InstantiateFrameTree(UiFrame root,
     std::size_t next_child;
   };
   std::vector<std::uint8_t> finalized(plan.frames.size());
+  std::vector<std::size_t> finalize_order;
+  finalize_order.reserve(plan.frames.size());
   std::vector<Cursor> stack;
   stack.reserve(plan.frames.size());
   for (std::size_t root_index = 0; root_index < plan.frames.size();
@@ -678,8 +733,14 @@ int FrameMaterializer::InstantiateFrameTree(UiFrame root,
         lua_settop(lua_, top);
       }
       WireScriptHandlers(plan.frames[frame], refs[frame]);
+      finalize_order.push_back(frame);
       ++metrics_.finalize_dispatches;
     }
+  }
+  dependencies_.layout.SolveIfDirty();
+  for (const std::size_t frame : finalize_order) {
+    if (refs[frame] != LUA_NOREF)
+      InvokeOnLoad(plan.frames[frame], refs[frame]);
   }
   if (push_root_result) lua_rawgeti(lua_, LUA_REGISTRYINDEX, refs[0]);
   return refs[0];

@@ -56,6 +56,29 @@ const std::vector<float> kIdentityBoneMatrixPalette(
   return view_matrix.has_value() && resource.has_billboard_bones;
 }
 
+[[nodiscard]] RenderVec3 ResolveSelectionGlowRgb(
+    const M2InstanceStore& instances,
+    const detail::M2Instance& instance) noexcept {
+  const detail::M2Instance* current = &instance;
+  for (std::size_t depth = 0u;
+       current != nullptr && depth <= instances.size(); ++depth) {
+    const RenderVec3 rgb{
+        std::clamp(current->selection_glow_color[0], 0.0f, 1.0f),
+        std::clamp(current->selection_glow_color[1], 0.0f, 1.0f),
+        std::clamp(current->selection_glow_color[2], 0.0f, 1.0f),
+    };
+    if (rgb[0] > 0.0f || rgb[1] > 0.0f || rgb[2] > 0.0f) {
+      return rgb;
+    }
+    if (current->parent_instance_id == 0u) {
+      break;
+    }
+    const auto parent = instances.find(current->parent_instance_id);
+    current = parent != instances.end() ? parent->second.get() : nullptr;
+  }
+  return {};
+}
+
 }
 
 M2Renderer::M2Renderer(M2SystemMutex& mutex,
@@ -767,11 +790,29 @@ M2RenderInstanceResult M2Renderer::RenderLocked(
   const auto* visible_submeshes = instance.has_visible_submesh_filter
                                       ? &instance.visible_submesh_indices
                                       : nullptr;
+  const M2BatchUniforms* render_uniforms = detail::BatchUniformsOf(instance);
+  std::optional<M2BatchUniforms> highlighted_uniforms;
+  const RenderVec3 selection_glow =
+      ResolveSelectionGlowRgb(instances_, instance);
+  if (selection_glow[0] > 0.0f || selection_glow[1] > 0.0f ||
+      selection_glow[2] > 0.0f) {
+    highlighted_uniforms = render_uniforms != nullptr
+                               ? *render_uniforms
+                               : detail::DefaultBatchUniforms();
+    for (std::size_t channel = 0u; channel < selection_glow.size();
+         ++channel) {
+      highlighted_uniforms->light_ambient[channel] = std::clamp(
+          highlighted_uniforms->light_ambient[channel] +
+              selection_glow[channel],
+          0.0f, 1.0f);
+    }
+    render_uniforms = &*highlighted_uniforms;
+  }
   M2RenderInstanceResult geometry_result = geometry_submitter_.Submit(
       view_id, resource.skinned_mesh.get(), textures, resource.model_data,
       resource.skin_data, resource.render_batches, model_matrix, instance.tint_color,
       instance.alpha, visible_submeshes,
-      detail::BatchUniformsOf(instance), pass_scope,
+      render_uniforms, pass_scope,
       M2DrawBatchScope::kAllTextureUnits, has_animator ? &animator : nullptr,
       animation_index, animation_time_ms, bone_matrices, view_matrix, submit_trace_,
       resource.model_path, resource.selected_skin_profile, instance_id, draw);

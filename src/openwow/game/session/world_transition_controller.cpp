@@ -302,9 +302,19 @@ bool WorldSession::TrySendPendingWorldportAck() {
     return false;
   }
 
-  world_transition_.ClearWorldportAck();
   net::wotlk::WorldPacket ack(net::wotlk::Opcode::MSG_MOVE_WORLDPORT_ACK);
-  Send(ack);
+  if (!Send(ack)) {
+    openwow::diagnostics::Log(
+        openwow::diagnostics::LogLevel::kError,
+        "WorldSession: failed to send MSG_MOVE_WORLDPORT_ACK; acknowledgement remains pending");
+    return false;
+  }
+
+  world_transition_.ClearWorldportAck();
+  openwow::diagnostics::Log(
+      openwow::diagnostics::LogLevel::kInfo,
+      "WorldSession: sent MSG_MOVE_WORLDPORT_ACK map=" +
+          std::to_string(current_map_id_));
   return true;
 }
 
@@ -415,7 +425,7 @@ void WorldSession::HandleQueryTimeResponse(const net::wotlk::WorldPacket &pkt) {
       local_now + static_cast<std::int64_t>(query_time.daily_reset_secs);
   query_time.local_refresh_deadline_secs = std::min(
       query_time.local_daily_reset_deadline_secs, local_now + 3600);
-  QuestLog::Get().SignalWatchUpdate();
+  ui::game::ScriptEventDispatch::Get().FireQuestLogUpdate();
 }
 
 }

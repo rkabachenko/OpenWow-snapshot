@@ -137,6 +137,24 @@ public:
     std::uint16_t max_value = 0;
     std::int16_t modifier = 0;
     std::int16_t step_modifier = 0;
+
+    [[nodiscard]] std::uint32_t EffectiveValue() const noexcept {
+      if (value == 0) {
+        return 0;
+      }
+      const auto adjusted =
+          static_cast<std::int32_t>(value) + step_modifier;
+      return adjusted > 0 ? static_cast<std::uint32_t>(adjusted) : 0u;
+    }
+
+    [[nodiscard]] std::uint32_t EffectiveMaxValue() const noexcept {
+      if (max_value == 0) {
+        return 0;
+      }
+      const auto adjusted =
+          static_cast<std::int32_t>(max_value) + step_modifier;
+      return adjusted > 0 ? static_cast<std::uint32_t>(adjusted) : 0u;
+    }
   };
   struct ActiveSkillValues {
     std::uint32_t adjusted_value = 0;

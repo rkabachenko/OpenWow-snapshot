@@ -1,4 +1,5 @@
 #include "openwow/vfs/adapters/mpq/mpq_archive.h"
+#include "openwow/foundation/diagnostics/performance_logging.h"
 
 #include <array>
 #include <algorithm>
@@ -630,14 +631,38 @@ bool MpqArchive::HasDeleteMarker(const std::string& virtual_path) const {
 
 std::optional<std::vector<std::uint8_t>> MpqArchive::ReadFile(
     const std::string& virtual_path) const {
-  std::lock_guard lock(mutex_);
-  return ReadFileUnlocked(virtual_path, std::nullopt);
+  const openwow::diagnostics::PerformanceTimer timer;
+  std::unique_lock lock(mutex_);
+  const double lock_ms = timer.ElapsedMs();
+  auto result = ReadFileUnlocked(virtual_path, std::nullopt);
+  if (timer.ElapsedMs() >= 20.0) {
+    const std::string context = "path=" + virtual_path +
+        " archive=" + archive_path_.string() + " lock_wait_ms=" + std::to_string(lock_ms) +
+        " bytes=" + std::to_string(result ? result->size() : 0u) +
+        (result ? " result=read" : " result=unavailable");
+    lock.unlock();
+    static openwow::diagnostics::PerformanceLogSite site;
+    openwow::diagnostics::LogPerformanceDuration(site, "mpq.read", timer, context);
+  }
+  return result;
 }
 
 std::optional<std::vector<std::uint8_t>> MpqArchive::ReadFilePrefix(
     const std::string& virtual_path, const std::size_t max_bytes) const {
-  std::lock_guard lock(mutex_);
-  return ReadFileUnlocked(virtual_path, max_bytes);
+  const openwow::diagnostics::PerformanceTimer timer;
+  std::unique_lock lock(mutex_);
+  const double lock_ms = timer.ElapsedMs();
+  auto result = ReadFileUnlocked(virtual_path, max_bytes);
+  if (timer.ElapsedMs() >= 20.0) {
+    const std::string context = "path=" + virtual_path +
+        " archive=" + archive_path_.string() + " lock_wait_ms=" + std::to_string(lock_ms) +
+        " bytes=" + std::to_string(result ? result->size() : 0u) +
+        (result ? " result=read" : " result=unavailable");
+    lock.unlock();
+    static openwow::diagnostics::PerformanceLogSite site;
+    openwow::diagnostics::LogPerformanceDuration(site, "mpq.read_prefix", timer, context);
+  }
+  return result;
 }
 
 std::optional<std::vector<std::uint8_t>> MpqArchive::ReadFileUnlocked(

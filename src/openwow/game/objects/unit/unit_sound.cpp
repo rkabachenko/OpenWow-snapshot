@@ -10,8 +10,10 @@
 #include "openwow/game/player_control_runtime.h"
 #include "openwow/runtime/time/game_clock.h"
 #include "openwow/ui/game/cvar_system.h"
+#include "openwow/foundation/diagnostics/logging.h"
 
 #include <cstdint>
+#include <string>
 
 namespace openwow::game {
 
@@ -22,6 +24,20 @@ const UnitSoundComponent &CGUnit_C::Sound() const noexcept { return sound_; }
 namespace {
 
 std::uint32_t g_last_creature_stand_sound_tick_ms = 0u;
+
+const char *NpcVoicePlaybackResultName(const int result) {
+  switch (result) {
+  case 5: return "sound-kit-missing";
+  case 6: return "sound-kit-empty";
+  case 8: return "invalid-sound-type";
+  case 9: return "sound-effects-disabled";
+  case 14: return "sound-instance-limit";
+  case 15: return "sound-already-playing";
+  case 16: return "sound-file-playback-failed";
+  case 17: return "audio-unavailable-or-disabled";
+  default: return "playback-rejected";
+  }
+}
 
 }
 
@@ -42,9 +58,9 @@ UnitSoundComponent::ResolveActive(const CGUnit_C &unit) const {
     return nullptr;
   }
 
-  if (display->npc_sound_id != 0u) {
+  if (display->sound_id != 0u) {
     if (const auto *const sound =
-            dbc->creature_sound_data().LookupEntry(display->npc_sound_id);
+            dbc->creature_sound_data().LookupEntry(display->sound_id);
         sound != nullptr) {
       return sound;
     }
@@ -55,6 +71,72 @@ UnitSoundComponent::ResolveActive(const CGUnit_C &unit) const {
   return model != nullptr && model->sound_id != 0u
              ? dbc->creature_sound_data().LookupEntry(model->sound_id)
              : nullptr;
+}
+
+const data::dbc::NPCSoundsEntry *
+UnitSoundComponent::ResolveNpcSounds(const CGUnit_C &unit, const char *source) const {
+  const auto display_id = unit.Presentation().CurrentDisplayId();
+  const auto *const dbc = unit.dbc_loader();
+  const auto *const display =
+      dbc != nullptr ? dbc->creature_display_info().LookupEntry(display_id) : nullptr;
+  const auto npc_sound_id = display != nullptr ? display->npc_sound_id : 0u;
+  if (display != nullptr && npc_sound_id == 0u) {
+    // An authored zero means this appearance has no NPC voice set.
+    return nullptr;
+  }
+  const auto *const sounds =
+      display != nullptr ? dbc->npc_sounds().LookupEntry(npc_sound_id) : nullptr;
+  if (sounds == nullptr) {
+    openwow::diagnostics::Log(
+        openwow::diagnostics::LogLevel::kWarn,
+        "NPC sound stage=resolve source=" + std::string(source) +
+            " guid=" + unit.GetGuid().ToString() +
+            " entry=" + std::to_string(unit.GetEntry()) +
+            " display=" + std::to_string(display_id) +
+            " npc_sounds=" + std::to_string(npc_sound_id) +
+            " reason=" + (dbc == nullptr ? "dbc-unavailable"
+                           : display == nullptr ? "CreatureDisplayInfo-missing"
+                                                : "NPCSounds-missing"));
+  }
+  return sounds;
+}
+
+bool UnitSoundComponent::IsNpcVoicePlaying(const CGUnit_C &unit) const {
+  return npc_voice_handle_ != 0u &&
+         unit.sound_runtime().IsSoundHandlePlaying(npc_voice_handle_);
+}
+
+int UnitSoundComponent::PlayNpcVoice(const CGUnit_C &unit,
+                                    const data::dbc::NPCSoundsEntry &sounds,
+                                    const std::uint32_t sound_kit_id,
+                                    const char *source,
+                                    const std::int32_t variation_index) const {
+  if (IsNpcVoicePlaying(unit)) {
+    return 15;
+  }
+  const auto position = unit.GetPosition();
+  const float sound_position[3] = {position.x, position.y, position.z};
+  audio::SoundKitPlaybackOptions options{};
+  if (variation_index >= 0) {
+    options.forced_file_index = variation_index;
+  }
+  npc_voice_handle_ = 0u;
+  const auto result = unit.sound_runtime().PlaySoundKit(
+      sound_kit_id, sound_position, &npc_voice_handle_, options);
+  if (result != 0) {
+    const auto level = result == 9 || result == 14 || result == 15 || result == 17
+                           ? openwow::diagnostics::LogLevel::kDebug
+                           : openwow::diagnostics::LogLevel::kWarn;
+    openwow::diagnostics::Log(
+        level, "NPC sound stage=play source=" + std::string(source) +
+                   " guid=" + unit.GetGuid().ToString() +
+                   " display=" + std::to_string(unit.Presentation().CurrentDisplayId()) +
+                   " npc_sounds=" + std::to_string(sounds.id) +
+                   " kit=" + std::to_string(sound_kit_id) +
+                   " reason=" + NpcVoicePlaybackResultName(result) +
+                   " result=" + std::to_string(result));
+  }
+  return result;
 }
 
 const data::dbc::CreatureSoundDataEntry *
@@ -75,9 +157,9 @@ UnitSoundComponent::ResolveMount(const CGUnit_C &unit) const {
     return nullptr;
   }
 
-  if (display_info->npc_sound_id != 0) {
+  if (display_info->sound_id != 0) {
     const auto *sound_data =
-        dbc->creature_sound_data().LookupEntry(display_info->npc_sound_id);
+        dbc->creature_sound_data().LookupEntry(display_info->sound_id);
     if (sound_data != nullptr) {
       return sound_data;
     }

@@ -3,6 +3,7 @@
 #include "openwow/game/chat_cache.h"
 #include "openwow/core/console.h"
 #include "openwow/core/storm_string.h"
+#include "openwow/foundation/diagnostics/performance_logging.h"
 #include "openwow/audio/playback/sound_runtime.h"
 #include "openwow/game/chat_channel_location.h"
 #include "openwow/game/chat_display.h"
@@ -1092,8 +1093,13 @@ int LuaSetChatWindowLocked(lua_State *L) {
     return 0;
   }
 
-  openwow::ui::game::ChatWindowState::Get().SetWindowLocked(
-      *window, ScriptReadBoolArgOrDefault(L, 2, false));
+  const bool locked = ScriptReadBoolArgOrDefault(L, 2, false);
+  openwow::ui::game::ChatWindowState::Get().SetWindowLocked(*window, locked);
+  if (openwow::diagnostics::IsPerformanceLoggingEnabled()) {
+    openwow::diagnostics::LogPerformanceEvent("ui.chat_interaction",
+        "source=lua operation=SetChatWindowLocked phase=retained_state window=" +
+        std::to_string(*window + 1) + " locked=" + (locked ? "1" : "0"));
+  }
   return 0;
 }
 
@@ -1156,8 +1162,13 @@ int LuaSetChatWindowUninteractable(lua_State *L) {
     return 0;
   }
 
-  openwow::ui::game::ChatWindowState::Get().SetWindowUninteractable(
-      *window, ScriptReadBoolArgOrDefault(L, 2, false));
+  const bool uninteractable = ScriptReadBoolArgOrDefault(L, 2, false);
+  openwow::ui::game::ChatWindowState::Get().SetWindowUninteractable(*window, uninteractable);
+  if (openwow::diagnostics::IsPerformanceLoggingEnabled()) {
+    openwow::diagnostics::LogPerformanceEvent("ui.chat_interaction",
+        "source=lua operation=SetChatWindowUninteractable phase=retained_state window=" +
+        std::to_string(*window + 1) + " uninteractable=" + (uninteractable ? "1" : "0"));
+  }
   return 0;
 }
 

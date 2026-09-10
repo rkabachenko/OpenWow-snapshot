@@ -22,6 +22,8 @@ struct AddOnState {
   uint32_t crc = 0;
   uint32_t security = 1;
   uint8_t secure = 0;
+  // Local packaged UI trust is independent of the realm's add-on handshake.
+  bool is_builtin_ui = false;
   uint8_t is_blizzard = 0;
   uint8_t is_corrupt = 0;
   uint8_t default_enabled = 1;
@@ -44,6 +46,10 @@ struct AddOnState {
   bool has_secure_content_digest = false;
   std::array<std::uint8_t, 16> secure_content_digest{};
 
+  [[nodiscard]] std::uint32_t EffectiveSecurity() const {
+    return is_builtin_ui ? 0u : security;
+  }
+
   void Init() {
     name.clear();
     loaded = 0;
@@ -52,6 +58,7 @@ struct AddOnState {
     crc = 0;
     security = 1;
     secure = 0;
+    is_builtin_ui = false;
     is_blizzard = 0;
     is_corrupt = 0;
     default_enabled = 1;

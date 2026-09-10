@@ -787,8 +787,8 @@ void FrameStore::SetTextureRole(
 
   if (previous_owner != owner) {
     NotifyHierarchyMutation(key, previous_owner);
-    if (impl_->ports.layout_graph_invalidated)
-      impl_->ports.layout_graph_invalidated();
+    if (impl_->ports.layout_key_invalidated)
+      impl_->ports.layout_key_invalidated(key);
     InvalidatePaintOrder();
     InvalidateHitTest();
   }

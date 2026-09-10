@@ -6,6 +6,7 @@
 #include "openwow/game/generated_action_bar.h"
 #include "openwow/game/object_manager.h"
 #include "openwow/game/objects/cgplayer.h"
+#include "openwow/game/objects/cggameobject.h"
 #include "openwow/game/pet_manager.h"
 #include "openwow/game/player_control_runtime.h"
 #include "openwow/game/spell_failure_names.h"
@@ -280,7 +281,9 @@ SpellCastResult SpellCastRuntime::CastSpell(const WorldSession& session,
                                              const std::uint32_t spell_id,
                                              const std::uint64_t target_guid,
                                              const std::uint8_t cast_flags) {
-  const auto validation = ValidatePlayerCastRequest(session, spell_id);
+  const auto validation = ValidatePlayerCastRequest(
+      session, spell_id, target_guid != 0u ? ObjectGuid(target_guid)
+                                          : GetPreparedTarget(spell_id));
   if (validation != SpellCastResult::kSuccess) {
     return validation;
   }
@@ -348,10 +351,21 @@ SpellCastResult SpellCastRuntime::CastPetSpell(
 }
 
 SpellCastResult SpellCastRuntime::ValidatePlayerCastRequest(
-    const WorldSession& session, const std::uint32_t spell_id) const {
+    const WorldSession& session, const std::uint32_t spell_id,
+    const ObjectGuid interaction_target) const {
   const auto& spellbook = session.spell_book();
   if (!spellbook.spells().empty() && !spellbook.HasSpell(spell_id)) {
-    return SpellCastResult::kNotKnown;
+    const auto* object = session.objects().GetGameObject(interaction_target);
+    if (object == nullptr) return SpellCastResult::kNotKnown;
+    const auto lock = object->ResolveLockInteraction(*this);
+    const auto* entry = object->GetLockEntry();
+    // A direct spell requirement grants only the spell on this live object's
+    // selected Lock lane; it does not make arbitrary unlearned spells usable.
+    if (lock.status != CGGameObject_C::LockInteractionStatus::kReady ||
+        lock.spell_id != spell_id || entry == nullptr ||
+        entry->type[lock.lock_slot] != 3u) {
+      return SpellCastResult::kNotKnown;
+    }
   }
 
   const auto* player = session.objects().GetLocalPlayerTyped();

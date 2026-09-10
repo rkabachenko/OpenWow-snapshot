@@ -1,7 +1,9 @@
 #include "openwow/ui/surfaces/game/runtime/world_ui_lifecycle.h"
 #include "openwow/ui/surfaces/game/adapters/protocol/world_ui_session_command_adapter.h"
 #include "openwow/ui/surfaces/game/adapters/settings/world_ui_voice_settings_adapter.h"
+#include "openwow/foundation/diagnostics/logging.h"
 
+#include <string>
 #include <utility>
 
 namespace openwow::ui::game {
@@ -212,7 +214,18 @@ void WorldUiLifecycle::RequestWorldUiReload() {
        state_ != WorldUiLifecycleState::Ready &&
        state_ != WorldUiLifecycleState::Active &&
        state_ != WorldUiLifecycleState::ReloadPending)) {
+    openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kWarn,
+        "WorldUI reload rejected: state=" +
+            std::to_string(static_cast<unsigned>(state_)) + " generation=" +
+            (generation_.has_value() ? std::to_string(generation_->value())
+                                     : "none") +
+            " reason=runtime-not-reloadable");
     return;
+  }
+  if (!reload_requested_) {
+    openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kInfo,
+        "WorldUI reload requested: generation=" +
+            std::to_string(generation_->value()));
   }
   reload_requested_ = true;
   if (state_ == WorldUiLifecycleState::Starting ||
@@ -232,11 +245,21 @@ WorldUiReloadPumpResult WorldUiLifecycle::PumpReload() {
   }
 
   reload_requested_ = false;
+  openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kInfo,
+      "WorldUI reload consuming request: generation=" +
+          std::to_string(generation_->value()));
   operations_.prepare_reload();
   Stop(WorldUiStopReason::Reload);
-  return StartGeneration({}) == WorldUiStartResult::Started
-             ? WorldUiReloadPumpResult::Reloaded
-             : WorldUiReloadPumpResult::RuntimeStartFailed;
+  const bool started = StartGeneration({}) == WorldUiStartResult::Started;
+  openwow::diagnostics::Log(
+      started ? openwow::diagnostics::LogLevel::kInfo
+              : openwow::diagnostics::LogLevel::kError,
+      "WorldUI reload " + std::string(started ? "runtime started" : "failed") +
+          ": generation=" +
+          (generation_.has_value() ? std::to_string(generation_->value())
+                                   : "none"));
+  return started ? WorldUiReloadPumpResult::Reloaded
+                 : WorldUiReloadPumpResult::RuntimeStartFailed;
 }
 
 WorldUiGeneration WorldUiLifecycle::AllocateGeneration() {

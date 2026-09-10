@@ -46,6 +46,7 @@ constexpr std::uint32_t kCreatureTypeFlagHideNameplate = 0x00100000u;
 
 constexpr std::uint8_t kMinFlashThreatStatus = 2u;
 constexpr std::uint32_t kCharacterComponentModelFlag = 0x4u;
+constexpr float kNameplateWorldVerticalOffset = 2.0f / 3.0f;
 
 constexpr std::array<std::size_t, 11> kNpcItemDisplayEquipmentSlots{
     render::kSlotHead,  render::kSlotShoulders, render::kSlotBody, render::kSlotChest,
@@ -324,6 +325,7 @@ void WorldPresentationPublisher::ProjectObject(const game::ObjectHandle handle,
     const auto &game_object = static_cast<const game::CGGameObject_C &>(object);
     SyncGameObjectAnimation(instance, game_object);
     SyncGameObjectArtKit(instance, game_object, cache);
+    SyncGameObjectLootArt(instance, game_object, cache);
 
     instance.game_object_collision_state = game_object.GetInteractionValue(0u);
     if (game_object.IsDestructibleBuilding()) {
@@ -411,10 +413,13 @@ void WorldPresentationPublisher::SyncTransform(
   instance.position[1] = world_position.y;
   instance.position[2] = world_position.z;
   instance.orientation = object.GetWorldFacing();
+  instance.ground_contact_normal.reset();
   if (object.IsUnit()) {
 
     instance.orientation =
         static_cast<const game::CGUnit_C &>(object).Movement().WorldSmoothBodyFacing();
+    instance.ground_contact_normal =
+        static_cast<const game::CGUnit_C &>(object).Movement().ModelGroundNormal();
   }
 
   if (object.IsGameObject()) {
@@ -437,6 +442,39 @@ void WorldPresentationPublisher::SyncTransform(
     instance.has_explicit_world_transform = true;
   }
 
+}
+
+void WorldPresentationPublisher::SyncGameObjectLootArt(
+    ObjectProjection &instance, const CGGameObject_C &object, CachedProjection &cache) {
+  const auto &request = object.GetLootArtVisualControlState();
+  if (!request.requested) return;
+  if (!cache.loot_art_valid || cache.loot_art_effect_id != request.effect_id) {
+    cache.loot_art_valid = true;
+    cache.loot_art_effect_id = request.effect_id;
+    cache.loot_art_visual.reset();
+    const auto *effect = dbc_ != nullptr && request.effect_id != 0u
+        ? dbc_->spell_visual_effect_name().LookupEntry(request.effect_id) : nullptr;
+    if (effect == nullptr || effect->file_path.empty()) {
+      openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kError,
+          "GameObject LootArt: stage=prepare guid=" +
+          std::to_string(object.GetGuid().GetRawValue()) + " entry=" +
+          std::to_string(object.GetEntry()) + " source=SpellVisualEffectName record=" +
+          std::to_string(request.effect_id) + " reason=effect-record-or-path-missing");
+    } else {
+      auto visual = std::make_shared<render::WeaponAttachmentVisual>();
+      visual->attachment_id = 19u;
+      visual->model_path = data::m2::NormalizeModelPath(std::string(effect->file_path));
+      cache.loot_art_visual = std::move(visual);
+    }
+  }
+  if (cache.loot_art_visual) {
+    instance.model_attachments.push_back({
+        .role = render::ModelAttachmentRole::kGameObjectLootSparkle,
+        .visual = cache.loot_art_visual,
+        .scale = std::clamp(object.GetScale() * 1.15f, 1.0f, 5.0f),
+        .use_parent_origin_if_missing = true,
+    });
+  }
 }
 
 void WorldPresentationPublisher::SyncGameObjectAnimation(ObjectProjection &instance,
@@ -792,31 +830,31 @@ void WorldPresentationPublisher::SyncCharacterAppearance(ObjectProjection &insta
     const auto *const display = dbc_->creature_display_info().LookupEntry(instance.display_id);
     const auto *const model =
         display != nullptr ? dbc_->creature_model_data().LookupEntry(display->model_id) : nullptr;
-    if (model != nullptr && (model->flags & kCharacterComponentModelFlag) != 0u) {
-      if (is_player) {
+    if (is_player) {
+      if (model != nullptr && (model->flags & kCharacterComponentModelFlag) != 0u) {
         cache.component_source = CharacterComponentSource::kPlayer;
-      } else {
-        const auto *const extra =
-            display->extra_info != 0u
-                ? dbc_->creature_display_info_extra().LookupEntry(display->extra_info)
-                : nullptr;
-        if (extra != nullptr) {
-          cache.component_source = CharacterComponentSource::kNpc;
-          cache.npc_selection = {
-              .race = static_cast<std::uint8_t>(extra->display_race_id),
-              .gender = static_cast<std::uint8_t>(extra->display_sex_id),
-              .skin_color = static_cast<std::uint8_t>(extra->skin_id),
-              .face = static_cast<std::uint8_t>(extra->face_id),
-              .hair_style = static_cast<std::uint8_t>(extra->hair_style_id),
-              .hair_color = static_cast<std::uint8_t>(extra->hair_color_id),
-              .facial_hair = static_cast<std::uint8_t>(extra->facial_hair_id),
-          };
-          for (std::size_t index = 0u; index < extra->item_display.size(); ++index) {
-            cache.npc_selection.equipment_display_ids[kNpcItemDisplayEquipmentSlots[index]] =
-                extra->item_display[index];
-          }
-          cache.npc_prebaked_body_texture = BuildNpcBakedTexturePath(extra->bake_name);
+      }
+    } else {
+      const auto *const extra =
+          display != nullptr && display->extra_info != 0u
+              ? dbc_->creature_display_info_extra().LookupEntry(display->extra_info)
+              : nullptr;
+      if (extra != nullptr && !extra->bake_name.empty()) {
+        cache.component_source = CharacterComponentSource::kNpc;
+        cache.npc_selection = {
+            .race = static_cast<std::uint8_t>(extra->display_race_id),
+            .gender = static_cast<std::uint8_t>(extra->display_sex_id),
+            .skin_color = static_cast<std::uint8_t>(extra->skin_id),
+            .face = static_cast<std::uint8_t>(extra->face_id),
+            .hair_style = static_cast<std::uint8_t>(extra->hair_style_id),
+            .hair_color = static_cast<std::uint8_t>(extra->hair_color_id),
+            .facial_hair = static_cast<std::uint8_t>(extra->facial_hair_id),
+        };
+        for (std::size_t index = 0u; index < extra->item_display.size(); ++index) {
+          cache.npc_selection.equipment_display_ids[kNpcItemDisplayEquipmentSlots[index]] =
+              extra->item_display[index];
         }
+        cache.npc_prebaked_body_texture = BuildNpcBakedTexturePath(extra->bake_name);
       }
     }
   }
@@ -1030,7 +1068,7 @@ NameplatePresentationSnapshot WorldPresentationPublisher::PublishNameplatesFromU
     const float distance_squared = dx * dx + dy * dy + dz * dz;
 
     if (!unit->Nameplate().PassesRange(distance_squared, range_exempt_map) ||
-        !unit->Nameplate().PassesHardEligibility(*unit, *player) ||
+        !unit->Nameplate().PassesHardEligibility(*unit, *player, objects) ||
         !unit->Nameplate().PassesCvarVisibility(*unit, *player, objects)) {
       continue;
     }
@@ -1051,11 +1089,7 @@ NameplatePresentationSnapshot WorldPresentationPublisher::PublishNameplatesFromU
     plate.guid = object.GetGuid().GetRawValue();
     plate.world_x = anchor.x;
     plate.world_y = anchor.y;
-    plate.world_z = anchor.z;
-    if (object.HasObjectBoundingBox()) {
-      object.GetObjectBoundingBox(plate.world_bounds.data());
-      plate.has_world_bounds = true;
-    }
+    plate.world_z = anchor.z + kNameplateWorldVerticalOffset;
     plate.name = ResolveName(object, *unit, world_session, creature_template);
     plate.is_player = unit->IsPlayer();
     plate.is_npc = !plate.is_player;

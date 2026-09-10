@@ -28,6 +28,8 @@ std::int64_t GetInitTimerElapsedTimeNs();
 
 bool ClientInit();
 
+[[nodiscard]] bool SynchronizeClientLocaleState(const std::string& locale);
+
 void InitializeClientStartupAdlerSeedState();
 
 [[nodiscard]] foundation::hashing::AdlerSeedState&

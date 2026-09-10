@@ -343,6 +343,21 @@ void TextureCacheRowStore::ResetTerminalFailures() {
   }
 }
 
+void TextureCacheRowStore::ReleaseSource(
+    const TextureCacheRowIdentity& identity) {
+  std::lock_guard lock(impl_->mutex);
+  if (identity.generation != 0u &&
+      identity.generation != impl_->generation) {
+    return;
+  }
+  const auto row = impl_->rows.find(identity.hash);
+  if (row == impl_->rows.end() || row->second->path != identity.path ||
+      row->second->loading) {
+    return;
+  }
+  row->second->bytes.reset();
+}
+
 void TextureCacheRowStore::InvalidateSources(
     const std::span<const std::uint32_t> retained_row_hashes) {
   const std::unordered_set<std::uint32_t> retained(

@@ -195,7 +195,7 @@ public:
   void SendSetActionButton(std::uint8_t slot, const ActionPresentationEntry &button);
   void SendClearActionButton(std::uint8_t slot);
 
-  void SendTaxiNodeStatusQuery(std::uint64_t guid);
+  bool SendTaxiNodeStatusQuery(std::uint64_t guid);
   void SendTaxiQueryAvailableNodes(std::uint64_t guid);
   void SendActivateTaxi(std::uint64_t npc_guid, std::uint32_t source_node, std::uint32_t dest_node);
   void SendActivateTaxiExpress(std::uint64_t npc_guid, const std::vector<std::uint32_t> &nodes);

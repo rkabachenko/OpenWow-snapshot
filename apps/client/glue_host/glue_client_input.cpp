@@ -3,6 +3,8 @@
 
 #include "openwow/audio/playback/sound_interface.h"
 #include "openwow/core/client_init.h"
+#include "openwow/core/cvar.h"
+#include "openwow/core/gxcvar.h"
 #include "openwow/net/client_services.h"
 #include "openwow/runtime/scheduling/evt_sched.h"
 #include "openwow/runtime/time/game_clock.h"
@@ -15,10 +17,14 @@
 #include "openwow/platform/adapters/clipboard/os_clipboard.h"
 #include "openwow/platform/window/system_mouse_speed.h"
 #include "openwow/platform/window/window_manager.h"
+#include "openwow/render/effects/postprocess/post_process.h"
 #include "openwow/ui/glue/editbox_input_dispatch.h"
 #include "openwow/ui/game/api/game_lua_api_movement.h"
+#include "openwow/ui/game/cvar_system.h"
+#include "openwow/ui/game/secure_execution.h"
 #include "openwow/ui/lua_call_helpers.h"
 #include "openwow/foundation/diagnostics/logging.h"
+#include "openwow/foundation/diagnostics/performance_logging.h"
 #include "openwow/foundation/text/utf8.h"
 
 extern "C" {
@@ -136,6 +142,15 @@ std::pair<int, int> ResolveInWorldMouseButtonDispatchPosition(const SDL_MouseBut
       event.x, event.y, openwow::platform::WindowManager::Get().IsRelativeCursorModeActive());
 }
 
+#if defined(OPENWOW_PLATFORM_IOS)
+constexpr float kMobileMovementDeadZone = 0.20F;
+constexpr float kMobileCameraDragThresholdPoints = 9.0F;
+constexpr float kMobileWorldTapTolerancePoints = 12.0F;
+constexpr std::uint32_t kMobileContextPressMilliseconds = 475u;
+constexpr std::uint32_t kMobileVirtualMouseId = SDL_TOUCH_MOUSEID - 1u;
+
+#endif
+
 }
 
 void GlueClient::UpdateInWorldMouseButtonState(std::uint8_t button, bool pressed) {
@@ -156,7 +171,9 @@ void GlueClient::UpdateInWorldMouseButtonState(std::uint8_t button, bool pressed
   if (!had_held_button && has_held_button) {
     (void)openwow::platform::WindowManager::Get().CaptureCursorAnchor();
     game_loop_.BeginCameraFreelook();
-    EnterRelativeCursorMode(window_);
+    if (!openwow::platform::WindowManager::Get().HasVirtualCursorPosition()) {
+      EnterRelativeCursorMode(window_);
+    }
   } else if (had_held_button && !has_held_button) {
     game_loop_.EndCameraFreelook();
     LeaveRelativeCursorMode();
@@ -164,7 +181,7 @@ void GlueClient::UpdateInWorldMouseButtonState(std::uint8_t button, bool pressed
   }
 }
 
-void GlueClient::ReleaseInWorldMouseButtons() {
+void GlueClient::ReleaseInWorldInput() {
   if (game_loop_.game_ui().is_initialized()) {
     openwow::ui::game::detail::CancelWorldMouseInput(
         game_loop_.game_ui().lua_state());
@@ -177,6 +194,7 @@ void GlueClient::ReleaseInWorldMouseButtons() {
   RestoreCursorAnchorToWindow(window_);
   openwow::input::OnMouseButtonClear();
   openwow::platform::WindowManager::Get().ClearCursorAnchor();
+  game_loop_.binding_input().ReleaseAll();
 }
 
 void GlueClient::PumpPendingWindowEvents() {
@@ -256,8 +274,11 @@ void GlueClient::ApplyWindowFocusChange(const bool focused) {
 
     game_loop_.cursor_manager().ReassertPresentation();
   } else {
+#if defined(OPENWOW_PLATFORM_IOS)
+    CancelMobileInput();
+#endif
     if (mode_ == UiMode::kInWorld) {
-      ReleaseInWorldMouseButtons();
+      ReleaseInWorldInput();
     } else {
       openwow::platform::WindowManager::Get().ResetMouseButtonCapture();
     }
@@ -268,6 +289,32 @@ void GlueClient::ApplyWindowFocusChange(const bool focused) {
         game_loop_.game_ui().lua_state(), window_focused_);
   }
   UpdateTextInputState();
+}
+
+void GlueClient::ApplyApplicationActiveChange(const bool active) {
+  if (application_active_ == active) {
+    return;
+  }
+
+  application_active_ = active;
+  openwow::diagnostics::Log(
+      openwow::diagnostics::LogLevel::kInfo,
+      active ? "Application entered foreground" : "Application entered background");
+  if (!active) {
+    (void)game_loop_.PersistRuntimeConfiguration();
+    (void)openwow::core::ida::CVar_FlushToFile();
+#if defined(OPENWOW_PLATFORM_IOS)
+    texture_manager_.ClearCache();
+    sound_runtime_.ClearSoundKitProviderCaches();
+    game_loop_.post_process().ReleaseTransientEffectFramebuffers();
+#endif
+    ApplyWindowFocusChange(false);
+    return;
+  }
+
+  present_pacer_.Reset();
+  layout_dirty_ = true;
+  ReconcileWindowFocus();
 }
 
 void GlueClient::ReconcileWindowFocus() {
@@ -282,11 +329,89 @@ void GlueClient::ReconcileWindowFocus() {
 }
 
 void GlueClient::HandleEvent(const SDL_Event &event) {
+  if (event.type == SDL_APP_WILLENTERBACKGROUND ||
+      event.type == SDL_APP_DIDENTERBACKGROUND) {
+    ApplyApplicationActiveChange(false);
+    return;
+  }
+  if (event.type == SDL_APP_DIDENTERFOREGROUND) {
+    ApplyApplicationActiveChange(true);
+    return;
+  }
+  if (event.type == SDL_APP_LOWMEMORY) {
+    const auto before_bytes = texture_manager_.GetMemoryUsage();
+    const auto before_count = texture_manager_.CachedCount();
+    const openwow::diagnostics::PerformanceTimer performance;
+    openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kWarn,
+                              "Application received a low-memory warning");
+    texture_manager_.ClearCache();
+    sound_runtime_.ClearSoundKitProviderCaches();
+    auto* world_lua = game_loop_.game_ui().lua_state();
+    openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kWarn,
+        "Application low-memory cache release: texture_bytes_before=" +
+            std::to_string(before_bytes) + " texture_bytes_after=" +
+            std::to_string(texture_manager_.GetMemoryUsage()) +
+            " texture_count_before=" + std::to_string(before_count) +
+            " texture_count_after=" + std::to_string(texture_manager_.CachedCount()) +
+            " world_lua_kb=" + std::to_string(world_lua != nullptr
+                ? lua_gc(world_lua, LUA_GCCOUNT, 0) : 0));
+    static openwow::diagnostics::PerformanceLogSite performance_site;
+    openwow::diagnostics::LogPerformanceDuration(
+        performance_site, "memory.release_caches", performance, "SDL_APP_LOWMEMORY");
+    return;
+  }
+
+#if defined(OPENWOW_PLATFORM_IOS)
+  if (mobile::IsLogExportActive() &&
+      (event.type == SDL_FINGERDOWN || event.type == SDL_FINGERMOTION ||
+       event.type == SDL_FINGERUP || event.type == SDL_MOUSEBUTTONDOWN ||
+       event.type == SDL_MOUSEBUTTONUP || event.type == SDL_MOUSEMOTION ||
+       event.type == SDL_MOUSEWHEEL || event.type == SDL_KEYDOWN ||
+       event.type == SDL_KEYUP || event.type == SDL_TEXTINPUT ||
+       event.type == SDL_TEXTEDITING || event.type == SDL_JOYAXISMOTION ||
+       event.type == SDL_CONTROLLERAXISMOTION ||
+       event.type == SDL_CONTROLLERBUTTONDOWN || event.type == SDL_CONTROLLERBUTTONUP)) {
+    return;
+  }
+  if (event.type == SDL_FINGERDOWN || event.type == SDL_FINGERMOTION ||
+      event.type == SDL_FINGERUP) {
+    HandleMobileFingerEvent(event.tfinger);
+    return;
+  }
+  const bool is_touch_emulated_mouse =
+      (event.type == SDL_MOUSEBUTTONDOWN || event.type == SDL_MOUSEBUTTONUP)
+          ? event.button.which == SDL_TOUCH_MOUSEID
+          : event.type == SDL_MOUSEMOTION
+                ? event.motion.which == SDL_TOUCH_MOUSEID
+                : event.type == SDL_MOUSEWHEEL &&
+                      event.wheel.which == SDL_TOUCH_MOUSEID;
+  if (is_touch_emulated_mouse) {
+    return;
+  }
+  const bool physical_mouse_event =
+      (event.type == SDL_MOUSEBUTTONDOWN || event.type == SDL_MOUSEBUTTONUP)
+          ? event.button.which != kMobileVirtualMouseId
+          : event.type == SDL_MOUSEMOTION && event.motion.which != kMobileVirtualMouseId;
+  if (physical_mouse_event &&
+      openwow::platform::WindowManager::Get().HasVirtualCursorPosition()) {
+    CancelMobileMouse();
+    openwow::platform::WindowManager::Get().ClearVirtualCursorPosition();
+    if (game_loop_.game_ui().is_initialized()) {
+      (void)openwow::ui::CallLuaGlobalIfFunction(game_loop_.game_ui().lua_state(),
+                                               "OpenWoWMobile_SetMouseShown", false);
+    }
+  }
+#endif
+
   const std::uint32_t mouse_button_flag =
       (event.type == SDL_MOUSEBUTTONDOWN || event.type == SDL_MOUSEBUTTONUP)
           ? WowMouseButtonBitmaskFromSdlButton(event.button.button)
           : 0u;
   if (mouse_button_flag != 0u) {
+    // Physical state remains observable between callbacks even when UI capture
+    // consumes the event before it reaches world bindings.
+    openwow::input::InputManager::Get().OnMouseButtonFlag(
+        mouse_button_flag, event.type == SDL_MOUSEBUTTONDOWN);
     auto& window_manager = openwow::platform::WindowManager::Get();
     if (event.type == SDL_MOUSEBUTTONDOWN) {
       window_manager.BeginMouseButtonCapture(mouse_button_flag);
@@ -642,6 +767,687 @@ void GlueClient::HandleEvent(const SDL_Event &event) {
   }
 }
 
+#if defined(__APPLE__) && !defined(OPENWOW_PLATFORM_IOS)
+void GlueClient::RefreshMobileHudPreviewViewport() {
+  const auto& cvars = openwow::ui::game::CVarSystem::Instance();
+  const bool preview = cvars.GetCVarBool("mobileHudPreview");
+  int logical_width = 0;
+  int logical_height = 0;
+  int drawable_width = 0;
+  int drawable_height = 0;
+  SDL_GetWindowSize(window_, &logical_width, &logical_height);
+  GetDrawableSize(window_, &drawable_width, &drawable_height);
+  if (logical_width <= 0 || logical_height <= 0 ||
+      drawable_width <= 0 || drawable_height <= 0) {
+    return;  // A minimized window has no preview surface.
+  }
+  const float inset = preview ? cvars.GetCVarFloat("mobileHudPreviewSafeInset") : 0.0F;
+  const int horizontal = static_cast<int>(std::ceil(inset * drawable_width / logical_width));
+  const int vertical = static_cast<int>(std::ceil(inset * drawable_height / logical_height));
+  auto& game_ui = game_loop_.game_ui();
+  game_ui.SetViewportSize(drawable_width, drawable_height,
+      openwow::ui::framexml::ViewportInsets{horizontal, vertical, horizontal, vertical});
+  if (!preview || !game_ui.is_initialized()) {
+    return;
+  }
+  (void)openwow::ui::CallLuaGlobalIfFunction(
+      game_ui.lua_state(), "OpenWoWMobile_ApplyMetrics",
+      static_cast<double>(drawable_width),
+      static_cast<double>(drawable_height),
+      static_cast<double>(logical_width),
+      static_cast<double>(logical_height));
+}
+#endif
+
+#if defined(OPENWOW_PLATFORM_IOS)
+void GlueClient::RefreshMobileInputViewport() {
+  const auto previous = mobile_input_.viewport();
+  mobile_input_.RefreshViewport(
+      window_, openwow::platform::WindowManager::Get().GetNativeHandle());
+  const auto& viewport = mobile_input_.viewport();
+  if (previous.drawable_width != viewport.drawable_width ||
+      previous.drawable_height != viewport.drawable_height ||
+      previous.logical_width != viewport.logical_width ||
+      previous.logical_height != viewport.logical_height ||
+      previous.safe_left_drawable != viewport.safe_left_drawable ||
+      previous.safe_right_drawable != viewport.safe_right_drawable ||
+      previous.safe_top_drawable != viewport.safe_top_drawable ||
+      previous.safe_bottom_drawable != viewport.safe_bottom_drawable) {
+    CancelMobileInput();
+  }
+  auto& game_ui = game_loop_.game_ui();
+  // Publish the drawable and safe area together, including before FrameXML
+  // startup. Reload retains these platform metrics in the layout owner.
+  game_ui.SetViewportSize(viewport.drawable_width, viewport.drawable_height,
+      openwow::ui::framexml::ViewportInsets{
+          static_cast<int>(std::ceil(viewport.safe_left_drawable)),
+          static_cast<int>(std::ceil(viewport.safe_top_drawable)),
+          static_cast<int>(std::ceil(viewport.safe_right_drawable)),
+          static_cast<int>(std::ceil(viewport.safe_bottom_drawable))});
+  if (!game_ui.is_initialized()) {
+    RefreshMobileMouse();
+    return;
+  }
+  (void)openwow::ui::CallLuaGlobalIfFunction(
+      game_ui.lua_state(), "OpenWoWMobile_ApplyMetrics",
+      static_cast<double>(viewport.drawable_width),
+      static_cast<double>(viewport.drawable_height),
+      static_cast<double>(viewport.logical_width),
+      static_cast<double>(viewport.logical_height), true, true);
+  RefreshMobileMouse();
+}
+
+void GlueClient::RefreshMobileMouse() {
+  auto& manager = openwow::platform::WindowManager::Get();
+  auto& ui = game_loop_.game_ui();
+  const bool shown = mode_ == UiMode::kInWorld && ui.is_initialized() &&
+      application_active_ && window_focused_ && !mobile::IsLogExportActive() &&
+      ui.input_router().IsFrameEffectivelyVisible("OpenWoWMobileMousePanel");
+  if (!shown) {
+    if (manager.HasVirtualCursorPosition()) {
+      CancelMobileMouse();
+      manager.ClearVirtualCursorPosition();
+      game_loop_.cursor_manager().ReassertPresentation();
+    }
+    return;
+  }
+  if (!manager.HasVirtualCursorPosition()) {
+    const auto& viewport = mobile_input_.viewport();
+    manager.SetVirtualCursorPosition(viewport.logical_width / 2,
+                                      viewport.logical_height / 2);
+    game_loop_.cursor_manager().ReassertPresentation();
+  }
+  // Direct taps retain their own hover until the next indirect contact. While
+  // dragging, the window position also backs GetCursorPosition/OnUpdate queries.
+  if (!mobile_input_.HasOwner(mobile::TouchOwner::kWorldUi) &&
+      !mobile_input_.HasOwner(mobile::TouchOwner::kWorldTap) &&
+      !mobile_input_.HasOwner(mobile::TouchOwner::kWorldCamera)) {
+    openwow::input::InputManager::Get().SyncMousePositionFromWindow();
+  }
+  PublishMobileMouse();
+}
+
+void GlueClient::PublishMobileMouse() {
+  auto& manager = openwow::platform::WindowManager::Get();
+  if (!manager.HasVirtualCursorPosition() || !game_loop_.game_ui().is_initialized()) return;
+  const auto position = manager.ResolveLogicalCursorPositionInDrawablePixels();
+  if (!position) {
+    openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kError,
+        "Touch mouse failed: source=HUD-publication reason=cursor-position-unavailable");
+    manager.ClearVirtualCursorPosition();
+    CancelMobileMouse();
+    return;
+  }
+  (void)openwow::ui::CallLuaGlobalIfFunction(game_loop_.game_ui().lua_state(),
+      "OpenWoWMobile_UpdateMouse", static_cast<double>(position->first),
+      static_cast<double>(position->second), static_cast<double>(mobile_mouse_button_));
+}
+
+void GlueClient::SendMobileMouseButton(const std::uint8_t button, const bool down) {
+  auto& manager = openwow::platform::WindowManager::Get();
+  const auto position = manager.ResolveLogicalCursorPosition();
+  if (!position || !manager.HasVirtualCursorPosition()) {
+    openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kError,
+        "Touch mouse failed: source=button-dispatch reason=cursor-position-unavailable");
+    CancelMobileMouse();
+    return;
+  }
+  auto& input = openwow::input::InputManager::Get();
+  input.SyncMousePositionFromWindow();
+  input.OnMouseButton(button == SDL_BUTTON_LEFT ? openwow::input::MouseButton::Left
+                                               : openwow::input::MouseButton::Right, down);
+  SDL_Event pointer{};
+  pointer.type = down ? SDL_MOUSEBUTTONDOWN : SDL_MOUSEBUTTONUP;
+  pointer.button.type = pointer.type;
+  pointer.button.timestamp = SDL_GetTicks();
+  pointer.button.windowID = SDL_GetWindowID(window_);
+  pointer.button.which = kMobileVirtualMouseId;
+  pointer.button.button = button;
+  pointer.button.state = down ? SDL_PRESSED : SDL_RELEASED;
+  pointer.button.clicks = 1;
+  pointer.button.x = position->first;
+  pointer.button.y = position->second;
+  HandleEvent(pointer);
+  // A world mouse-down handler may hide the control before the world binding
+  // acquires its button. Finish cancellation after that dispatch unwinds too.
+  if (down && mobile_mouse_button_ != button) CancelMobileMouse();
+  PublishMobileMouse();
+}
+
+void GlueClient::MoveMobileMouse(const mobile::TouchContact& contact) {
+  auto& manager = openwow::platform::WindowManager::Get();
+  if (!manager.HasVirtualCursorPosition() || !game_loop_.game_ui().is_initialized()) return;
+  const auto position = manager.ResolveLogicalCursorPosition();
+  if (!position) {
+    openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kError,
+        "Touch mouse failed: source=finger-motion reason=cursor-position-unavailable");
+    CancelMobileMouse();
+    return;
+  }
+  const float dx = contact.current.logical_x - contact.previous.logical_x;
+  const float dy = contact.current.logical_y - contact.previous.logical_y;
+  // Keep sub-point movement so a slow drag still advances on a Retina display.
+  mobile_mouse_remainder_x_ += dx;
+  mobile_mouse_remainder_y_ += dy;
+  const int step_x = static_cast<int>(std::trunc(mobile_mouse_remainder_x_));
+  const int step_y = static_cast<int>(std::trunc(mobile_mouse_remainder_y_));
+  mobile_mouse_remainder_x_ -= step_x;
+  mobile_mouse_remainder_y_ -= step_y;
+  if (left_mouse_held_ || right_mouse_held_) {
+    int x = position->first, y = position->second;
+    ScaleMouseToDrawable(window_, x, y);
+    const auto motion = openwow::input::DispatchInWorldMouseMotion(x, y, step_x, step_y, true);
+    if (motion.has_camera_delta) game_loop_.HandleMouseDelta(motion.camera_dx, motion.camera_dy);
+    return;
+  }
+  const auto& viewport = mobile_input_.viewport();
+  const int x = std::clamp(position->first + step_x, 0, viewport.logical_width - 1);
+  const int y = std::clamp(position->second + step_y, 0, viewport.logical_height - 1);
+  if (x == position->first && y == position->second) return;
+  manager.SetVirtualCursorPosition(x, y);
+  SDL_Event pointer{};
+  pointer.type = SDL_MOUSEMOTION;
+  pointer.motion.type = SDL_MOUSEMOTION;
+  pointer.motion.timestamp = SDL_GetTicks();
+  pointer.motion.windowID = SDL_GetWindowID(window_);
+  pointer.motion.which = kMobileVirtualMouseId;
+  pointer.motion.x = x;
+  pointer.motion.y = y;
+  pointer.motion.xrel = x - position->first;
+  pointer.motion.yrel = y - position->second;
+  HandleEvent(pointer);
+  PublishMobileMouse();
+}
+
+void GlueClient::CancelMobileMouse() {
+  if (auto* contact = mobile_input_.FindContactByOwner(mobile::TouchOwner::kVirtualMouse)) {
+    contact->owner = mobile::TouchOwner::kIgnored;
+  }
+  const auto button = mobile_mouse_button_;
+  mobile_mouse_button_ = 0;
+  mobile_mouse_remainder_x_ = mobile_mouse_remainder_y_ = 0.0F;
+  auto& ui = game_loop_.game_ui();
+  if (ui.is_initialized()) ui.input_router().EndTouchMouseControl();
+  if (button != 0) {
+    const auto flag = WowMouseButtonBitmaskFromSdlButton(button);
+    openwow::input::InputManager::Get().OnMouseButton(
+        button == SDL_BUTTON_LEFT ? openwow::input::MouseButton::Left
+                                   : openwow::input::MouseButton::Right, false);
+    openwow::platform::WindowManager::Get().EndMouseButtonCapture(flag);
+    if (ui.is_initialized()) ui.input_router().CancelPointerCapture(flag);
+  }
+  if (left_mouse_held_ || right_mouse_held_) {
+    ReleaseMobileMovement();
+    ReleaseInWorldInput();
+  }
+  PublishMobileMouse();
+}
+
+void GlueClient::UpdateMobileMovement(
+    const mobile::TouchContact& contact) {
+  if (!game_loop_.game_ui().is_initialized()) {
+    ReleaseMobileMovement();
+    return;
+  }
+  const auto direction = game_loop_.game_ui().input_router().ResolveTouchMovement(
+      contact.current.drawable_x, contact.current.drawable_y);
+  if (!direction) {
+    ReleaseMobileMovement();
+    return;
+  }
+  const float normalized_x = (*direction)[0];
+  const float normalized_y = (*direction)[1];
+
+  const auto movement_held = [this, finger_id = contact.finger_id] {
+    const auto* current = mobile_input_.FindContact(finger_id);
+    return current != nullptr && current->owner == mobile::TouchOwner::kMovement;
+  };
+  auto set_command = [this, &movement_held](bool& active, const bool desired,
+                            const char* source, const char* command) {
+    if (!movement_held() || active == desired) {
+      return;
+    }
+    // A binding can run Lua that hides the control. Publish ownership first
+    // so its cancellation releases this command before that callback returns.
+    active = desired;
+    if (desired) {
+      if (!game_loop_.binding_input().VirtualCommandDown(
+              source, openwow::game::BindingCommand(command))) {
+        active = false;
+        openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kError,
+            std::string("Touch movement command failed: source=") + source +
+            " command=" + command + " operation=down reason=binding-rejected");
+        ReleaseMobileMovement();
+      }
+    } else {
+      (void)game_loop_.binding_input().VirtualCommandUp(source);
+    }
+  };
+
+  lua_State* const lua = game_loop_.game_ui().is_initialized()
+                             ? game_loop_.game_ui().lua_state()
+                             : nullptr;
+  std::optional<openwow::ui::game::SecureExecution::SecureScope>
+      hardware_input_scope;
+  std::optional<openwow::ui::game::SecureExecution::HardwareActionGrantScope>
+      hardware_action_grant;
+  if (lua != nullptr) {
+    hardware_input_scope.emplace(lua);
+    hardware_action_grant.emplace();
+  }
+
+  set_command(mobile_move_forward_, normalized_y < -kMobileMovementDeadZone,
+              "mobile-forward", openwow::game::BindingAction::kMoveForward);
+  set_command(mobile_move_backward_, normalized_y > kMobileMovementDeadZone,
+              "mobile-backward", openwow::game::BindingAction::kMoveBackward);
+  set_command(mobile_strafe_left_, normalized_x < -kMobileMovementDeadZone,
+              "mobile-strafe-left", openwow::game::BindingAction::kStrafeLeft);
+  set_command(mobile_strafe_right_, normalized_x > kMobileMovementDeadZone,
+              "mobile-strafe-right", openwow::game::BindingAction::kStrafeRight);
+
+  if (lua != nullptr && movement_held()) {
+    (void)openwow::ui::CallLuaGlobalIfFunction(
+        lua, "OpenWoWMobile_SetJoystick",
+        static_cast<double>(normalized_x),
+        static_cast<double>(normalized_y),
+        true);
+  }
+}
+
+void GlueClient::ReleaseMobileMovement() {
+  if (auto* contact = mobile_input_.FindContactByOwner(mobile::TouchOwner::kMovement)) {
+    // A hidden/released control consumes the rest of its old finger lifetime.
+    contact->owner = mobile::TouchOwner::kIgnored;
+  }
+  if (game_loop_.game_ui().is_initialized()) {
+    game_loop_.game_ui().input_router().EndTouchMovement();
+  }
+  auto release = [this](bool& active, const char* source) {
+    if (!active) {
+      return;
+    }
+    active = false;
+    (void)game_loop_.binding_input().VirtualCommandUp(source);
+  };
+
+  lua_State* const lua = game_loop_.game_ui().is_initialized()
+                             ? game_loop_.game_ui().lua_state()
+                             : nullptr;
+  std::optional<openwow::ui::game::SecureExecution::SecureScope>
+      hardware_input_scope;
+  std::optional<openwow::ui::game::SecureExecution::HardwareActionGrantScope>
+      hardware_action_grant;
+  if (lua != nullptr) {
+    hardware_input_scope.emplace(lua);
+    hardware_action_grant.emplace();
+  }
+  release(mobile_move_forward_, "mobile-forward");
+  release(mobile_move_backward_, "mobile-backward");
+  release(mobile_strafe_left_, "mobile-strafe-left");
+  release(mobile_strafe_right_, "mobile-strafe-right");
+  if (lua != nullptr) {
+    (void)openwow::ui::CallLuaGlobalIfFunction(
+        lua, "OpenWoWMobile_SetJoystick", 0.0, 0.0, false);
+  }
+}
+
+void GlueClient::BeginMobileCamera() {
+  if (mobile_camera_active_) {
+    return;
+  }
+  mobile_camera_active_ = true;
+  game_loop_.BeginCameraFreelook();
+  if (game_loop_.game_ui().is_initialized()) {
+    game_loop_.game_ui().input_router().DismissWorldTouch();
+    lua_State* const lua = game_loop_.game_ui().lua_state();
+    openwow::ui::game::SecureExecution::SecureScope hardware_input_scope(lua);
+    openwow::ui::game::SecureExecution::HardwareActionGrantScope
+        hardware_action_grant;
+    (void)openwow::ui::CallLuaGlobalIfFunction(lua, "MouselookStart");
+  }
+}
+
+void GlueClient::EndMobileCamera() {
+  if (!mobile_camera_active_) {
+    return;
+  }
+  mobile_camera_active_ = false;
+  if (game_loop_.game_ui().is_initialized()) {
+    lua_State* const lua = game_loop_.game_ui().lua_state();
+    openwow::ui::game::SecureExecution::SecureScope hardware_input_scope(lua);
+    openwow::ui::game::SecureExecution::HardwareActionGrantScope
+        hardware_action_grant;
+    (void)openwow::ui::CallLuaGlobalIfFunction(lua, "MouselookStop");
+  }
+  game_loop_.EndCameraFreelook();
+}
+
+void GlueClient::HandleMobileFingerEvent(const SDL_TouchFingerEvent& event) {
+  using mobile::TouchOwner;
+  openwow::input::InputManager::Get().ProcessTouchInput();
+
+  if (event.type == SDL_FINGERDOWN) {
+    RefreshMobileMouse();
+    auto* contact = mobile_input_.BeginContact(event);
+    if (contact == nullptr) {
+      return;
+    }
+    if (mode_ == UiMode::kInWorld) {
+      auto* const game_ui = game_loop_.game_ui().is_initialized()
+                                ? &game_loop_.game_ui()
+                                : nullptr;
+      if (game_ui != nullptr) {
+        if (openwow::platform::WindowManager::Get().HasVirtualCursorPosition()) {
+          using Control = openwow::ui::game::runtime::FrameInputRouter::TouchMouseControl;
+          const auto control = game_ui->input_router().BeginTouchMouseControl(
+              contact->current.drawable_x, contact->current.drawable_y,
+              [this] { CancelMobileMouse(); });
+          contact = mobile_input_.FindContact(event.fingerId);
+          if (contact == nullptr) {
+            CancelMobileMouse();
+            return;
+          }
+          if (control != Control::kNotControl) {
+            contact->owner = TouchOwner::kIgnored;
+            if (control == Control::kConsumed) return;
+            if (mobile_input_.HasOwner(TouchOwner::kWorldUi) ||
+                mobile_input_.HasOwner(TouchOwner::kWorldTap) ||
+                mobile_input_.HasOwner(TouchOwner::kWorldCamera)) {
+              game_ui->input_router().EndTouchMouseControl();
+              return;
+            }
+            contact->owner = TouchOwner::kVirtualMouse;
+            mobile_mouse_remainder_x_ = mobile_mouse_remainder_y_ = 0.0F;
+            openwow::input::InputManager::Get().SyncMousePositionFromWindow();
+            const auto [x, y] = openwow::input::InputManager::Get().GetMousePosition();
+            (void)game_ui->input_router().HandleMouseMove(x, y);
+            // Hover scripts may have hidden or released the control.
+            contact = mobile_input_.FindContact(event.fingerId);
+            if (contact == nullptr || contact->owner != TouchOwner::kVirtualMouse) return;
+            mobile_mouse_button_ = control == Control::kLeft ? SDL_BUTTON_LEFT
+                : control == Control::kRight ? SDL_BUTTON_RIGHT : 0;
+            if (mobile_mouse_button_ != 0) SendMobileMouseButton(mobile_mouse_button_, true);
+            PublishMobileMouse();
+            return;
+          }
+        }
+        const auto movement = game_ui->input_router().BeginTouchMovement(
+            contact->current.drawable_x, contact->current.drawable_y,
+            [this] { ReleaseMobileMovement(); });
+        using MovementStart = openwow::ui::game::runtime::FrameInputRouter::TouchMovementStart;
+        if (movement != MovementStart::kNotControl) {
+          contact->owner = movement == MovementStart::kCaptured
+                               ? TouchOwner::kMovement : TouchOwner::kIgnored;
+          if (contact->owner == TouchOwner::kMovement) {
+            (void)openwow::ui::CallLuaGlobalIfFunction(
+                game_ui->lua_state(), "OpenWoWMobile_PositionJoystick",
+                static_cast<double>(contact->current.drawable_x),
+                static_cast<double>(contact->current.drawable_y));
+            UpdateMobileMovement(*contact);
+            mobile::PerformHapticFeedback(mobile::HapticFeedback::kLightImpact);
+          }
+          return;
+        }
+      }
+      // The UI has one pointer. A stick finger remains independent, but a
+      // second direct UI/world contact must not steal an indirect drag.
+      if (mobile_input_.HasOwner(TouchOwner::kVirtualMouse)) {
+        contact->owner = TouchOwner::kIgnored;
+        return;
+      }
+      if (game_ui != nullptr &&
+          !mobile_input_.HasOwner(TouchOwner::kWorldUi) &&
+          game_ui->input_router().HandleTouchDown(
+              contact->current.drawable_x, contact->current.drawable_y, event.timestamp,
+              mobile_input_.viewport().drawable_scale_x,
+              mobile_input_.viewport().drawable_scale_y)) {
+        contact->owner = TouchOwner::kWorldUi;
+        UpdateTextInputState();
+        return;
+      }
+      if (game_ui != nullptr &&
+          mobile_input_.HasOwner(TouchOwner::kWorldUi) &&
+          game_ui->input_router().HitTestTouchTarget(
+              contact->current.drawable_x, contact->current.drawable_y)) {
+        contact->owner = TouchOwner::kIgnored;
+        return;
+      }
+
+      auto* const other_world_contact =
+          mobile_input_.FindContactByOwner(TouchOwner::kWorldTap) != nullptr
+              ? mobile_input_.FindContactByOwner(TouchOwner::kWorldTap)
+              : mobile_input_.FindContactByOwner(TouchOwner::kWorldCamera);
+      contact->owner = TouchOwner::kWorldTap;
+      if (other_world_contact != nullptr) {
+        contact->owner = TouchOwner::kIgnored;
+      } else if (game_ui != nullptr) {
+        const auto match = game_ui->input_router().BeginWorldTouchTap(
+            contact->current.drawable_x, contact->current.drawable_y, event.timestamp);
+        using TapMatch = openwow::ui::game::runtime::FrameInputRouter::TouchTapMatch;
+        if (match == TapMatch::kCancelled) {
+          contact->owner = TouchOwner::kIgnored;
+        }
+      }
+      return;
+    }
+
+    if (mobile_input_.HasOwner(TouchOwner::kGlueUi)) {
+      contact->owner = TouchOwner::kIgnored;
+      return;
+    }
+    contact->owner = TouchOwner::kGlueUi;
+    const std::uint32_t elapsed = event.timestamp - last_mobile_glue_tap_ms_;
+    const float dx = contact->current.logical_x - last_mobile_glue_tap_x_;
+    const float dy = contact->current.logical_y - last_mobile_glue_tap_y_;
+    const bool is_double_tap =
+        last_mobile_glue_tap_ms_ != 0u && elapsed <= 350u &&
+        dx * dx + dy * dy <= 24.0F * 24.0F;
+
+    SDL_Event pointer{};
+    pointer.type = SDL_MOUSEBUTTONDOWN;
+    pointer.button.type = SDL_MOUSEBUTTONDOWN;
+    pointer.button.timestamp = event.timestamp;
+    pointer.button.windowID = event.windowID;
+    pointer.button.button = SDL_BUTTON_LEFT;
+    pointer.button.state = SDL_PRESSED;
+    pointer.button.clicks = is_double_tap ? 2u : 1u;
+    pointer.button.x = static_cast<Sint32>(std::lround(contact->current.logical_x));
+    pointer.button.y = static_cast<Sint32>(std::lround(contact->current.logical_y));
+    HandleMouseDown(pointer);
+    return;
+  }
+
+  if (event.type == SDL_FINGERMOTION) {
+    auto* const contact = mobile_input_.UpdateContact(event);
+    if (contact == nullptr) {
+      return;
+    }
+    if (contact->owner == TouchOwner::kVirtualMouse) {
+      MoveMobileMouse(*contact);
+      return;
+    }
+    if (contact->owner == TouchOwner::kWorldUi) {
+      if (game_loop_.game_ui().is_initialized()) {
+        (void)game_loop_.game_ui().input_router().HandleTouchMove(
+            contact->current.drawable_x, contact->current.drawable_y, event.timestamp);
+      }
+      return;
+    }
+    if (contact->owner == TouchOwner::kMovement) {
+      UpdateMobileMovement(*contact);
+      return;
+    }
+    if (contact->owner == TouchOwner::kWorldTap) {
+      const float dx =
+          contact->current.logical_x - contact->start.logical_x;
+      const float dy =
+          contact->current.logical_y - contact->start.logical_y;
+      if (dx * dx + dy * dy >=
+          kMobileCameraDragThresholdPoints *
+              kMobileCameraDragThresholdPoints) {
+        contact->owner = TouchOwner::kWorldCamera;
+        BeginMobileCamera();
+        game_loop_.HandleMouseDelta(
+            contact->current.logical_x - contact->previous.logical_x,
+            contact->current.logical_y - contact->previous.logical_y);
+      }
+      return;
+    }
+    if (contact->owner == TouchOwner::kWorldCamera) {
+      BeginMobileCamera();
+      game_loop_.HandleMouseDelta(
+          contact->current.logical_x - contact->previous.logical_x,
+          contact->current.logical_y - contact->previous.logical_y);
+      return;
+    }
+    if (contact->owner != TouchOwner::kGlueUi) {
+      return;
+    }
+    SDL_Event pointer{};
+    pointer.type = SDL_MOUSEMOTION;
+    pointer.motion.type = SDL_MOUSEMOTION;
+    pointer.motion.timestamp = event.timestamp;
+    pointer.motion.windowID = event.windowID;
+    pointer.motion.x = static_cast<Sint32>(std::lround(contact->current.logical_x));
+    pointer.motion.y = static_cast<Sint32>(std::lround(contact->current.logical_y));
+    pointer.motion.xrel = static_cast<Sint32>(std::lround(
+        event.dx * mobile_input_.viewport().logical_width));
+    pointer.motion.yrel = static_cast<Sint32>(std::lround(
+        event.dy * mobile_input_.viewport().logical_height));
+    HandleEvent(pointer);
+    return;
+  }
+
+  const auto ended = mobile_input_.EndContact(event);
+  if (!ended.has_value()) {
+    return;
+  }
+  if (ended->owner == TouchOwner::kVirtualMouse) {
+    MoveMobileMouse(*ended);
+    const auto button = mobile_mouse_button_;
+    mobile_mouse_button_ = 0;
+    if (game_loop_.game_ui().is_initialized()) {
+      game_loop_.game_ui().input_router().EndTouchMouseControl();
+    }
+    if (button != 0) SendMobileMouseButton(button, false);
+    return;
+  }
+  if (ended->owner == TouchOwner::kWorldUi) {
+    if (game_loop_.game_ui().is_initialized()) {
+      const bool handled = game_loop_.game_ui().input_router().HandleTouchUp(
+          ended->current.drawable_x, ended->current.drawable_y, event.timestamp);
+      UpdateTextInputState();
+      if (handled) {
+        mobile::PerformHapticFeedback(mobile::HapticFeedback::kSelection);
+      }
+    }
+    return;
+  }
+  if (ended->owner == TouchOwner::kMovement) {
+    ReleaseMobileMovement();
+    return;
+  }
+  if (ended->owner == TouchOwner::kWorldCamera) {
+    EndMobileCamera();
+    return;
+  }
+  if (ended->owner == TouchOwner::kWorldTap) {
+    const float dx = ended->current.logical_x - ended->start.logical_x;
+    const float dy = ended->current.logical_y - ended->start.logical_y;
+    if (dx * dx + dy * dy <=
+        kMobileWorldTapTolerancePoints *
+            kMobileWorldTapTolerancePoints) {
+      if (game_loop_.game_ui().is_initialized()) {
+        const float x = ended->current.drawable_x;
+        const float y = ended->current.drawable_y;
+        game_loop_.game_ui().input_router().EndWorldTouchTap(
+            x, y, event.timestamp, event.timestamp - ended->started_at_ms,
+            mobile_input_.viewport().drawable_scale_x,
+            mobile_input_.viewport().drawable_scale_y,
+            [this, x, y](const std::uint32_t button) {
+              if (button == 4u) {
+                RunMouseButtonDownPrelude(
+                    button, game_loop_, character_world_runtime_.session());
+                game_loop_.OnRightClickWorld(x, y);
+                mobile::PerformHapticFeedback(mobile::HapticFeedback::kLightImpact);
+              } else {
+                game_loop_.OnLeftClickWorld(x, y);
+                mobile::PerformHapticFeedback(mobile::HapticFeedback::kSelection);
+              }
+            });
+        if (event.timestamp - ended->started_at_ms >= kMobileContextPressMilliseconds) {
+          mobile::PerformHapticFeedback(mobile::HapticFeedback::kLightImpact);
+        }
+      }
+    } else if (game_loop_.game_ui().is_initialized()) {
+      // The final sample can contain movement without a preceding motion event.
+      game_loop_.game_ui().input_router().DismissWorldTouch();
+    }
+    return;
+  }
+  if (ended->owner != TouchOwner::kGlueUi) {
+    return;
+  }
+  SDL_Event pointer{};
+  pointer.type = SDL_MOUSEBUTTONUP;
+  pointer.button.type = SDL_MOUSEBUTTONUP;
+  pointer.button.timestamp = event.timestamp;
+  pointer.button.windowID = event.windowID;
+  pointer.button.button = SDL_BUTTON_LEFT;
+  pointer.button.state = SDL_RELEASED;
+  pointer.button.clicks = 1u;
+  pointer.button.x = static_cast<Sint32>(std::lround(ended->current.logical_x));
+  pointer.button.y = static_cast<Sint32>(std::lround(ended->current.logical_y));
+  HandleMouseUp(pointer);
+  last_mobile_glue_tap_ms_ = event.timestamp;
+  last_mobile_glue_tap_x_ = ended->current.logical_x;
+  last_mobile_glue_tap_y_ = ended->current.logical_y;
+}
+
+void GlueClient::CancelMobileInput() {
+  CancelMobileMouse();
+  openwow::platform::WindowManager::Get().ClearVirtualCursorPosition();
+  const auto contacts = mobile_input_.TakeAllContacts();
+  const bool had_glue_contact = std::any_of(
+      contacts.begin(), contacts.end(), [](const mobile::TouchContact& contact) {
+        return contact.owner == mobile::TouchOwner::kGlueUi;
+      });
+  if (game_loop_.game_ui().is_initialized()) {
+    game_loop_.game_ui().input_router().CancelTouch();
+  }
+  ReleaseMobileMovement();
+  EndMobileCamera();
+
+  if (!had_glue_contact) {
+    return;
+  }
+
+  if (!dragging_slider_name_.empty()) {
+    const std::string released = dragging_slider_name_;
+    dragging_slider_name_.clear();
+    mouse_capture_widget_name_.clear();
+    (void)DispatchWidgetEvent(released, "OnMouseUp", released + ".OnMouseUp",
+                              {MakeLuaString("LeftButton")});
+  } else if (!mouse_capture_widget_name_.empty()) {
+    const std::string released = mouse_capture_widget_name_;
+    mouse_capture_widget_name_.clear();
+    (void)DispatchWidgetEvent(released, "OnMouseUp", released + ".OnMouseUp",
+                              {MakeLuaString("LeftButton")});
+  }
+  if (!pressed_widget_name_.empty()) {
+    const std::string released = pressed_widget_name_;
+    pressed_widget_name_.clear();
+    if (!glue_widgets_.HighlightLocked(released) &&
+        !openwow::text::EqualsIgnoreCaseAscii(
+            glue_widgets_.GetButtonState(released), "DISABLED")) {
+      glue_widgets_.SetButtonState(released, "NORMAL");
+    }
+    (void)DispatchWidgetEvent(released, "OnMouseUp", released + ".OnMouseUp",
+                              {MakeLuaString("LeftButton")});
+  }
+}
+#endif
+
 void GlueClient::HandleTextInput(const SDL_Event &event) {
   UpdateFocusedEditBoxInputLanguage();
 
@@ -925,10 +1731,7 @@ void GlueClient::HandleKeyDown(const SDL_Event &event) {
   if ((event.key.keysym.mod & KMOD_ALT) != 0 &&
       (scancode == SDL_SCANCODE_RETURN ||
        scancode == SDL_SCANCODE_KP_ENTER)) {
-    const auto next_flag = is_fullscreen_desktop_ ? 0U : SDL_WINDOW_FULLSCREEN_DESKTOP;
-    if (SDL_SetWindowFullscreen(window_, next_flag) == 0) {
-      is_fullscreen_desktop_ = !is_fullscreen_desktop_;
-
+    if (openwow::core::ida::GxToggleFullscreen()) {
       RefreshLayout();
     } else {
       openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kWarn,
@@ -1100,7 +1903,7 @@ void GlueClient::HandleKeyDown(const SDL_Event &event) {
     ShowCharacterCreate();
   } else if (mode_ == UiMode::kCharacterSelect && scancode == SDL_SCANCODE_RETURN) {
     EnterSelectedCharacter();
-  } else if (scancode == SDL_SCANCODE_ESCAPE) {
+  } else if (scancode == SDL_SCANCODE_ESCAPE && mode_ != UiMode::kInWorld) {
     if (mode_ == UiMode::kCharacterCreate) {
       (void)glue_runtime_.DispatchFirstAvailableWithArgs({"SetGlueScreen"}, "GlueParent",
                                                          {"charselect"}, false);
@@ -1118,25 +1921,17 @@ void GlueClient::HandleKeyDown(const SDL_Event &event) {
       realm_runtime_.session.Disconnect();
       game_state_.connected = false;
       SetMode(UiMode::kLogin);
-    } else if (mode_ == UiMode::kInWorld) {
-
+    } else {
+      running_ = false;
+    }
+  } else if (mode_ == UiMode::kInWorld) {
+    if (scancode == SDL_SCANCODE_ESCAPE) {
       if (auto* const session = character_world_runtime_.session();
           session != nullptr && game_loop_.cinematic_player().IsPlaying()) {
         game_loop_.cinematic_player().Skip(*session);
         return;
       }
-
-      if (game_loop_.targeting().HasTarget()) {
-        game_loop_.targeting().ClearTarget();
-      } else {
-        if (lua_State *L = game_loop_.game_ui().lua_state()) {
-          (void)openwow::ui::CallLuaGlobalIfFunction(L, "ToggleGameMenu");
-        }
-      }
-    } else {
-      running_ = false;
     }
-  } else if (mode_ == UiMode::kInWorld) {
 
     const std::string key_name =
         openwow::game::actions::bindings::adapters::platform::SdlKeyDownToBindingChord(
@@ -1145,6 +1940,7 @@ void GlueClient::HandleKeyDown(const SDL_Event &event) {
             event.key.repeat != 0);
     if (!key_name.empty() &&
         game_loop_.binding_input().KeyDown(key_name)) {
+      UpdateTextInputState();
       return;
     }
   }

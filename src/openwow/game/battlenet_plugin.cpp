@@ -72,7 +72,12 @@ std::filesystem::path MainBundleFrameworksDirectory() {
   if (!converted) {
     return {};
   }
-  return std::filesystem::path(utf8.data()) / "Contents" / "Frameworks";
+  const std::filesystem::path bundle_path(utf8.data());
+#if defined(OPENWOW_PLATFORM_IOS)
+  return bundle_path / "Frameworks";
+#else
+  return bundle_path / "Contents" / "Frameworks";
+#endif
 }
 #endif
 
@@ -88,11 +93,13 @@ public:
     if (!frameworks.empty()) {
       candidates[0] = frameworks / file_name;
     }
+#if !defined(OPENWOW_PLATFORM_IOS)
     std::error_code cwd_error;
     const std::filesystem::path cwd = std::filesystem::current_path(cwd_error);
     if (!cwd_error) {
       candidates[1] = cwd / file_name;
     }
+#endif
     for (const auto& candidate : candidates) {
       if (candidate.empty()) {
         continue;

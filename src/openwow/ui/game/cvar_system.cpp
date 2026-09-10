@@ -5,6 +5,7 @@
 #include "openwow/core/console.h"
 #include "openwow/core/cvar.h"
 #include "openwow/core/decimal_parse.h"
+#include "openwow/core/platform_runtime_policy.h"
 #include "openwow/platform/system/os_system_info.h"
 #include "openwow/core/screenshot_system.h"
 #include "openwow/data/formats/dbc/dbc_table_registry.h"
@@ -23,11 +24,13 @@
 #include "openwow/ui/game/api/game_lua_api_guild_roster_view.h"
 #include "openwow/ui/game/api/game_lua_api_talent.h"
 #include "openwow/ui/game/game_ui_manager.h"
+#include "openwow/ui/game/game_ui_scale.h"
 #include "openwow/ui/script_boolean.h"
 #include "openwow/ui/runtime/security/protected_action_gate.h"
 #include "openwow/ui/game/secure_execution.h"
 #include "openwow/platform/filesystem/filesystem.h"
 #include "openwow/foundation/diagnostics/logging.h"
+#include "openwow/foundation/diagnostics/performance_logging.h"
 #include "openwow/foundation/text/ascii.h"
 
 #include <algorithm>
@@ -803,7 +806,7 @@ std::string GetCurrentGameUiLocaleCode() {
 }
 
 const char *GetAutoInteractDefaultValue() {
-  return GetCurrentGameUiLocaleCode() == "koKR" ? "0" : "1";
+  return GetCurrentGameUiLocaleCode() == "koKR" ? "1" : "0";
 }
 
 const char *GetTimeMgrUseMilitaryTimeDefaultValue() {
@@ -858,6 +861,26 @@ bool ParticleDensityValidationCallback(const std::string &, const std::string &,
   }
 
   return true;
+}
+
+bool RenderScaleValidationCallback(const std::string &name, const std::string &,
+                                   const std::string &new_value) {
+  char *end = nullptr;
+  const float value = std::strtof(new_value.c_str(), &end);
+  if (end != new_value.c_str() && end == new_value.c_str() + new_value.size() &&
+      value >= openwow::core::kWorldRenderScaleMin &&
+      value <= openwow::core::kWorldRenderScaleMax) {
+    return true;
+  }
+
+  openwow::core::ida::ConsoleAddLine(
+      "renderScale must be a number between 0.5 and 1.0.",
+      openwow::core::ida::COLOR_DEFAULT);
+  openwow::diagnostics::Log(
+      openwow::diagnostics::LogLevel::kWarn,
+      "CVar validation: rejected " + name + " value=\"" + new_value +
+          "\" source=CVar write/config reason=expected a finite number in [0.5, 1.0]");
+  return false;
 }
 
 bool ValidateCameraFloatRange(const std::string& new_value,
@@ -1974,6 +1997,27 @@ void CVarSystem::RegisterDefaults() {
   register_gx_fallback("fixedFunction", "0", pending_display,
                        "Force fixed function rendering");
 
+  RegisterNativeCVar(
+      "renderScale",
+      std::to_string(openwow::core::GetPlatformRuntimePolicy().default_world_render_scale),
+      F::Archive, "World rendering resolution scale (0.5-1.0; UI is unchanged)",
+      RenderScaleValidationCallback, openwow::core::kWorldRenderScaleMin,
+      openwow::core::kWorldRenderScaleMax, 1);
+
+  RegisterNativeCVar(
+      "performanceLog",
+      openwow::core::GetPlatformRuntimePolicy().constrained_mobile_runtime ? "1" : "0",
+      F::Archive, "Release performance logging (0=off, 1=on)",
+      [](const std::string&, const std::string&, const std::string& value) {
+        if (value != "0" && value != "1") {
+          openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kWarn,
+              "CVar validation: performanceLog expects 0 or 1");
+          return false;
+        }
+        openwow::diagnostics::SetPerformanceLoggingEnabled(value == "1");
+        return true;
+      }, 0.0f, 1.0f);
+
   RegisterCVar("farclip", "350", F::Archive, "View distance");
   RegisterCVar("nearclip", "0.2", F::Archive, "Near clip plane distance");
   RegisterCVar("horizonFarclipScale", "4.0", F::Archive, "Far clip plane scale for horizon");
@@ -2284,7 +2328,9 @@ void CVarSystem::RegisterDefaults() {
   RegisterCVar("autoStand", "1", F::Account, "Automatically stand when needed");
   RegisterCVar("autoClearAFK", "1", F::Account, "Automatically clear AFK when moving or chatting");
   RegisterCVar("blockTrades", "0", F::Character, "Whether to automatically block trade requests");
-  RegisterCVar("alwaysCompareItems", "0", F::Account, "Always show item comparison tooltips");
+  // Intentional deviation from the original client's default of 0: enable item
+  // comparisons without a modifier key, including when using touch input.
+  RegisterCVar("alwaysCompareItems", "1", F::Account, "Always show item comparison tooltips");
   RegisterCVar("equipmentManager", "0", F::Character, "Enables the equipment management UI");
   RegisterCVar("targetOfTargetMode", "5", F::Account,
                "The conditions under which target of target should be shown");
@@ -2432,7 +2478,7 @@ void CVarSystem::RegisterDefaults() {
   RegisterCVar("nameplateShowFriendlyGuardians", "1", F::Character, "");
   RegisterCVar("nameplateShowFriendlyTotems", "1", F::Character, "");
   RegisterCVar(
-      "nameplateAllowOverlap", "1", F::Character,
+      "nameplateAllowOverlap", "0", F::Character,
       "switches between overlapping nameplates or the (old) never overlapping version");
   RegisterCVar("unitHighlights", "1", F::Account,
                "Whether the highlight circle around units should be displayed");
@@ -2531,7 +2577,8 @@ void CVarSystem::RegisterDefaults() {
                "Receive notification when guild members log on/off");
 
   RegisterCVar("useUiScale", "0", F::Archive, "Enable UI scaling");
-  RegisterCVar("uiScale", "1.0", F::Archive, "UI scale factor", 0.64f, 1.0f);
+  RegisterCVar("uiScale", "1.0", F::Archive, "UI scale factor",
+               0.64f, kConfiguredUiScaleSliderMaximum);
 
   RegisterCVar("Gamma", "1.0", F::Archive, "Gamma correction");
   RegisterCVar("scriptErrors", "0", F::Account, "Show Lua script errors");
@@ -2573,6 +2620,8 @@ void CVarSystem::RegisterDefaults() {
   }
 
   RegisterCVar("locale", "****", F::Archive, "Client locale");
+  RegisterCVar("useEnglishAudio", "0", F::Archive,
+               "Override the locale and use English audio");
   RegisterCVar("portal", "", F::None, "Name of Battle.net portal to use");
   RegisterCVar("realmListbn", "", F::None, "Address of Battle.net server");
   RegisterCVar("dbCompress", "-1", F::Archive, "Database compression");

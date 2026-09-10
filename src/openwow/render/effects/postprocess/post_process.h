@@ -112,6 +112,8 @@ struct PostProcessSettings {
   bool death_enabled{true};
   bool rectangle_textures{true};
   std::uint8_t multisample{1};
+  float render_scale{1.0f};
+  bool lazy_effect_framebuffers{false};
 };
 
 enum class PostProcessApplyOutcome : std::uint8_t {
@@ -196,6 +198,8 @@ class PostProcess {
 
   bool RestoreRendererDeviceResources();
 
+  void ReleaseTransientEffectFramebuffers();
+
   void Update(float dt);
 
   [[nodiscard]] PostProcessApplyResult Apply(bgfx::ViewId base_view);
@@ -275,6 +279,9 @@ private:
   void CreateResources();
   void DestroyResources();
   void CreateFramebuffers();
+  void CreateEffectFramebuffers();
+  void EnsureEffectFramebuffers();
+  void DestroyEffectFramebuffers();
   void DestroyFramebuffers();
 
   [[nodiscard]] bool RenderFullscreenQuad(
@@ -298,7 +305,9 @@ private:
   bool death_requested_enabled_ = false;
   bool death_cvar_enabled_ = true;
   bool rectangle_textures_ = true;
+  bool lazy_effect_framebuffers_ = false;
   std::uint8_t multisample_ = 1;
+  float render_scale_ = 1.0f;
   float requested_death_intensity_ = 0.0f;
   float target_death_intensity_ = 0.0f;
   float current_death_intensity_ = 0.0f;

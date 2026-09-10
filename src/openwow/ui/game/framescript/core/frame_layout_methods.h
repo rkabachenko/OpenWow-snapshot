@@ -12,5 +12,7 @@ void ApplySimpleFrameLayoutMethods(lua_State* lua);
                                                      int self_index);
 int LuaFrame_Raise(lua_State* lua);
 int LuaFrame_Lower(lua_State* lua);
+void SetLuaFrameLevel(lua_State* lua, int frame_index, int level);
+void RaiseLuaFrameResolved(lua_State* lua, int frame_index);
 
 }

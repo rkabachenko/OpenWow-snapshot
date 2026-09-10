@@ -22,3 +22,5 @@ compile_commands.json
 *.log
 /logs/
 /artifacts/
+/Data/
+/LocalData/

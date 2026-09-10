@@ -10,6 +10,7 @@
 #include "openwow/ui/game/framescript/core/frame_runtime_identity.h"
 #include "openwow/ui/game/framescript/core/script_region_ownership.h"
 #include "openwow/ui/game/framescript/core/frame_layout_methods.h"
+#include "openwow/ui/game/framescript/core/frame_layout_state.h"
 #include "openwow/ui/game/framescript/core/frame_region_geometry.h"
 #include "openwow/ui/game/framescript/xml/frame_xml_region_materializer.h"
 #include "openwow/ui/game/framescript/core/frame_region_state.h"
@@ -83,6 +84,9 @@ void ApplyBaseFrameMethods(lua_State *L) {
     return 0;
   }, 0);
   lua_setfield(L, -2, "Hide");
+
+  lua_pushcfunction(L, LuaRegion_SetShown);
+  lua_setfield(L, -2, "SetShown");
 
   lua_pushcclosure(L, [](lua_State *Ls) -> int {
     const int self = ValidateFrameScriptSelf(Ls);
@@ -743,7 +747,7 @@ void ApplyCommonFrameMethods(lua_State *L) {
 
   lua_pushcclosure(L, [](lua_State *Ls) -> int {
     const int self = ValidateFrameSelf(Ls);
-    if (detail::LuaFrameMutationBlocked(Ls, self)) {
+    if (!detail::AllowLuaFrameProtectedMutation(Ls, self)) {
       return 0;
     }
     lua_pushinteger(Ls, static_cast<lua_Integer>(luaL_optinteger(Ls, 2, 0)));
@@ -820,7 +824,7 @@ void ApplyCommonFrameMethods(lua_State *L) {
 
   lua_pushcclosure(L, [](lua_State *Ls) -> int {
     const int self_index = ValidateFrameLikeObjectSelf(Ls);
-    if (detail::LuaFrameMutationBlocked(Ls, self_index)) {
+    if (!detail::AllowLuaFrameProtectedMutation(Ls, self_index)) {
       return 0;
     }
 
@@ -857,6 +861,7 @@ void ApplyCommonFrameMethods(lua_State *L) {
   lua_pushcclosure(L, [](lua_State *Ls) -> int {
     const int self_idx = ValidateFrameResizeSelf(Ls);
     if (detail::LuaFrameMutationBlocked(Ls, self_idx)) {
+      LogFrameMoveSizingFailure(Ls, self_idx, "StartMoving", "protected-state");
       return 0;
     }
 
@@ -865,14 +870,8 @@ void ApplyCommonFrameMethods(lua_State *L) {
       return luaL_error(Ls, "Frame %s is not movable", usage_name);
     }
 
-    auto *manager = runtime::WorldUiRuntimeContext::FromLua(Ls);
     const char *frame_key = GetFrameRuntimeKeyOrName(Ls, self_idx);
-    if (manager != nullptr && frame_key != nullptr &&
-        manager->input_router().BeginFrameMoveSizing(frame_key, 4)) {
-      lua_pushboolean(Ls, 1);
-      lua_setfield(Ls, self_idx, "__ow_user_placed");
-      manager->frame_store().SetFrameUserPlaced(frame_key, true);
-    }
+    (void)BeginTrackedFrameMoveSizing(Ls, self_idx, frame_key != nullptr ? frame_key : "", 4);
     return 0;
   }, 0);
   lua_setfield(L, frame, "StartMoving");

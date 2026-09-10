@@ -299,6 +299,9 @@ void ApplyPlayerModelSpecificMethods(lua_State *L) {
   lua_pushcfunction(L, LuaPlayerModelSetCreature);
   lua_setfield(L, f, "SetCreature");
 
+  lua_pushcfunction(L, LuaPlayerModelSetDisplayInfo);
+  lua_setfield(L, f, "SetDisplayInfo");
+
   lua_pushcfunction(L, LuaPlayerModelSetUnit);
   lua_setfield(L, f, "SetUnit");
 

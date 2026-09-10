@@ -26,6 +26,8 @@ class SessionEventBridge {
 
   [[nodiscard]] bool SynchronizePlayerUnitToken();
 
+  [[nodiscard]] bool PublishInitialPlayerUnitState();
+
   void Shutdown();
 
  private:
@@ -48,7 +50,6 @@ class SessionEventBridge {
 
   struct QuestSnapshot {
     std::size_t quest_count{0};
-    std::uint64_t watch_update_serial{0};
     bool has_active_details{false};
     bool has_active_reward{false};
     bool has_active_request{false};
@@ -85,11 +86,6 @@ class SessionEventBridge {
 
   struct MailSnapshot {
     std::size_t inbox_count{0};
-  };
-
-  struct CombatSnapshot {
-    bool in_combat{false};
-    std::uint64_t combat_log_serial{0};
   };
 
   struct TalentSnapshot {
@@ -132,7 +128,6 @@ class SessionEventBridge {
   void PollSpellState();
   void PollTradeState();
   void PollMailState(float elapsed_seconds);
-  void PollCombatState();
   void PollTalentState();
   void PollPlayerExtendedState();
   void FirePlayerFlagTransitionEvents(std::uint32_t player_flags);
@@ -154,7 +149,6 @@ class SessionEventBridge {
   SpellSnapshot prev_spells_;
   TradeSnapshot prev_trade_;
   MailSnapshot prev_mail_;
-  CombatSnapshot prev_combat_;
   TalentSnapshot prev_talents_;
   AuraSnapshot prev_auras_;
   PlayerStateSnapshot prev_player_state_;

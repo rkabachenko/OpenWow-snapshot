@@ -708,7 +708,8 @@ constexpr std::size_t kMaximumClippedPolygonVertices = 15u;
 }
 
 [[nodiscard]] C3Vector AirborneEdgeResponseNormal(
-    const MovementCollisionContact& contact, const C3Vector& direction) {
+    const MovementCollisionContact& contact, const C3Vector& direction,
+    const C3Vector& contact_position) {
   const C3Vector surface =
       NormalizeOr(contact.surface_normal, contact.normal);
   const std::array<C3Vector, 3> edges{{
@@ -719,16 +720,21 @@ constexpr std::size_t kMaximumClippedPolygonVertices = 15u;
   C3Vector selected{};
   float selected_metric = std::numeric_limits<float>::max();
   bool have_selected = false;
-  for (const C3Vector& edge : edges) {
+  for (std::size_t index = 0; index < edges.size(); ++index) {
+    const C3Vector& edge = edges[index];
     const float length_squared = LengthSquared(edge);
     if (length_squared < Constants::kTiny) {
       continue;
     }
     const C3Vector normalized = Scale(edge, 1.0f / std::sqrt(length_squared));
 
-    if (!have_selected || normalized.y < selected_metric) {
+    const C3Vector from_start = Subtract(contact_position, contact.vertices[index]);
+    const C3Vector perpendicular = Subtract(
+        from_start, Scale(normalized, Dot(from_start, normalized)));
+    const float distance_squared = LengthSquared(perpendicular);
+    if (!have_selected || distance_squared < selected_metric) {
       selected = normalized;
-      selected_metric = normalized.y;
+      selected_metric = distance_squared;
       have_selected = true;
     }
   }
@@ -814,7 +820,8 @@ constexpr std::size_t kMaximumClippedPolygonVertices = 15u;
 [[nodiscard]] C3Vector Deflect(
     const MovementCollisionBody& body, const C3Vector& direction,
     const float contact_distance,
-    const float total_distance, const MovementCollisionContact& contact) {
+    const float total_distance, const C3Vector& contact_position,
+    const MovementCollisionContact& contact) {
   const C3Vector surface =
       NormalizeOr(contact.surface_normal, contact.normal);
   const bool edge_response =
@@ -822,7 +829,7 @@ constexpr std::size_t kMaximumClippedPolygonVertices = 15u;
       (surface.z < 0.0f && -surface.z > Constants::kWalkableNormalZ);
   const C3Vector response =
       edge_response
-          ? AirborneEdgeResponseNormal(contact, direction)
+          ? AirborneEdgeResponseNormal(contact, direction, contact_position)
           : AirborneGeneratedResponseNormal(body, contact);
   const float horizontal_length =
       std::sqrt(response.x * response.x + response.y * response.y);
@@ -951,6 +958,43 @@ constexpr std::size_t kMaximumClippedPolygonVertices = 15u;
   return 0.0f;
 }
 
+[[nodiscard]] std::optional<C3Vector> LowerHullContactNormal(
+    const MovementCollisionContact& contact) {
+  const auto count = contact.generated_normal_count;
+  if (count == 0u || count > 4u) {
+    return std::nullopt;
+  }
+  for (std::size_t index = 0; index < count; ++index) {
+    if (std::fabs(contact.generated_normals[index].z +
+                  Constants::kLowerPlaneVertical) >= Constants::kTraceEpsilon) {
+      return std::nullopt;
+    }
+  }
+  if (count == 1u) {
+    return contact.generated_normals[0];
+  }
+  if (count == 2u) {
+    return Scale(Add(contact.generated_normals[0],
+                     contact.generated_normals[1]), 0.638556f);
+  }
+  if (count == 4u) {
+    return C3Vector{};
+  }
+  std::size_t x_faces = 0u;
+  C3Vector x_face{};
+  C3Vector y_face{};
+  for (std::size_t index = 0; index < count; ++index) {
+    const auto& normal = contact.generated_normals[index];
+    if (std::fabs(normal.y) < Constants::kTraceEpsilon) {
+      ++x_faces;
+      x_face = normal;
+    } else {
+      y_face = normal;
+    }
+  }
+  return x_faces == 1u ? x_face : y_face;
+}
+
 [[nodiscard]] C3Vector GroundWalkableResponse(
     MovementCollisionBody& body,
     const C3Vector& displacement,
@@ -958,18 +1002,22 @@ constexpr std::size_t kMaximumClippedPolygonVertices = 15u;
   C3Vector normal =
       NormalizeOr(contact.surface_normal, contact.normal);
 
-  if (body.stepping && normal.z <= Constants::kWalkableNormalZ &&
-      !std::isnan(normal.z) &&
-      LengthSquared(normal) >= Constants::kTiny) {
-    normal = Scale(normal, -1.0f);
+  if (normal.z <= Constants::kWalkableNormalZ) {
+    if (const auto lower_normal = LowerHullContactNormal(contact);
+        lower_normal.has_value() &&
+        LengthSquared(*lower_normal) >= Constants::kTiny) {
+      normal = Scale(*lower_normal, -1.0f);
+    }
   }
   const float distance = Length(displacement);
-  if (distance < Constants::kTiny ||
-      std::fabs(normal.z) < Constants::kTiny) {
+  if (distance < Constants::kTiny) {
     return displacement;
   }
   C3Vector direction = Scale(displacement, 1.0f / distance);
-  float lift = -Dot(normal, direction) * distance / normal.z;
+  const float numerator = -Dot(normal, direction) * distance;
+  float lift = std::fabs(normal.z) < Constants::kTiny
+                   ? std::copysign(std::numeric_limits<float>::max(), numerator)
+                   : numerator / normal.z;
 
   if (!body.stepping || lift >= 0.0f || std::isnan(lift)) {
     const float upward_allowance = StepAllowance(body);
@@ -1496,7 +1544,7 @@ MovementCollisionTrace MovementCollisionSolver::QueryStaticOverlap(
   return result;
 }
 
-bool MovementCollisionSolver::TryTerrainStep(
+std::optional<bool> MovementCollisionSolver::TryTerrainStep(
     MovementCollisionBody& body, const C3Vector& displacement,
     const MovementCollisionContact& trigger,
     const MovementCollisionStep& step) {
@@ -1531,13 +1579,13 @@ bool MovementCollisionSolver::TryTerrainStep(
       const MovementCollisionTrace pre =
           SweepHull(trial, Scale(push, probe_length), &query_ok);
       if (!query_ok) {
-        return false;
+        return std::nullopt;
       }
       if (pre.hit && !pre.contacts.empty()) {
         const C3Vector& normal = pre.contacts.front().surface_normal;
 
-        if (normal.x == trigger_normal.x && normal.y == trigger_normal.y &&
-            normal.z == trigger_normal.z) {
+        if (normal.x != trigger_normal.x || normal.y != trigger_normal.y ||
+            normal.z != trigger_normal.z) {
           probe_direction = push;
         }
       }
@@ -1547,9 +1595,9 @@ bool MovementCollisionSolver::TryTerrainStep(
   const C3Vector up{0.0f, 0.0f, allowance};
   const MovementCollisionTrace up_trace = SweepHull(trial, up, &query_ok);
   if (!query_ok) {
-    return false;
+    return std::nullopt;
   }
-  const float rise =
+  float rise =
       up_trace.hit ? std::max(0.0f, up_trace.distance) : allowance;
 
   const float banked_rise =
@@ -1565,7 +1613,7 @@ bool MovementCollisionSolver::TryTerrainStep(
   const C3Vector lateral = Scale(probe_direction, probe_length);
   const MovementCollisionTrace side = SweepHull(trial, lateral, &query_ok);
   if (!query_ok) {
-    return false;
+    return std::nullopt;
   }
   if (side.hit) {
     advance = std::max(0.0f, side.distance);
@@ -1603,7 +1651,7 @@ bool MovementCollisionSolver::TryTerrainStep(
           const MovementCollisionTrace retry =
               SweepHull(trial, slide, &query_ok);
           if (!query_ok) {
-            return false;
+            return std::nullopt;
           }
           const float fraction =
               retry.hit ? std::clamp(retry.distance / slide_length, 0.0f, 1.0f)
@@ -1611,6 +1659,7 @@ bool MovementCollisionSolver::TryTerrainStep(
           lateral_clear = !retry.hit;
           const C3Vector moved = Scale(slide, fraction);
           trial.position = Add(trial.position, moved);
+          rise += moved.z;
           advance += std::sqrt(moved.x * moved.x + moved.y * moved.y);
         }
       }
@@ -1621,7 +1670,7 @@ bool MovementCollisionSolver::TryTerrainStep(
     trial.position = Add(trial.position, lateral);
   }
 
-  if (!lateral_clear && advance < body.radius) {
+  if (!lateral_clear && advance <= body.radius) {
     body.stepping = false;
     return false;
   }
@@ -1629,7 +1678,7 @@ bool MovementCollisionSolver::TryTerrainStep(
   const C3Vector down{0.0f, 0.0f, -rise};
   const MovementCollisionTrace down_trace = SweepHull(trial, down, &query_ok);
   if (!query_ok) {
-    return false;
+    return std::nullopt;
   }
   const float drop = down_trace.hit ? down_trace.distance : rise;
   trial.position.z -= drop;
@@ -1638,9 +1687,13 @@ bool MovementCollisionSolver::TryTerrainStep(
   if (down_trace.hit && !down_trace.contacts.empty() &&
       !Walkable(body, down_trace.contacts.front().surface_normal)) {
 
-    accepted = StepFallCarriesForward(
-        body, trial.position, direction, std::max(0.0f, rise - drop),
+    const auto fall_acceptance = StepFallCarriesForward(
+        body, trial.position, probe_direction, std::max(0.0f, rise - drop),
         step.movement_speed, step.safe_fall);
+    if (!fall_acceptance.has_value()) {
+      return std::nullopt;
+    }
+    accepted = *fall_acceptance;
   }
   if (!accepted) {
     body.stepping = false;
@@ -1653,7 +1706,7 @@ bool MovementCollisionSolver::TryTerrainStep(
   return true;
 }
 
-bool MovementCollisionSolver::StepFallCarriesForward(
+std::optional<bool> MovementCollisionSolver::StepFallCarriesForward(
     const MovementCollisionBody& body, const C3Vector& trial_position,
     const C3Vector& direction, const float free_height,
     const float movement_speed, const bool safe_fall) {
@@ -1688,7 +1741,7 @@ bool MovementCollisionSolver::StepFallCarriesForward(
   const MovementCollisionResult sim = SolveAirborne(simulated, fall_step);
   if (sim.status == MovementCollisionStatus::kQueryFailed ||
       sim.status == MovementCollisionStatus::kCancelled) {
-    return false;
+    return std::nullopt;
   }
   const float offset_x = simulated.position.x - body.position.x;
   const float offset_y = simulated.position.y - body.position.y;
@@ -1903,36 +1956,16 @@ MovementCollisionResult MovementCollisionSolver::SolveGround(
     } else {
 
       if (!body.stepping) {
-        (void)TryTerrainStep(body, remaining, front, step);
+        if (!TryTerrainStep(body, remaining, front, step).has_value()) {
+          result.status = callbacks_.cancelled && callbacks_.cancelled()
+                              ? MovementCollisionStatus::kCancelled
+                              : MovementCollisionStatus::kQueryFailed;
+          return result;
+        }
       }
       if (body.stepping) {
 
-        const float allowance = StepAllowance(body);
-        C3Vector response_surface = surface;
-
-        if (response_surface.z <= Constants::kWalkableNormalZ &&
-            !std::isnan(response_surface.z) &&
-            LengthSquared(response_surface) >= Constants::kTiny) {
-          response_surface = Scale(response_surface, -1.0f);
-        }
-        C3Vector forward = remaining;
-        float lift;
-        if (std::fabs(response_surface.z) < Constants::kTiny) {
-          lift = allowance;
-        } else {
-          lift = -(response_surface.x * remaining.x +
-                   response_surface.y * remaining.y +
-                   response_surface.z * remaining.z) /
-                 response_surface.z;
-          if (lift < 0.0f) {
-            forward = {};
-            lift = allowance;
-          } else if (lift > allowance) {
-            forward = Scale(forward, allowance / lift);
-            lift = allowance;
-          }
-        }
-        remaining = Add(forward, {0.0f, 0.0f, lift});
+        remaining = GroundWalkableResponse(body, remaining, front);
       } else {
         remaining = HorizontalWallDeflect(remaining, trace.contacts);
       }
@@ -2114,6 +2147,9 @@ MovementCollisionResult MovementCollisionSolver::SolveAirborne(
             contact_distance, contact_time_seconds,
             trace.contacts.front());
 
+    const C3Vector deflection =
+        Deflect(body, incoming_direction, trace.distance, remaining_distance,
+                pre_response_contact, trace.contacts.front());
     const float response_duration_seconds = AdjustAirborneContactTime(
         step, pre_contact_position, contact_time_seconds,
         remaining_duration_seconds, initial_horizontal,
@@ -2182,9 +2218,6 @@ MovementCollisionResult MovementCollisionSolver::SolveAirborne(
       break;
     }
 
-    const C3Vector deflection =
-        Deflect(body, incoming_direction, trace.distance, remaining_distance,
-                trace.contacts.front());
     C3Vector deflected = Add(remaining, deflection);
     if (deflection_iterations != 0u) {
       const float endpoint_x =

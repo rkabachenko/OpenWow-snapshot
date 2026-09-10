@@ -25,11 +25,13 @@ struct TooltipLine {
     bool is_left = true;
     std::string right_text;
     std::string right_color;
+    std::string texture_path;
     bool wrap = false;
 };
 
 struct TooltipItemInstanceData {
     std::uint32_t permanent_enchant_id = 0;
+    std::array<std::uint32_t, 3> socket_enchant_ids = {};
     std::array<std::uint32_t, 3> gem_item_ids = {};
     std::uint32_t durability = 0;
     std::uint32_t max_durability = 0;
@@ -55,6 +57,8 @@ public:
         uint32_t player_race_mask = 0xFFFF,
         const openwow::data::dbc::DbcLoader* dbc = nullptr,
         uint32_t scaling_level = 0,
+        std::int32_t random_property_id = 0,
+        std::uint32_t suffix_factor = 0,
         const TooltipItemInstanceData* instance_data = nullptr,
         const openwow::game::WorldSession* session = nullptr
     );

@@ -6,6 +6,7 @@
 #include "openwow/ui/lua_taint_api.h"
 #include "openwow/ui/lua_post_hook_closure.h"
 #include "openwow/foundation/diagnostics/logging.h"
+#include "openwow/foundation/diagnostics/performance_logging.h"
 
 extern "C" {
 #include <lua.hpp>
@@ -37,14 +38,15 @@ void PushPrefixedField(lua_State* const state, const int table_index,
     std::memcpy(key.data(), prefix.data(), prefix.size());
     std::memcpy(key.data() + prefix.size(), suffix.data(), suffix.size());
     key[prefix.size() + suffix.size()] = '\0';
-    lua_getfield(state, table, key.data());
+    lua_pushstring(state, key.data());
+    lua_rawget(state, table);
     return;
   }
 
   lua_pushlstring(state, prefix.data(), prefix.size());
   lua_pushlstring(state, suffix.data(), suffix.size());
   lua_concat(state, 2);
-  lua_gettable(state, table);
+  lua_rawget(state, table);
 }
 
 void FormatLegacyArgumentName(char (&buffer)[32], const int one_based_index) {
@@ -105,19 +107,17 @@ bool PushFrameScriptHandler(lua_State* const state, const int frame_index,
   }
   lua_pop(state, 1);
 
-  lua_getfield(state, frame, handler);
-  if (lua_isfunction(state, -1) != 0) {
-    return true;
-  }
-  lua_pop(state, 1);
-
-  lua_getfield(state, frame, kScriptTableField.data());
+  // AddOn methods and metatable inheritance do not register native scripts.
+  // The Glue adapter stores its explicit registrations in a separate table.
+  lua_pushstring(state, kScriptTableField.data());
+  lua_rawget(state, frame);
   if (lua_istable(state, -1) == 0) {
     lua_pop(state, 1);
     return false;
   }
 
-  lua_getfield(state, -1, handler);
+  lua_pushstring(state, handler);
+  lua_rawget(state, -2);
   lua_remove(state, -2);
   if (lua_isfunction(state, -1) != 0) {
     return true;
@@ -239,10 +239,62 @@ int InvokeFrameScriptFunction(
   }
 
   openwow::ui::lua_set_execution_taint_state(state, caller_taint);
+  const openwow::diagnostics::PerformanceTimer performance_timer;
   const int status = ProtectedFrameScriptCall(
       state, call_argument_count, error_handler, security, handler_taint);
 
   openwow::ui::lua_set_execution_taint_state(state, {});
+
+  if (status != LUA_OK || performance_timer.ElapsedMs() >= 20.0) {
+    // Inspect retained Lua metadata only; never call GetName or resolve layout.
+    lua_Debug source{};
+    lua_pushvalue(state, function_index);
+    const bool has_source = lua_getinfo(state, ">S", &source) != 0;
+    std::string context = "source=";
+    context += has_source && source.source != nullptr && source.source[0] == '@'
+                   ? std::string(std::string_view(source.source + 1).substr(0, 256))
+                   : "inline_or_native";
+    context += " line=" + std::to_string(source.linedefined);
+    if (self != 0 && lua_istable(state, self)) {
+      lua_pushliteral(state, "__ow_frame_key");
+      lua_rawget(state, self);
+      if (lua_type(state, -1) != LUA_TSTRING) {
+        lua_pop(state, 1);
+        lua_pushliteral(state, "__ow_name");
+        lua_rawget(state, self);
+      }
+      if (lua_type(state, -1) == LUA_TSTRING) {
+        context += " frame=";
+        context += std::string_view(lua_tostring(state, -1)).substr(0, 256);
+      }
+      lua_pop(state, 1);
+      lua_pushliteral(state, "__ow_parent");
+      lua_rawget(state, self);
+      if (lua_istable(state, -1)) {
+        lua_pushliteral(state, "__ow_frame_key");
+        lua_rawget(state, -2);
+        if (lua_type(state, -1) == LUA_TSTRING) {
+          context += " parent=";
+          context += std::string_view(lua_tostring(state, -1)).substr(0, 256);
+        }
+        lua_pop(state, 1);
+      }
+      lua_pop(state, 1);
+    }
+    if (is_event && lua_type(state, first_argument_index) == LUA_TSTRING) {
+      context += " event=";
+      context += lua_tostring(state, first_argument_index);
+    }
+    context += " status=" + std::to_string(status) +
+               " lua_kb=" + std::to_string(lua_gc(state, LUA_GCCOUNT, 0));
+    if (status != LUA_OK) {
+      openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kWarn,
+          "FrameScript failure context: stage=callback " + context);
+    }
+    static openwow::diagnostics::PerformanceLogSite performance_site;
+    openwow::diagnostics::LogPerformanceDuration(
+        performance_site, "ui.script_callback", performance_timer, context);
+  }
 
   if (status != LUA_OK) {
     lua_insert(state, saved_globals_start);
@@ -299,6 +351,31 @@ FrameScriptInvocationResult InvokeFrameScriptHandler(
   }
   const auto caller_taint = openwow::ui::lua_get_execution_taint_state(state);
   openwow::ui::lua_set_execution_taint_state(state, {});
+  if (openwow::diagnostics::IsPerformanceLoggingEnabled() && handler != nullptr &&
+      (std::strcmp(handler, "OnShow") == 0 || std::strcmp(handler, "OnHide") == 0) &&
+      lua_istable(state, frame)) {
+    lua_pushliteral(state, "__ow_parent");
+    lua_rawget(state, frame);
+    bool root_child = false;
+    if (lua_istable(state, -1)) {
+      lua_pushliteral(state, "__ow_name");
+      lua_rawget(state, -2);
+      root_child = lua_type(state, -1) == LUA_TSTRING &&
+                   std::strcmp(lua_tostring(state, -1), "UIParent") == 0;
+      lua_pop(state, 1);
+    }
+    lua_pop(state, 1);
+    if (root_child) {
+      lua_pushliteral(state, "__ow_name");
+      lua_rawget(state, frame);
+      if (lua_type(state, -1) == LUA_TSTRING) {
+        openwow::diagnostics::LogPerformanceEvent(
+            std::strcmp(handler, "OnShow") == 0 ? "ui.root_frame_show" : "ui.root_frame_hide",
+            lua_tostring(state, -1));
+      }
+      lua_pop(state, 1);
+    }
+  }
   if (!PushFrameScriptHandler(state, frame, handler)) {
     lua_settop(state, top - argument_count +
                           (registered_error_handler != 0 ? 1 : 0));

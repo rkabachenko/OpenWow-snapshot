@@ -12,6 +12,7 @@
 #include "openwow/ui/xml/frame_xml_parser.h"
 #include "openwow/ui/xml/owned_xml_document_parser.h"
 #include "openwow/foundation/diagnostics/logging.h"
+#include "openwow/foundation/diagnostics/performance_logging.h"
 #include "openwow/foundation/text/ascii.h"
 #include "openwow/vfs/client_path_identity.h"
 
@@ -572,6 +573,9 @@ bool FrameXmlLoader::RunLuaInContext(
     UiLoadStatusSink* status_sink,
     openwow::core::MD5Context* digest,
     const AddonScriptContext& addon_context) {
+  static openwow::diagnostics::PerformanceLogSite performance_site;
+  const openwow::diagnostics::ScopedPerformanceLog performance(
+      performance_site, "ui.lua_file", lua_path);
   if (!vfs_ || !L) return false;
 
   const LuaStackGuard stack_guard(L);
@@ -701,6 +705,9 @@ bool FrameXmlLoader::ProcessXmlInterleaved(
     std::unordered_set<std::string>* xml_stack,
     openwow::core::MD5Context* digest,
     const AddonScriptContext& addon_context) {
+  static openwow::diagnostics::PerformanceLogSite performance_site;
+  const openwow::diagnostics::ScopedPerformanceLog performance(
+      performance_site, "ui.xml_parse_materialize", xml_path);
   if (!vfs_ || !L || result == nullptr || xml_stack == nullptr) {
     return false;
   }

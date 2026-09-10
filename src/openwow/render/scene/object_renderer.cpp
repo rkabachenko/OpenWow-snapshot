@@ -15,6 +15,7 @@
 #include "openwow/render/m2/m2_system.h"
 #include "openwow/render/models/characters/bowstring_renderer.h"
 #include "openwow/render/models/animation/model_instance_transform.h"
+#include "openwow/render/models/animation/m2_attachment_transform.h"
 #include "openwow/render/resources/textures/texture_manager.h"
 #include "openwow/render/scene/m2_instance_render_cost.h"
 #include "openwow/render/scene/occlusion/occlusion_depth_buffer.h"
@@ -94,28 +95,42 @@ constexpr std::array<std::uint32_t, 4> kCharacterReplaceableTextureTypes{
     kCharacterHairReplaceableTextureType,
     kCharacterExtraSkinReplaceableTextureType};
 
-[[nodiscard]] std::uint32_t ResolvePresentationAnimationDurationMs(
+[[nodiscard]] m2::M2InstanceAnimationInfoQuery ResolvePresentationAnimationInfo(
     const m2::M2System& system, const RenderInstance& instance) {
-
   if (instance.m2_instance_id != 0u) {
-    const auto info =
-        system.QueryInstanceAnimationInfo(instance.m2_instance_id);
+    const auto info = system.QueryInstanceAnimationInfo(instance.m2_instance_id);
+    if (m2::IsTerminalM2ResultStatus(info.status)) {
+      return info;
+    }
     if (info.status == m2::M2ResultStatus::kReady &&
         info.info.requested_animation_id == instance.animation.current_anim() &&
-        info.info.sequence_index != m2::kInvalidM2AnimationSequenceIndex &&
-        info.info.duration_ms != 0u) {
-      return info.info.duration_ms;
+        info.info.sequence_index != m2::kInvalidM2AnimationSequenceIndex) {
+      return info;
     }
   }
-  if (instance.m2_model_id != 0u) {
-    const auto sequence = system.QueryModelAnimationSequence(
-        instance.m2_model_id, instance.animation.current_anim());
-    if (sequence.status == m2::M2ResultStatus::kReady &&
-        sequence.has_sequence) {
-      return sequence.sequence.duration_ms;
-    }
+  if (instance.m2_model_id == 0u) {
+    return {};
   }
-  return 0u;
+  const auto sequence = system.QueryModelAnimationSequence(
+      instance.m2_model_id, instance.animation.current_anim());
+  if (sequence.status != m2::M2ResultStatus::kReady) {
+    return {.status = sequence.status, .reason = sequence.reason,
+            .detail = sequence.detail};
+  }
+  if (!sequence.has_sequence) {
+    return {.status = m2::M2ResultStatus::kReady};
+  }
+  return {.status = m2::M2ResultStatus::kReady,
+          .info = {.requested_animation_id = instance.animation.current_anim(),
+                   .resolved_animation_id = sequence.sequence.animation_id,
+                   .sequence_index = sequence.sequence.sequence_index,
+                   .duration_ms = sequence.sequence.duration_ms,
+                   .sequence_flags = sequence.sequence.flags}};
+}
+
+[[nodiscard]] std::uint32_t ResolvePresentationAnimationDurationMs(
+    const m2::M2System& system, const RenderInstance& instance) {
+  return ResolvePresentationAnimationInfo(system, instance).info.duration_ms;
 }
 
 [[nodiscard]] std::uint32_t ResolveModelAnimationDurationMs(
@@ -243,6 +258,7 @@ constexpr std::array<std::uint32_t, 4> kCharacterReplaceableTextureTypes{
                                         const ModelAttachmentSpec &rhs) noexcept {
   return lhs.role == rhs.role && lhs.scale == rhs.scale &&
          lhs.animation_id == rhs.animation_id &&
+         lhs.use_parent_origin_if_missing == rhs.use_parent_origin_if_missing &&
          AttachmentVisualsEqual(lhs.visual, rhs.visual);
 }
 
@@ -304,43 +320,45 @@ void ReconcileItemVisualChildren(m2::M2System &m2_system, ModelAttachmentBinding
   }
 }
 
-[[nodiscard]] std::string BuildCreatureDisplayTexturePath(const std::string_view model_path,
-                                                          const std::string_view texture_name) {
-  if (texture_name.empty()) {
-    return {};
-  }
-  const auto separator = model_path.find_last_of("\\/");
-  if (separator == std::string_view::npos) {
-    return std::string(texture_name);
-  }
-  std::string path(model_path.substr(0u, separator + 1u));
-  path.append(texture_name);
-  return path;
-}
-
-[[nodiscard]] RenderMatrix4x4 BuildM2InstanceModelMatrix(const RenderInstance &inst,
-                                                         const MountRenderer &mount_renderer) {
-  if (inst.has_explicit_world_transform) {
-    return inst.world_transform;
-  }
-
-  float render_x = inst.position[0];
-  float render_y = inst.position[1];
-  float render_z = inst.position[2];
-
+[[nodiscard]] RenderMatrix4x4 BuildM2InstanceModelMatrix(
+    const RenderInstance &inst, const MountRenderer &mount_renderer,
+    const m2::M2System &system) {
   if (inst.is_mounted) {
-    float offset_x = 0.0f;
-    float offset_y = 0.0f;
-    float offset_z = 0.0f;
-    if (mount_renderer.GetRiderOffset(inst.guid, offset_x, offset_y, offset_z)) {
-      render_x += offset_x;
-      render_y += offset_y;
-      render_z += offset_z;
+    RenderMatrix4x4 rider_transform{};
+    if (mount_renderer.GetRiderWorldTransform(
+            inst.guid, inst.scale, rider_transform)) {
+      return rider_transform;
     }
   }
 
-  return BuildM2ModelInstanceTransform(render_x, render_y, render_z,
-                                       inst.orientation, inst.scale);
+  auto matrix = inst.has_explicit_world_transform
+                    ? inst.world_transform
+                    : BuildM2ModelInstanceTransform(
+                          inst.position[0], inst.position[1], inst.position[2],
+                          inst.orientation, inst.scale);
+  if (inst.ground_contact_normal.has_value()) {
+    // Resolve against the body request and sample time that this query will
+    // install, including requests published before the next animation update.
+    const auto animation_info = ResolvePresentationAnimationInfo(system, inst);
+    if (animation_info.status == m2::M2ResultStatus::kReady) {
+      inst.ground_alignment_failure_reported = false;
+      const float alignment = M2SequenceGroundAlignmentWeight(
+          animation_info.info.sequence_flags, inst.animation.current_time_ms(),
+          animation_info.info.duration_ms, inst.animation_playback_rate);
+      ApplyM2SequenceGroundAlignment(
+          matrix, inst.orientation, inst.scale,
+          RenderVec3View{*inst.ground_contact_normal}, alignment);
+    } else if (m2::IsTerminalM2ResultStatus(animation_info.status) &&
+               !inst.ground_alignment_failure_reported) {
+      inst.ground_alignment_failure_reported = true;
+      diagnostics::Log(diagnostics::LogLevel::kWarn,
+          "unit ground alignment stage=model-transform source=M2-sequence guid=" +
+              inst.guid.ToString() + " model=" + inst.model_path +
+              " animation=" + std::to_string(inst.animation.current_anim()) +
+              " reason=" + animation_info.detail);
+    }
+  }
+  return matrix;
 }
 
 [[nodiscard]] bool HasPathSuffix(const std::string &path, const std::string_view suffix) {
@@ -701,8 +719,8 @@ void ObjectRenderer::Update(float dt) {
 
     if ((inst.type_id == game::TypeID::kUnit || inst.type_id == game::TypeID::kPlayer) &&
         request_animation_completed &&
-        (inst.unit_animation.looping ||
-         inst.emitted_unit_animation_completion_serial != inst.unit_animation.serial)) {
+        !inst.unit_animation.looping &&
+        inst.emitted_unit_animation_completion_serial != inst.unit_animation.serial) {
       inst.emitted_unit_animation_completion_serial = inst.unit_animation.serial;
       if (unit_animation_completion_sink_) {
         unit_animation_completion_sink_({
@@ -747,6 +765,8 @@ void ObjectRenderer::PrepareVisibleInstances(
   }
   out_entity_ids.reserve(active.size());
   out_bounding_spheres.reserve(active.size());
+
+  mount_renderer_.PrepareRiderAttachments(active);
 
   ++animation_sample_frame_;
 
@@ -845,7 +865,7 @@ void ObjectRenderer::Render(std::uint8_t view_id, const float *view_mtx, const f
                             float screen_w, float screen_h,
                             const std::span<const std::uint64_t> entity_ids) {
   RenderPass(view_id, view_mtx, proj_mtx, screen_w, screen_h, m2::M2RenderPassScope::kOpaqueOnly,
-             entity_ids, nullptr);
+             entity_ids, nullptr, true);
 }
 
 void ObjectRenderer::RenderTransparent(std::uint8_t view_id, const float *view_mtx,
@@ -853,7 +873,15 @@ void ObjectRenderer::RenderTransparent(std::uint8_t view_id, const float *view_m
                                        const std::span<const std::uint64_t> entity_ids,
                                        m2::M2TransparentDrawOrder &transparent_draw_order) {
   RenderPass(view_id, view_mtx, proj_mtx, screen_w, screen_h,
-             m2::M2RenderPassScope::kTransparentOnly, entity_ids, &transparent_draw_order);
+             m2::M2RenderPassScope::kTransparentOnly, entity_ids, &transparent_draw_order, true);
+}
+
+void ObjectRenderer::RenderShadowCasters(
+    const std::uint8_t view_id, const float* const view_mtx,
+    const float* const proj_mtx, const float shadow_map_size,
+    const std::span<const std::uint64_t> entity_ids) {
+  RenderPass(view_id, view_mtx, proj_mtx, shadow_map_size, shadow_map_size,
+             m2::M2RenderPassScope::kShadowCaster, entity_ids, nullptr, false);
 }
 
 void ObjectRenderer::ReserveTransparentDrawOrdinals(m2::M2TransparentDrawOrder &order) {
@@ -909,17 +937,20 @@ void ObjectRenderer::RenderPass(std::uint8_t view_id, const float *view_mtx, con
                                 float screen_w, float screen_h,
                                 const m2::M2RenderPassScope pass_scope,
                                 const std::span<const std::uint64_t> entity_ids,
-                                m2::M2TransparentDrawOrder *const transparent_draw_order) {
+                                m2::M2TransparentDrawOrder *const transparent_draw_order,
+                                const bool configure_view) {
   if (!initialized_)
     return;
   const bool transparent_pass = pass_scope == m2::M2RenderPassScope::kTransparentOnly;
   assert((!transparent_pass || transparent_draw_order != nullptr) &&
          "ObjectRenderer::RenderPass: the transparent pass needs the view's draw order");
 
-  bgfx::setViewRect(view_id, 0, 0, static_cast<std::uint16_t>(screen_w),
-                    static_cast<std::uint16_t>(screen_h));
-  bgfx::setViewTransform(view_id, view_mtx, proj_mtx);
-  bgfx::setViewClear(view_id, BGFX_CLEAR_NONE);
+  if (configure_view) {
+    bgfx::setViewRect(view_id, 0, 0, static_cast<std::uint16_t>(screen_w),
+                      static_cast<std::uint16_t>(screen_h));
+    bgfx::setViewTransform(view_id, view_mtx, proj_mtx);
+    bgfx::setViewClear(view_id, BGFX_CLEAR_NONE);
+  }
 
   m2::M2BatchUniforms world_uniforms;
   ApplyWorldM2SceneState(world_m2_scene_state_, &world_uniforms);
@@ -931,6 +962,10 @@ void ObjectRenderer::RenderPass(std::uint8_t view_id, const float *view_mtx, con
       character_uniforms.light_ambient[channel] =
           std::min(world_uniforms.light_ambient[channel] * multiply, 1.0f);
     }
+  }
+  if (pass_scope == m2::M2RenderPassScope::kShadowCaster) {
+    world_uniforms.world_shadow_receiver = {};
+    character_uniforms.world_shadow_receiver = {};
   }
 
   const m2::M2SharedBatchUniformsLease world_uniforms_lease(m2_system_, world_uniforms);
@@ -1016,6 +1051,18 @@ void ObjectRenderer::RenderMounts(std::uint8_t view_id, const float *view_mtx,
   mount_renderer_.Render(view_id, view_mtx, proj_mtx, objects, transparent_draw_order);
 }
 
+void ObjectRenderer::RenderMountShadowCasters(
+    const std::uint8_t view_id, const float* const view_mtx,
+    const float* const proj_mtx,
+    const game::ObjectPresentationSnapshot& objects,
+    const std::span<const std::uint64_t> entity_ids) {
+  if (!initialized_) {
+    return;
+  }
+  mount_renderer_.RenderShadowCasters(view_id, view_mtx, proj_mtx, objects,
+                                      entity_ids);
+}
+
 bool ObjectRenderer::IsRuntimeRenderAssetReady(game::ObjectGuid guid) const {
   const auto *const it = FindInstance(guid);
   if (it == nullptr) {
@@ -1089,6 +1136,11 @@ std::uint32_t
 ObjectRenderer::QueryPrimaryM2InstanceId(const game::ObjectHandle handle) const noexcept {
   const auto instance = instances_.find(handle);
   return instance != instances_.end() ? instance->second.m2_instance_id : 0u;
+}
+
+std::uint32_t ObjectRenderer::QueryMountM2InstanceId(
+    const game::ObjectHandle handle) const noexcept {
+  return mount_renderer_.QueryMountM2InstanceId(handle);
 }
 
 bool ObjectRenderer::IsCharacterAppearancePrepared(const game::ObjectGuid guid) const {
@@ -1243,6 +1295,20 @@ bool ObjectRenderer::QueryModelSpatialState(const game::ObjectGuid guid,
   out->world_transform = world_transform;
   out->local_bounds = spatial.spatial.local_bounds;
   out->local_bounding_sphere = spatial.spatial.local_bounding_sphere;
+  if (it->is_mounted) {
+    MountSpatialState mount_spatial{};
+    if (mount_renderer_.QueryMountSpatialState(guid, mount_spatial)) {
+      const float rider_height = out->local_bounds[5] - out->local_bounds[2];
+      if (rider_height > 0.0f && std::isfinite(rider_height)) {
+        const float vertical_offset =
+            mount_spatial.mount_height - rider_height * 0.5f;
+        out->local_bounds[2] += vertical_offset;
+        out->local_bounds[5] += vertical_offset;
+        out->local_bounding_sphere[2] += vertical_offset;
+      }
+      out->world_transform = mount_spatial.world_transform;
+    }
+  }
   out->world_bounds.fill(0.0f);
   out->world_bounding_sphere.fill(0.0f);
   PopulateWorldSpatialState(out);
@@ -1268,7 +1334,7 @@ bool ObjectRenderer::QueryAreaScenePresentationState(
   }
 
   *out = {};
-  out->world_transform = BuildM2InstanceModelMatrix(instance, mount_renderer_);
+  out->world_transform = BuildM2InstanceModelMatrix(instance, mount_renderer_, m2_system_);
   out->uniform_scale = std::sqrt(
       out->world_transform[0] * out->world_transform[0] +
       out->world_transform[1] * out->world_transform[1] +
@@ -1449,7 +1515,7 @@ bool ObjectRenderer::PrepareM2InstanceSpatialQuery(
       inst.has_destructible_area_scene_states
           ? BuildDestructibleM2StateModelMatrix(
                 inst, inst.destructible_area_scene_active_state)
-          : BuildM2InstanceModelMatrix(inst, mount_renderer_);
+          : BuildM2InstanceModelMatrix(inst, mount_renderer_, m2_system_);
   if (system.SetWorldTransformMatrix(inst.m2_instance_id, model_matrix) !=
       m2::M2ResultStatus::kReady) {
     return false;
@@ -1488,7 +1554,7 @@ m2::M2InstanceFrameSpatialRequest ObjectRenderer::BuildM2FrameSpatialRequest(
         inst.has_destructible_area_scene_states
             ? BuildDestructibleM2StateModelMatrix(
                   inst, inst.destructible_area_scene_active_state)
-            : BuildM2InstanceModelMatrix(inst, mount_renderer_);
+            : BuildM2InstanceModelMatrix(inst, mount_renderer_, m2_system_);
   }
   return {.instance_id = inst.m2_instance_id,
           .model_id = inst.m2_model_id,
@@ -1776,6 +1842,7 @@ void ObjectRenderer::InitializeInstance(RenderInstance &inst,
   inst.scale = projection.scale;
   inst.world_transform = projection.world_transform;
   inst.has_explicit_world_transform = projection.has_explicit_world_transform;
+  inst.ground_contact_normal = projection.ground_contact_normal;
 
   inst.display_id = projection.display_id;
   inst.visible = projection.visible;
@@ -1915,7 +1982,11 @@ void ObjectRenderer::ApplyProjection(RenderInstance &inst, ObjectProjection &&pr
         m2_system_, inst, projection.unit_animation.resolved_base_animation_id,
         projection.movement_flags);
 
+    const bool replays_same_logical_animation =
+        projection.unit_animation.animation_id ==
+        inst.unit_animation.animation_id;
     if (!projection.unit_animation.base_looping &&
+        replays_same_logical_animation &&
         projection.unit_animation.resolved_base_animation_id ==
             inst.animation.current_anim()) {
       inst.animation.Restart(
@@ -1947,6 +2018,7 @@ void ObjectRenderer::ApplyProjection(RenderInstance &inst, ObjectProjection &&pr
   inst.scale = projection.scale;
   inst.world_transform = projection.world_transform;
   inst.has_explicit_world_transform = projection.has_explicit_world_transform;
+  inst.ground_contact_normal = projection.ground_contact_normal;
   inst.display_id = projection.display_id;
   if (destructible_block_relevant) {
     inst.area_scene_additional_doodad_sets = projection.area_scene_additional_doodad_sets;
@@ -2316,29 +2388,18 @@ void ObjectRenderer::ApplyCreatureDisplayOverrides(RenderInstance &inst) {
     return;
   }
 
-  std::array<std::string, 3> texture_paths{};
+  const auto visual =
+      display_info_.ResolveCreatureDisplay(inst.display_id, inst.model_path);
   std::optional<m2::M2ParticleColorRecord> particle_colors;
-  if (dbc_ != nullptr) {
-    if (const auto *display = dbc_->creature_display_info().LookupEntry(inst.display_id);
-        display != nullptr) {
-      for (std::size_t index = 0u; index < texture_paths.size(); ++index) {
-        texture_paths[index] =
-            BuildCreatureDisplayTexturePath(inst.model_path, display->texture_variation[index]);
-      }
-      if (display->particle_color_id != 0u) {
-        if (const auto *record = dbc_->particle_color().LookupEntry(display->particle_color_id);
-            record != nullptr) {
-          particle_colors = m2::M2ParticleColorRecord{
-              .start = record->start,
-              .mid = record->mid,
-              .end = record->end,
-          };
-        }
-      }
-    }
+  if (visual.particle_colors.has_value()) {
+    particle_colors = m2::M2ParticleColorRecord{
+        .start = visual.particle_colors->start,
+        .mid = visual.particle_colors->mid,
+        .end = visual.particle_colors->end,
+    };
   }
   const auto status = m2_system_.ApplyCreatureDisplayRecordOverrides(
-      inst.m2_instance_id, texture_paths, std::move(particle_colors));
+      inst.m2_instance_id, visual.texture_paths, std::move(particle_colors));
   if (status == m2::M2ResultStatus::kReady) {
     inst.creature_display_overrides_applied = true;
   } else if (m2::IsTerminalM2ResultStatus(status)) {
@@ -2372,13 +2433,7 @@ void ObjectRenderer::ApplyVisibleSubmeshes(RenderInstance &inst) {
       }
     } else {
 
-      std::uint32_t creature_geoset_data = 0u;
-      if (dbc_ != nullptr) {
-        if (const auto *display = dbc_->creature_display_info().LookupEntry(inst.display_id);
-            display != nullptr) {
-          creature_geoset_data = display->creature_geoset_data;
-        }
-      }
+      const auto visual = display_info_.ResolveCreatureDisplay(inst.display_id);
       const auto sections = system.QueryModelSubmeshSectionIds(inst.m2_model_id);
       if (sections.status != m2::M2ResultStatus::kReady) {
         if (m2::IsTerminalM2ResultStatus(sections.status)) {
@@ -2389,7 +2444,7 @@ void ObjectRenderer::ApplyVisibleSubmeshes(RenderInstance &inst) {
       visible_indices.reserve(sections.section_ids.size());
       for (std::size_t index = 0u; index < sections.section_ids.size(); ++index) {
         if (IsCreatureGeosetSectionVisible(sections.section_ids[index],
-                                          creature_geoset_data)) {
+                                          visual.geoset_data)) {
           visible_indices.push_back(index);
         }
       }
@@ -3038,7 +3093,7 @@ void ObjectRenderer::SynchronizeInactiveDestructibleM2StateBindings(
 
 RenderMatrix4x4 ObjectRenderer::BuildDestructibleM2StateModelMatrix(
     const RenderInstance& inst, const std::uint8_t state_index) const {
-  RenderMatrix4x4 matrix = BuildM2InstanceModelMatrix(inst, mount_renderer_);
+  RenderMatrix4x4 matrix = BuildM2InstanceModelMatrix(inst, mount_renderer_, m2_system_);
   if (state_index < inst.destructible_m2_state_runtime.size()) {
     matrix[14] -= inst.destructible_m2_state_runtime[state_index].vertical_offset_down;
   }
@@ -3285,6 +3340,16 @@ std::size_t ObjectRenderer::UpdateModelAttachments(RenderInstance &inst,
       continue;
     }
 
+    const auto log_failure = [&](const char *stage, const std::string &reason) {
+      openwow::diagnostics::Log(
+          openwow::diagnostics::LogLevel::kWarn,
+          "ObjectRenderer attachment: stage=" + std::string(stage) +
+              " guid=" + std::to_string(inst.guid.GetRawValue()) +
+              " source=" + desired.model_path +
+              " attachment=" + std::to_string(desired.attachment_id) +
+              " reason=" + reason);
+    };
+
     const bool attachment_texture_changed =
         binding.bound_texture_path != desired.texture_path;
     const bool attachment_fully_bound =
@@ -3345,6 +3410,9 @@ std::size_t ObjectRenderer::UpdateModelAttachments(RenderInstance &inst,
           m2_system_.AcquireModelAsync(desired.model_path, m2::M2StreamPriority::kVisibleUnit);
       binding.requested_model_path = desired.model_path;
       binding.request_failed = !binding.stream_ticket;
+      if (binding.request_failed) {
+        log_failure("acquire", "stream-request-rejected");
+      }
       ++requests;
     }
     if (!binding.stream_ticket || binding.request_failed || inst.m2_instance_id == 0u ||
@@ -3355,6 +3423,8 @@ std::size_t ObjectRenderer::UpdateModelAttachments(RenderInstance &inst,
     const auto streamed = m2_system_.QueryModelAsync(binding.stream_ticket);
     if (streamed.state == m2::M2StreamState::kFailed) {
       binding.request_failed = true;
+      log_failure("load", std::string(m2::M2ResultReasonName(streamed.reason)) +
+                              " detail=" + streamed.detail);
       continue;
     }
     if (streamed.state != m2::M2StreamState::kReady || streamed.model_id == 0u) {
@@ -3364,6 +3434,10 @@ std::size_t ObjectRenderer::UpdateModelAttachments(RenderInstance &inst,
     const auto created = m2_system_.CreateInstanceAsync(binding.stream_ticket);
     if (created.status != m2::M2ResultStatus::kReady || created.instance_id == 0u) {
       binding.request_failed = m2::IsTerminalM2ResultStatus(created.status);
+      if (binding.request_failed) {
+        log_failure("create", std::string(m2::M2ResultReasonName(created.reason)) +
+                                  " detail=" + created.detail);
+      }
       continue;
     }
 
@@ -3392,6 +3466,9 @@ std::size_t ObjectRenderer::UpdateModelAttachments(RenderInstance &inst,
     if (status != m2::M2ResultStatus::kReady) {
       static_cast<void>(system.DestroyInstance(replacement_instance_id));
       binding.request_failed = m2::IsTerminalM2ResultStatus(status);
+      if (binding.request_failed) {
+        log_failure("bind", m2::M2ResultStatusName(status));
+      }
       continue;
     }
 
@@ -3608,6 +3685,10 @@ bool ObjectRenderer::PrepareInstanceBodyForSubmit(
     m2::M2InstanceFramePrepareScope &prepare, RenderInstance &inst,
     const PassBatchUniforms &pass_uniforms) {
 
+  if (inst.is_mounted &&
+      !mount_renderer_.HasRiderAttachmentTransform(inst.guid)) {
+    return false;
+  }
   if (inst.m2_instance_id == 0u || !prepare.QueryRenderReady(inst.m2_instance_id) ||
       !ResolveFrameAnimationSample(prepare, inst)) {
     return false;
@@ -3730,10 +3811,26 @@ void ObjectRenderer::RenderInstanceAttachments(
       continue;
     }
 
-    const auto &attachment = placement.transform;
+    auto attachment = placement.transform;
+    if (attachment.reason == m2::M2ResultReason::kMissingAttachment &&
+        binding.desired.use_parent_origin_if_missing) {
+      const auto parent = system.QueryModelWorldTransformMatrix(inst.m2_instance_id);
+      attachment = {.status = parent.status, .reason = parent.reason,
+                    .detail = parent.detail, .matrix = parent.matrix};
+    }
     if (attachment.status != m2::M2ResultStatus::kReady) {
+      if (m2::IsTerminalM2ResultStatus(attachment.status) &&
+          binding.placement_failure_reason != attachment.reason) {
+        openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kWarn,
+            "ObjectRenderer attachment: stage=placement guid=" +
+            std::to_string(inst.guid.GetRawValue()) + " source=" +
+            binding.bound_model_path + " attachment=" +
+            std::to_string(binding.bound_attachment_id) + " reason=" + attachment.detail);
+        binding.placement_failure_reason = attachment.reason;
+      }
       continue;
     }
+    binding.placement_failure_reason = m2::M2ResultReason::kNone;
 
     float inherited_scale = 1.0f;
     if (binding.desired.role == ModelAttachmentRole::kQuestOverlay) {

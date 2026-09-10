@@ -376,6 +376,22 @@ class CGGameObject_C : public CGObject_C {
 
   [[nodiscard]] std::string GetTooltipText() const;
 
+  enum class LockInteractionStatus { kReady, kUnsatisfied, kUnavailable };
+  struct LockInteractionInfo {
+    LockInteractionStatus status{LockInteractionStatus::kReady};
+    bool has_requirement{false};
+    bool uses_skill{false};
+    std::uint32_t spell_id{0};
+    std::uint32_t current_skill{0};
+    std::uint32_t required_skill{0};
+    std::uint32_t key_item_entry{0};
+    std::uint64_t key_item_guid{0};
+    std::uint32_t lock_slot{0};
+  };
+  [[nodiscard]] LockInteractionInfo ResolveLockInteraction(
+      const SpellCastRuntime& spells) const;
+  [[nodiscard]] bool IsLockActionApplicable(std::uint32_t action) const;
+
   struct LootArtVisualControlState {
     bool requested{false};
     bool quest_sparkle{false};
@@ -725,17 +741,6 @@ class CGGameObject_C : public CGObject_C {
   [[nodiscard]] std::uint32_t GetLockId() const;
   [[nodiscard]] const data::dbc::LockEntry* LookupLockEntry() const;
 
-  struct LockInteractionInfo {
-    std::uint32_t spell_id{0};
-    std::uint32_t current_skill{0};
-    std::uint32_t required_skill{0};
-    std::int16_t  item_bag_slot{-1};
-    std::uint32_t lock_slot{0};
-  };
-
-  [[nodiscard]] bool GetLockInteractionInfo(
-      SpellCastRuntime& spells, LockInteractionInfo* info = nullptr) const;
-
   [[nodiscard]] bool MeetsTrackedLootArtEligibilityGate(const CGPlayer_C& active_player) const;
   [[nodiscard]] bool EvaluateLootArtVisualRequest(bool* quest_sparkle,
                                                   bool* tracked_resource_match) const;
@@ -753,6 +758,7 @@ class CGGameObject_C : public CGObject_C {
   std::uint8_t cached_go_state_byte_{0};
 
   LootArtVisualControlState loot_art_visual_control_{};
+  mutable const char* lock_resolution_failure_{nullptr};
   ModelAnimationControlState model_animation_control_{};
   M2GoAnimationControlState m2_go_animation_control_{};
 

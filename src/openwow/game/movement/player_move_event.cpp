@@ -1608,8 +1608,15 @@ void CMovementData::AdvanceKinematics(const std::uint32_t step_ms) {
 
   const bool falling =
       (state.flags & openwow::game::kMoveFlagFalling) != 0u;
-  transform_position_[0] += step.x;
-  transform_position_[1] += step.y;
+  if (falling) {
+    transform_position_[0] +=
+        runtime_jump_cos_angle_ * runtime_jump_xy_speed_ * elapsed_seconds;
+    transform_position_[1] +=
+        runtime_jump_sin_angle_ * runtime_jump_xy_speed_ * elapsed_seconds;
+  } else {
+    transform_position_[0] += step.x;
+    transform_position_[1] += step.y;
+  }
   transform_position_[2] += step.z;
 
   if (falling) {

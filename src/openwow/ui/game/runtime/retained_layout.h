@@ -38,6 +38,7 @@ class RetainedLayout final {
     std::function<void(std::string_view)> inherited_order_invalidated;
     std::function<void()> on_update_order_invalidated;
     std::function<void()> hit_test_invalidated;
+    std::function<void(std::string_view, float, float)> size_committed;
   };
 
   struct Metrics {
@@ -82,6 +83,7 @@ class RetainedLayout final {
 
   [[nodiscard]] float viewport_width() const noexcept;
   [[nodiscard]] float viewport_height() const noexcept;
+  [[nodiscard]] openwow::ui::framexml::ViewportInsets viewport_insets() const noexcept;
   [[nodiscard]] float root_scale() const noexcept;
   [[nodiscard]] std::int32_t mode() const noexcept;
   [[nodiscard]] bool dirty() const noexcept;
@@ -93,7 +95,9 @@ class RetainedLayout final {
   [[nodiscard]] const openwow::ui::TransparentStringMap<openwow::ui::framexml::FrameRect>&
   rects() const noexcept;
 
-  [[nodiscard]] bool SetViewport(float width, float height);
+  [[nodiscard]] bool SetViewport(
+      float width, float height,
+      std::optional<openwow::ui::framexml::ViewportInsets> insets = std::nullopt);
   void SetRootScale(float scale, bool force, bool defer_solve);
   void SetMode(std::int32_t mode) noexcept;
   void SetBootstrapActive(bool active) noexcept;
@@ -132,6 +136,8 @@ class RetainedLayout final {
   [[nodiscard]] bool CommitMoveSizing(MoveSizingSession* session);
 
  private:
+  bool AbortMoveSizing(MoveSizingSession* session, const char* stage,
+                        const char* reason);
   struct Impl;
   std::unique_ptr<Impl> impl_;
 };

@@ -97,6 +97,7 @@ enum class ModelAttachmentRole : std::uint8_t {
   kHelm,
   kCape,
   kCorpseLootSparkle,
+  kGameObjectLootSparkle,
   kQuestOverlay,
 };
 
@@ -111,6 +112,7 @@ struct ModelAttachmentSpec {
   std::shared_ptr<const WeaponAttachmentVisual> visual;
   float scale{1.0f};
   std::uint16_t animation_id{0};
+  bool use_parent_origin_if_missing{false};
 };
 
 struct ItemVisualChildBinding {
@@ -135,6 +137,7 @@ struct ModelAttachmentBinding {
   std::uint32_t m2_model_id{0};
   std::uint32_t m2_instance_id{0};
   bool request_failed{false};
+  m2::M2ResultReason placement_failure_reason{m2::M2ResultReason::kNone};
   std::vector<ItemVisualChildBinding> item_visual_children;
 
   std::uint32_t transparent_draw_ordinal{0};
@@ -160,6 +163,8 @@ struct ObjectProjection {
   float scale{1.0f};
   RenderMatrix4x4 world_transform{kRenderIdentityMatrix4x4};
   bool has_explicit_world_transform{false};
+
+  std::optional<RenderVec3> ground_contact_normal;
 
   std::uint32_t display_id{0};
   bool visible{true};
@@ -290,6 +295,9 @@ struct RenderInstance {
   RenderMatrix4x4 world_transform{kRenderIdentityMatrix4x4};
 
   AnimationState animation;
+
+  std::optional<RenderVec3> ground_contact_normal;
+  mutable bool ground_alignment_failure_reported{false};
   UnitAnimationPresentationRequest unit_animation;
   GameObjectM2AnimationRenderState game_object_m2_animation;
 
@@ -485,6 +493,14 @@ public:
       std::function<void(const GameObjectM2PresentationEvent &)> sink) {
     game_object_m2_event_sink_ = std::move(sink);
   }
+  void BindMountM2EventSink(
+      std::function<void(const MountM2PresentationEvent &)> sink) {
+    mount_renderer_.BindM2EventSink(std::move(sink));
+  }
+  void BindMountAnimationCompletionSink(
+      std::function<void(const game::UnitAnimationCompletionEvent &)> sink) {
+    mount_renderer_.BindAnimationCompletionSink(std::move(sink));
+  }
 
   void SetFileLoader(std::function<std::vector<std::uint8_t>(const std::string &)> loader);
 
@@ -525,6 +541,10 @@ public:
                          float screen_w, float screen_h, std::span<const std::uint64_t> entity_ids,
                          m2::M2TransparentDrawOrder &transparent_draw_order);
 
+  void RenderShadowCasters(std::uint8_t view_id, const float* view_mtx,
+                           const float* proj_mtx, float shadow_map_size,
+                           std::span<const std::uint64_t> entity_ids);
+
   void SetCameraPosition(float x, float y, float z) {
     camera_x_ = x;
     camera_y_ = y;
@@ -540,6 +560,11 @@ public:
   void RenderMounts(std::uint8_t view_id, const float *view_mtx, const float *proj_mtx,
                     const game::ObjectPresentationSnapshot &objects,
                     m2::M2TransparentDrawOrder &transparent_draw_order);
+
+  void RenderMountShadowCasters(
+      std::uint8_t view_id, const float* view_mtx, const float* proj_mtx,
+      const game::ObjectPresentationSnapshot& objects,
+      std::span<const std::uint64_t> entity_ids);
 
   [[nodiscard]] DisplayInfoResolver &display_info() {
     return display_info_;
@@ -577,6 +602,9 @@ public:
                                                 bool visible);
 
   [[nodiscard]] std::uint32_t QueryPrimaryM2InstanceId(game::ObjectHandle handle) const noexcept;
+
+  [[nodiscard]] std::uint32_t QueryMountM2InstanceId(
+      game::ObjectHandle handle) const noexcept;
 
   [[nodiscard]] bool IsCharacterAppearancePrepared(game::ObjectGuid guid) const;
 
@@ -766,7 +794,8 @@ private:
   void RenderPass(std::uint8_t view_id, const float *view_mtx, const float *proj_mtx,
                   float screen_w, float screen_h, m2::M2RenderPassScope pass_scope,
                   std::span<const std::uint64_t> entity_ids,
-                  m2::M2TransparentDrawOrder *transparent_draw_order);
+                  m2::M2TransparentDrawOrder *transparent_draw_order,
+                  bool configure_view = true);
 
   void ReserveTransparentDrawOrdinals(m2::M2TransparentDrawOrder &order);
 

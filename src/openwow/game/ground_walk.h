@@ -325,12 +325,13 @@ class MovementCollisionSolver {
   [[nodiscard]] MovementCollisionResult SolveSpecial(
       MovementCollisionBody& body, const MovementCollisionStep& step);
 
-  [[nodiscard]] bool TryTerrainStep(MovementCollisionBody& body,
+  // Empty results distinguish a failed collision query from an impassable step.
+  [[nodiscard]] std::optional<bool> TryTerrainStep(MovementCollisionBody& body,
                                     const C3Vector& displacement,
                                     const MovementCollisionContact& trigger,
                                     const MovementCollisionStep& step);
 
-  [[nodiscard]] bool StepFallCarriesForward(const MovementCollisionBody& body,
+  [[nodiscard]] std::optional<bool> StepFallCarriesForward(const MovementCollisionBody& body,
                                             const C3Vector& trial_position,
                                             const C3Vector& direction,
                                             float free_height,

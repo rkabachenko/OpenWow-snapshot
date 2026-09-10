@@ -1,430 +1,353 @@
-
 #include "openwow/render/scene/shadow_data.h"
 
-#include "openwow/render/api/draw_encoder.h"
-#include "openwow/render/api/math/render_math_types.h"
 #include "openwow/foundation/diagnostics/logging.h"
+#include "openwow/render/api/draw_encoder.h"
+#include "openwow/world/world_render_pipeline.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
-#include <cstring>
+#include <string>
 
 #include <bgfx/bgfx.h>
 #include <bx/math.h>
 
 namespace openwow::render {
 
-struct ShadowRenderData::BackendResources {
-  bgfx::TextureHandle shadow_depth_tex = BGFX_INVALID_HANDLE;
-  bgfx::FrameBufferHandle shadow_fbo = BGFX_INVALID_HANDLE;
-  bgfx::UniformHandle shadow_map_sampler = BGFX_INVALID_HANDLE;
-  bgfx::UniformHandle shadow_matrix = BGFX_INVALID_HANDLE;
-  bgfx::UniformHandle shadow_parameters = BGFX_INVALID_HANDLE;
-};
-
 namespace {
 
+constexpr std::array<float, kWorldShadowProductCount> kProductHalfExtents{
+    20.0f, 40.0f, 160.0f, 640.0f};
+constexpr std::array<float, kWorldShadowProductCount> kRawReceiverBias{
+    0.6f, 0.9f, 1.3f, 2.1f};
+constexpr std::array<const char*, kWorldShadowProductCount> kSamplerNames{
+    "s_worldShadow0", "s_worldShadow1", "s_worldShadow2",
+    "s_worldShadow3"};
+constexpr std::uint8_t kFirstShadowSamplerStage = 5u;
+constexpr float kCasterDistance = 2000.0f;
+constexpr float kCasterNear = 1.0f;
+constexpr float kCasterFar = 4000.0f;
 constexpr float kMaxLightUpAlignment = 0.99f;
+std::atomic<const ShadowRenderData*> g_active_world_shadow_data{nullptr};
 
-[[nodiscard]] float SnapOffsetToTexelLattice(const float light_space_offset,
-                                             const float world_units_per_texel) {
-
-  if (!(world_units_per_texel > 0.0f) || !std::isfinite(world_units_per_texel)) {
-    return 0.0f;
-  }
-  const float texels = light_space_offset / world_units_per_texel;
-  return (std::round(texels) - texels) * world_units_per_texel;
-}
-
-void BuildShadowClipToTextureMatrix(float out_matrix[16]) {
+void BuildClipToTextureMatrix(float out[16]) {
   const bgfx::Caps* const caps = bgfx::getCaps();
   const float y_scale = caps->originBottomLeft ? 0.5f : -0.5f;
   const float depth_scale = caps->homogeneousDepth ? 0.5f : 1.0f;
   const float depth_offset = caps->homogeneousDepth ? 0.5f : 0.0f;
-
   const float matrix[16] = {
       0.5f, 0.0f,    0.0f,        0.0f,
       0.0f, y_scale, 0.0f,        0.0f,
       0.0f, 0.0f,    depth_scale, 0.0f,
       0.5f, 0.5f,    depth_offset, 1.0f,
   };
-  std::copy_n(matrix, 16, out_matrix);
-}
-
-void ExtractFrustumCorners(const float* proj_mtx,
-                           const float* view_mtx,
-                           float out_corners[8][3]) {
-
-  float vp[16];
-  bx::mtxMul(vp, view_mtx, proj_mtx);
-  float inv_vp[16];
-  bx::mtxInverse(inv_vp, vp);
-
-  const float ndc_corners[8][4] = {
-      {-1.0f,  1.0f, -1.0f, 1.0f},
-      { 1.0f,  1.0f, -1.0f, 1.0f},
-      { 1.0f, -1.0f, -1.0f, 1.0f},
-      {-1.0f, -1.0f, -1.0f, 1.0f},
-      {-1.0f,  1.0f,  1.0f, 1.0f},
-      { 1.0f,  1.0f,  1.0f, 1.0f},
-      { 1.0f, -1.0f,  1.0f, 1.0f},
-      {-1.0f, -1.0f,  1.0f, 1.0f},
-  };
-
-  for (int i = 0; i < 8; ++i) {
-    RenderVec4 p{};
-    for (int r = 0; r < 4; ++r) {
-      p[r] = inv_vp[r * 4 + 0] * ndc_corners[i][0]
-           + inv_vp[r * 4 + 1] * ndc_corners[i][1]
-           + inv_vp[r * 4 + 2] * ndc_corners[i][2]
-           + inv_vp[r * 4 + 3] * ndc_corners[i][3];
-    }
-    const float inv_w = 1.0f / p[3];
-    out_corners[i][0] = p[0] * inv_w;
-    out_corners[i][1] = p[1] * inv_w;
-    out_corners[i][2] = p[2] * inv_w;
-  }
-}
-
-void ComputeFrustumCenterAndRadius(const float corners[8][3],
-                                   float center[3],
-                                   float& radius) {
-  center[0] = 0.0f; center[1] = 0.0f; center[2] = 0.0f;
-  for (int i = 0; i < 8; ++i) {
-    center[0] += corners[i][0];
-    center[1] += corners[i][1];
-    center[2] += corners[i][2];
-  }
-  center[0] /= 8.0f;
-  center[1] /= 8.0f;
-  center[2] /= 8.0f;
-
-  radius = 0.0f;
-  for (int i = 0; i < 8; ++i) {
-    const float dx = corners[i][0] - center[0];
-    const float dy = corners[i][1] - center[1];
-    const float dz = corners[i][2] - center[2];
-    const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
-    if (d > radius) radius = d;
-  }
+  std::copy_n(matrix, 16u, out);
 }
 
 }
+
+struct ShadowRenderData::BackendResources {
+  std::array<bgfx::TextureHandle, kWorldShadowProductCount> depth_textures{{
+      BGFX_INVALID_HANDLE, BGFX_INVALID_HANDLE, BGFX_INVALID_HANDLE,
+      BGFX_INVALID_HANDLE}};
+  std::array<bgfx::FrameBufferHandle, kWorldShadowProductCount> framebuffers{{
+      BGFX_INVALID_HANDLE, BGFX_INVALID_HANDLE, BGFX_INVALID_HANDLE,
+      BGFX_INVALID_HANDLE}};
+  std::array<bgfx::UniformHandle, kWorldShadowProductCount> samplers{{
+      BGFX_INVALID_HANDLE, BGFX_INVALID_HANDLE, BGFX_INVALID_HANDLE,
+      BGFX_INVALID_HANDLE}};
+  bgfx::TextureHandle fallback_depth = BGFX_INVALID_HANDLE;
+  bgfx::UniformHandle matrices = BGFX_INVALID_HANDLE;
+  bgfx::UniformHandle parameters = BGFX_INVALID_HANDLE;
+};
 
 ShadowRenderData::ShadowRenderData()
-    : backend_(std::make_unique<BackendResources>()) {}
-
-ShadowRenderData::~ShadowRenderData() { DestroyShadowMap(); }
-
-void ShadowRenderData::SetQuality(ShadowQuality q) { quality_ = q; }
-ShadowQuality ShadowRenderData::GetQuality() const { return quality_; }
-
-void ShadowRenderData::SetType(ShadowType t) { type_ = t; }
-ShadowType ShadowRenderData::GetType() const { return type_; }
-
-void ShadowRenderData::SetShadowMapResolution(std::uint32_t res) {
-    if (res <= 512)       resolution_ = 512;
-    else if (res <= 1024) resolution_ = 1024;
-    else if (res <= 2048) resolution_ = 2048;
-    else                  resolution_ = 4096;
+    : backend_(std::make_unique<BackendResources>()) {
+  light_views_.fill(kRenderIdentityMatrix4x4);
+  light_projections_.fill(kRenderIdentityMatrix4x4);
+  receiver_matrices_.fill(kRenderIdentityMatrix4x4);
 }
 
-std::uint32_t ShadowRenderData::GetShadowMapResolution() const {
-    return resolution_;
+ShadowRenderData::~ShadowRenderData() { DestroyResources(); }
+
+void ShadowRenderData::Configure(const std::uint8_t quality,
+                                 const std::uint16_t resolution) {
+  quality_ = std::min<std::uint8_t>(quality, 5u);
+  resolution_ = resolution >= 2048u ? 2048u : 1024u;
+  published_product_count_ = 0u;
 }
 
-void ShadowRenderData::SetShadowDistance(float dist) {
-    distance_ = std::max(0.0f, dist);
+std::size_t ShadowRenderData::active_product_count() const noexcept {
+  if (quality_ == 0u) {
+    return 0u;
+  }
+  return quality_ < 3u ? 1u : kWorldShadowProductCount;
 }
 
-float ShadowRenderData::GetShadowDistance() const { return distance_; }
+bool ShadowRenderData::CreateResources() {
+  DestroyResources();
+  const auto product_count = active_product_count();
 
-void ShadowRenderData::SetShadowBias(float bias) { bias_ = bias; }
-float ShadowRenderData::GetShadowBias() const { return bias_; }
+  backend_->fallback_depth = bgfx::createTexture2D(
+      1u, 1u, false, 1u, bgfx::TextureFormat::D16,
+      BGFX_TEXTURE_RT | BGFX_SAMPLER_COMPARE_LEQUAL);
+  backend_->matrices = bgfx::createUniform(
+      "u_worldShadowMtx", bgfx::UniformType::Mat4,
+      static_cast<std::uint16_t>(kWorldShadowProductCount));
+  backend_->parameters =
+      bgfx::createUniform("u_worldShadowParams", bgfx::UniformType::Vec4, 3u);
 
-void ShadowRenderData::SetSplitLambda(float lambda) {
-    split_lambda_ = std::clamp(lambda, 0.0f, 1.0f);
-}
-float ShadowRenderData::GetSplitLambda() const { return split_lambda_; }
-
-bool ShadowRenderData::CreateShadowMap() {
-    if (shadow_map_valid_) return true;
-    if (resolution_ == 0) return false;
-
-    DestroyShadowMap();
-
-    const auto width  = static_cast<std::uint16_t>(resolution_);
-    const auto height = static_cast<std::uint16_t>(resolution_);
-
-    backend_->shadow_fbo = bgfx::createFrameBuffer(
-        width, height,
-        bgfx::TextureFormat::D16,
+  bool valid = bgfx::isValid(backend_->fallback_depth) &&
+               bgfx::isValid(backend_->matrices) &&
+               bgfx::isValid(backend_->parameters);
+  for (std::size_t index = 0u; index < kWorldShadowProductCount; ++index) {
+    backend_->samplers[index] =
+        bgfx::createUniform(kSamplerNames[index], bgfx::UniformType::Sampler);
+    valid = valid && bgfx::isValid(backend_->samplers[index]);
+  }
+  for (std::size_t index = 0u; index < product_count; ++index) {
+    backend_->framebuffers[index] = bgfx::createFrameBuffer(
+        resolution_, resolution_, bgfx::TextureFormat::D16,
         BGFX_TEXTURE_RT | BGFX_SAMPLER_COMPARE_LEQUAL);
-
-    if (!bgfx::isValid(backend_->shadow_fbo)) {
-        openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kWarn,
-                           "ShadowRenderData: failed to create shadow map FBO");
-        return false;
+    if (bgfx::isValid(backend_->framebuffers[index])) {
+      backend_->depth_textures[index] =
+          bgfx::getTexture(backend_->framebuffers[index]);
     }
-
-    backend_->shadow_depth_tex = bgfx::getTexture(backend_->shadow_fbo);
-
-    shadow_map_valid_ = bgfx::isValid(backend_->shadow_depth_tex);
-    if (!shadow_map_valid_) {
-        DestroyShadowMap();
-        return false;
-    }
-
-    backend_->shadow_map_sampler =
-        bgfx::createUniform("s_shadowMap", bgfx::UniformType::Sampler);
-    backend_->shadow_matrix =
-        bgfx::createUniform("u_shadowMtx", bgfx::UniformType::Mat4);
-    backend_->shadow_parameters =
-        bgfx::createUniform("u_shadowParams", bgfx::UniformType::Vec4);
-
-    if (!bgfx::isValid(backend_->shadow_map_sampler) ||
-        !bgfx::isValid(backend_->shadow_matrix) ||
-        !bgfx::isValid(backend_->shadow_parameters)) {
-        openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kWarn,
-                           "ShadowRenderData: failed to create shadow uniforms");
-        DestroyShadowMap();
-        return false;
-    }
-
-    openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kInfo,
-                       "ShadowRenderData: shadow map created (" +
-                           std::to_string(resolution_) + "x" +
-                           std::to_string(resolution_) + ")");
-    return true;
-}
-
-void ShadowRenderData::DestroyShadowMap() {
-    if (bgfx::isValid(backend_->shadow_fbo)) {
-        bgfx::destroy(backend_->shadow_fbo);
-        backend_->shadow_fbo = BGFX_INVALID_HANDLE;
-    }
-
-    backend_->shadow_depth_tex = BGFX_INVALID_HANDLE;
-
-    if (bgfx::isValid(backend_->shadow_map_sampler)) {
-        bgfx::destroy(backend_->shadow_map_sampler);
-        backend_->shadow_map_sampler = BGFX_INVALID_HANDLE;
-    }
-    if (bgfx::isValid(backend_->shadow_matrix)) {
-        bgfx::destroy(backend_->shadow_matrix);
-        backend_->shadow_matrix = BGFX_INVALID_HANDLE;
-    }
-    if (bgfx::isValid(backend_->shadow_parameters)) {
-        bgfx::destroy(backend_->shadow_parameters);
-        backend_->shadow_parameters = BGFX_INVALID_HANDLE;
-    }
-
-    shadow_map_valid_ = false;
-}
-
-bool ShadowRenderData::IsShadowMapValid() const {
-    return shadow_map_valid_;
-}
-
-void ShadowRenderData::BindShadowState(bgfx::Encoder* const encoder) const {
-    if (!shadow_map_valid_ || !bgfx::isValid(backend_->shadow_depth_tex)) return;
-
-    const DrawEncoder draw{encoder};
-
-    draw.setTexture(
-        5, backend_->shadow_map_sampler, backend_->shadow_depth_tex);
-
-    draw.setUniform(backend_->shadow_matrix, light_view_proj_);
-
-    const float inv_res = 1.0f / static_cast<float>(resolution_);
-    const RenderVec4 params{bias_, inv_res, 1.0f, 0.0f};
-    draw.setUniform(backend_->shadow_parameters, params.data());
-}
-
-void ShadowRenderData::AddCaster(ShadowCasterEntry entry) {
-    for (auto& c : casters_) {
-        if (c.entityId == entry.entityId) {
-            c = entry;
-            return;
-        }
-    }
-    casters_.push_back(entry);
-}
-
-void ShadowRenderData::RemoveCaster(std::uint32_t entityId) {
-  casters_.erase(
-      std::remove_if(casters_.begin(), casters_.end(),
-                     [entityId](const ShadowCasterEntry &e) { return e.entityId == entityId; }),
-      casters_.end());
-}
-
-void ShadowRenderData::SetCasters(const std::span<const ShadowCasterEntry> casters) {
-  casters_.assign(casters.begin(), casters.end());
-}
-
-void ShadowRenderData::ClearCasters() noexcept {
-  casters_.clear();
-}
-
-std::vector<ShadowCasterEntry> ShadowRenderData::GetCasters() const {
-  return casters_;
-}
-
-std::uint32_t ShadowRenderData::GetCasterCount() const {
-  return static_cast<std::uint32_t>(casters_.size());
-}
-
-std::vector<ShadowCasterEntry> ShadowRenderData::GetCastersInRange(float x, float y, float z,
-                                                                   float range) const {
-  std::vector<ShadowCasterEntry> result;
-  const float rangeSq = range * range;
-  for (const auto &c : casters_) {
-    float dx = c.worldX - x;
-    float dy = c.worldY - y;
-    float dz = c.worldZ - z;
-    if (dx * dx + dy * dy + dz * dz <= rangeSq) {
-      result.push_back(c);
+    if (!bgfx::isValid(backend_->framebuffers[index]) ||
+        !bgfx::isValid(backend_->depth_textures[index])) {
+      openwow::diagnostics::Log(
+          openwow::diagnostics::LogLevel::kError,
+          "ShadowRenderData: product resource creation failed product=" +
+              std::to_string(index) + " resolution=" +
+              std::to_string(resolution_));
+      valid = false;
     }
   }
-  return result;
+  if (!valid) {
+    DestroyResources();
+    return false;
+  }
+
+  openwow::diagnostics::Log(
+      openwow::diagnostics::LogLevel::kInfo,
+      "ShadowRenderData: target-centered products created quality=" +
+          std::to_string(quality_) + " products=" +
+          std::to_string(product_count) + " resolution=" +
+          std::to_string(resolution_));
+  return true;
 }
 
-void ShadowRenderData::SetLightDirection(float x, float y, float z) {
-    const float len = std::sqrt(x * x + y * y + z * z);
-    if (len > 1e-6f) {
-        lightX_ = x / len;
-        lightY_ = y / len;
-        lightZ_ = z / len;
-    } else {
-        lightX_ = 0.0f;
-        lightY_ = -1.0f;
-        lightZ_ = 0.0f;
+void ShadowRenderData::DestroyResources() {
+  for (auto& framebuffer : backend_->framebuffers) {
+    if (bgfx::isValid(framebuffer)) {
+      bgfx::destroy(framebuffer);
+      framebuffer = BGFX_INVALID_HANDLE;
     }
-}
-
-ShadowRenderData::LightDir ShadowRenderData::GetLightDirection() const {
-    return {lightX_, lightY_, lightZ_};
-}
-
-void ShadowRenderData::BuildLightMatrices(const float* camera_mtx,
-                                          const float* proj_mtx,
-                                          [[maybe_unused]] float cam_near,
-                                          [[maybe_unused]] float cam_far,
-                                          float out_light_view[16],
-                                          float out_light_proj[16]) {
-
-    float corners[8][3];
-    ExtractFrustumCorners(proj_mtx, camera_mtx, corners);
-
-    float center[3];
-    float radius;
-    ComputeFrustumCenterAndRadius(corners, center, radius);
-    radius = std::max(radius, 1.0f);
-
-    const float light_dist = radius * 2.0f;
-    float light_pos[3];
-    light_pos[0] = center[0] + lightX_ * light_dist;
-    light_pos[1] = center[1] + lightY_ * light_dist;
-    light_pos[2] = center[2] + lightZ_ * light_dist;
-
-    const float zenith_alignment = std::fabs(lightZ_);
-    const bx::Vec3 reference_up = zenith_alignment > kMaxLightUpAlignment
-                                      ? bx::Vec3(0.0f, 1.0f, 0.0f)
-                                      : bx::Vec3(0.0f, 0.0f, 1.0f);
-
-    bx::mtxLookAt(out_light_view,
-                  bx::Vec3(light_pos[0], light_pos[1], light_pos[2]),
-                  bx::Vec3(center[0], center[1], center[2]),
-                  reference_up,
-                  bx::Handedness::Left);
-
-    const float ortho_size = radius * 1.5f;
-    const float near_p = -radius * 2.0f;
-    const float far_p  =  radius * 2.0f;
-
-    bx::mtxOrtho(out_light_proj,
-                 -ortho_size, ortho_size,
-                 -ortho_size, ortho_size,
-                 near_p, far_p,
-                 0.0f,
-                 bgfx::getCaps()->homogeneousDepth);
-
-    const float world_units_per_texel =
-        (2.0f * ortho_size) / static_cast<float>(resolution_);
-    out_light_proj[12] +=
-        SnapOffsetToTexelLattice(out_light_view[12], world_units_per_texel) / ortho_size;
-    out_light_proj[13] +=
-        SnapOffsetToTexelLattice(out_light_view[13], world_units_per_texel) / ortho_size;
-}
-
-bool ShadowRenderData::PrepareShadowPass(const float* camera_mtx,
-                                         const float* proj_mtx,
-                                         float cam_near,
-                                         float cam_far) {
-    if (!enabled_ || type_ != ShadowType::ShadowMap) return false;
-    if (!shadow_map_valid_ || casters_.empty()) {
-        return false;
+  }
+  backend_->depth_textures.fill(BGFX_INVALID_HANDLE);
+  for (auto& sampler : backend_->samplers) {
+    if (bgfx::isValid(sampler)) {
+      bgfx::destroy(sampler);
+      sampler = BGFX_INVALID_HANDLE;
     }
-
-    BuildLightMatrices(camera_mtx, proj_mtx, cam_near, cam_far,
-                       light_view_, light_proj_);
-
-    float light_view_proj_clip[16];
-    bx::mtxMul(light_view_proj_clip, light_view_, light_proj_);
-    float clip_to_texture[16];
-    BuildShadowClipToTextureMatrix(clip_to_texture);
-    bx::mtxMul(light_view_proj_, light_view_proj_clip, clip_to_texture);
-    return true;
+  }
+  if (bgfx::isValid(backend_->fallback_depth)) {
+    bgfx::destroy(backend_->fallback_depth);
+    backend_->fallback_depth = BGFX_INVALID_HANDLE;
+  }
+  if (bgfx::isValid(backend_->matrices)) {
+    bgfx::destroy(backend_->matrices);
+    backend_->matrices = BGFX_INVALID_HANDLE;
+  }
+  if (bgfx::isValid(backend_->parameters)) {
+    bgfx::destroy(backend_->parameters);
+    backend_->parameters = BGFX_INVALID_HANDLE;
+  }
+  published_product_count_ = 0u;
 }
 
-void ShadowRenderData::BeginShadowDepthPass(std::uint8_t view_id) {
-    if (!shadow_map_valid_) {
-        return;
+bool ShadowRenderData::resources_valid() const noexcept {
+  const auto count = active_product_count();
+  if (!bgfx::isValid(backend_->fallback_depth) ||
+      !bgfx::isValid(backend_->matrices) ||
+      !bgfx::isValid(backend_->parameters)) {
+    return false;
+  }
+  for (std::size_t index = 0u; index < kWorldShadowProductCount; ++index) {
+    if (!bgfx::isValid(backend_->samplers[index])) {
+      return false;
     }
-
-    const auto w = static_cast<std::uint16_t>(resolution_);
-    const auto h = static_cast<std::uint16_t>(resolution_);
-
-    bgfx::setViewName(view_id, "shadow_map");
-
-    bgfx::setViewMode(view_id, bgfx::ViewMode::Default);
-    bgfx::setViewClear(view_id,
-                       BGFX_CLEAR_DEPTH | BGFX_CLEAR_STENCIL,
-                       0x00000000, 1.0f, 0);
-    bgfx::setViewRect(view_id, 0, 0, w, h);
-    bgfx::setViewFrameBuffer(view_id, backend_->shadow_fbo);
-    bgfx::setViewTransform(view_id, light_view_, light_proj_);
-    bgfx::setViewScissor(view_id, 0, 0, w, h);
-
-    bgfx::touch(view_id);
-}
-
-void ShadowRenderData::SetEnabled(bool enabled) { enabled_ = enabled; }
-bool ShadowRenderData::IsEnabled() const { return enabled_; }
-
-std::string ShadowRenderData::GetQualityName(ShadowQuality q) {
-    switch (q) {
-        case ShadowQuality::Off:    return "Off";
-        case ShadowQuality::Low:    return "Low";
-        case ShadowQuality::Medium: return "Medium";
-        case ShadowQuality::High:   return "High";
-        case ShadowQuality::Ultra:  return "Ultra";
+  }
+  for (std::size_t index = 0u; index < count; ++index) {
+    if (!bgfx::isValid(backend_->framebuffers[index]) ||
+        !bgfx::isValid(backend_->depth_textures[index])) {
+      return false;
     }
-    return "Unknown";
+  }
+  return true;
 }
 
-void ShadowRenderData::Reset() {
-    casters_.clear();
-    quality_    = ShadowQuality::Medium;
-    type_       = ShadowType::Blob;
-    resolution_ = 1024;
-    distance_   = 40.0f;
-    bias_       = 0.005f;
-    lightX_     = 0.0f;
-    lightY_     = -1.0f;
-    lightZ_     = 0.0f;
-    enabled_    = true;
-    DestroyShadowMap();
+void ShadowRenderData::SetLightDirection(
+    const RenderVec3& surface_to_light) noexcept {
+  const float length_squared = surface_to_light[0] * surface_to_light[0] +
+                               surface_to_light[1] * surface_to_light[1] +
+                               surface_to_light[2] * surface_to_light[2];
+  if (length_squared <= 1.0e-8f || !std::isfinite(length_squared)) {
+    surface_to_light_ = {0.0f, -1.0f, 0.0f};
+    return;
+  }
+  const float inverse_length = 1.0f / std::sqrt(length_squared);
+  surface_to_light_ = {surface_to_light[0] * inverse_length,
+                       surface_to_light[1] * inverse_length,
+                       surface_to_light[2] * inverse_length};
+}
+
+bool ShadowRenderData::PrepareProduct(const std::size_t product_index,
+                                      const RenderVec3& target) {
+  if (!resources_valid() || product_index >= active_product_count() ||
+      !std::all_of(target.begin(), target.end(),
+                   [](const float value) { return std::isfinite(value); })) {
+    return false;
+  }
+
+  product_targets_[product_index] = target;
+  const RenderVec3 eye{
+      target[0] + surface_to_light_[0] * kCasterDistance,
+      target[1] + surface_to_light_[1] * kCasterDistance,
+      target[2] + surface_to_light_[2] * kCasterDistance,
+  };
+  const bx::Vec3 reference_up =
+      std::fabs(surface_to_light_[2]) > kMaxLightUpAlignment
+          ? bx::Vec3(0.0f, 1.0f, 0.0f)
+          : bx::Vec3(0.0f, 0.0f, 1.0f);
+  auto& view = light_views_[product_index];
+  auto& projection = light_projections_[product_index];
+  bx::mtxLookAt(view.data(), bx::Vec3(eye[0], eye[1], eye[2]),
+                bx::Vec3(target[0], target[1], target[2]), reference_up,
+                bx::Handedness::Left);
+
+  const float half_extent = kProductHalfExtents[product_index];
+  bx::mtxOrtho(projection.data(), -half_extent, half_extent, -half_extent,
+               half_extent, kCasterNear, kCasterFar, 0.0f,
+               bgfx::getCaps()->homogeneousDepth);
+
+  RenderMatrix4x4 receiver_projection{};
+  bx::mtxOrtho(receiver_projection.data(), -half_extent, half_extent,
+               -half_extent, half_extent, 0.0f, kCasterFar, 0.0f,
+               bgfx::getCaps()->homogeneousDepth);
+  RenderMatrix4x4 view_projection{};
+  bx::mtxMul(view_projection.data(), view.data(), receiver_projection.data());
+  RenderMatrix4x4 clip_to_texture{};
+  BuildClipToTextureMatrix(clip_to_texture.data());
+  bx::mtxMul(receiver_matrices_[product_index].data(), view_projection.data(),
+             clip_to_texture.data());
+  return true;
+}
+
+void ShadowRenderData::BeginShadowDepthPass(
+    const std::size_t product_index, const std::uint8_t view_id) const {
+  if (!resources_valid() || product_index >= active_product_count()) {
+    return;
+  }
+  bgfx::setViewName(view_id, product_index == 0u ? "shadow_center"
+                                                 : "shadow_exterior");
+  bgfx::setViewMode(view_id, bgfx::ViewMode::Default);
+  bgfx::setViewClear(view_id, BGFX_CLEAR_DEPTH, 0x00000000u, 1.0f, 0u);
+  bgfx::setViewRect(view_id, 0u, 0u, resolution_, resolution_);
+  bgfx::setViewFrameBuffer(view_id, backend_->framebuffers[product_index]);
+  bgfx::setViewTransform(view_id, light_views_[product_index].data(),
+                         light_projections_[product_index].data());
+  bgfx::setViewScissor(view_id, 0u, 0u, resolution_, resolution_);
+  bgfx::touch(view_id);
+}
+
+const float* ShadowRenderData::light_view(
+    const std::size_t product_index) const {
+  return product_index < kWorldShadowProductCount
+             ? light_views_[product_index].data()
+             : nullptr;
+}
+
+const float* ShadowRenderData::light_projection(
+    const std::size_t product_index) const {
+  return product_index < kWorldShadowProductCount
+             ? light_projections_[product_index].data()
+             : nullptr;
+}
+
+RenderVec3 ShadowRenderData::product_target(
+    const std::size_t product_index) const {
+  return product_index < kWorldShadowProductCount
+             ? product_targets_[product_index]
+             : RenderVec3{};
+}
+
+float ShadowRenderData::product_half_extent(
+    const std::size_t product_index) const {
+  return product_index < kWorldShadowProductCount
+             ? kProductHalfExtents[product_index]
+             : 0.0f;
+}
+
+void ShadowRenderData::SetPublishedProductCount(const std::size_t count) noexcept {
+  published_product_count_ = std::min(count, active_product_count());
+}
+
+void ShadowRenderData::BindTerrainShadowState(bgfx::Encoder* const encoder) const {
+  BindReceiverState(0u, true, encoder);
+}
+
+void ShadowRenderData::BindModelShadowState(
+    const bool enabled, bgfx::Encoder* const encoder) const {
+  BindReceiverState(1u, enabled && quality_ >= 3u, encoder);
+}
+
+void ShadowRenderData::BindReceiverState(const std::size_t first_product,
+                                         const bool enabled,
+                                         bgfx::Encoder* const encoder) const {
+  if (!resources_valid()) {
+    return;
+  }
+  const DrawEncoder draw{encoder};
+  for (std::size_t index = 0u; index < kWorldShadowProductCount; ++index) {
+    const bgfx::TextureHandle texture =
+        index < published_product_count_ &&
+                bgfx::isValid(backend_->depth_textures[index])
+            ? backend_->depth_textures[index]
+            : backend_->fallback_depth;
+    draw.setTexture(static_cast<std::uint8_t>(kFirstShadowSamplerStage + index),
+                    backend_->samplers[index], texture,
+                    BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP |
+                        BGFX_SAMPLER_COMPARE_LEQUAL);
+  }
+  draw.setUniform(backend_->matrices, receiver_matrices_.data(),
+                  static_cast<std::uint16_t>(kWorldShadowProductCount));
+  const bool active = enabled && published_product_count_ > first_product;
+  const std::array<float, 4> shadow_mod =
+      openwow::world::CWorld_GetTerrainShadowModColor();
+  const std::array<RenderVec4, 3> parameters{{
+      {static_cast<float>(published_product_count_),
+       static_cast<float>(first_product), active ? 1.0f : 0.0f, 0.0f},
+      {kRawReceiverBias[0] / kCasterFar,
+       kRawReceiverBias[1] / kCasterFar,
+       kRawReceiverBias[2] / kCasterFar,
+       kRawReceiverBias[3] / kCasterFar},
+      {shadow_mod[0], shadow_mod[1], shadow_mod[2], 0.0f},
+  }};
+  draw.setUniform(backend_->parameters, parameters.data(), 3u);
+}
+
+void SetActiveWorldShadowRenderData(const ShadowRenderData* const data) noexcept {
+  g_active_world_shadow_data.store(data, std::memory_order_release);
+}
+
+void BindActiveWorldModelShadowState(const bool enabled,
+                                     bgfx::Encoder* const encoder) noexcept {
+  const ShadowRenderData* const data =
+      g_active_world_shadow_data.load(std::memory_order_acquire);
+  if (data != nullptr) {
+    data->BindModelShadowState(enabled, encoder);
+  }
 }
 
 }

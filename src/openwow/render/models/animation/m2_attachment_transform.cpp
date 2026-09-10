@@ -4,6 +4,8 @@
 #include "openwow/foundation/math/vec3_normalize_if_length_squared_exceeds_client_epsilon.h"
 #include "openwow/render/api/math/render_matrix_math.h"
 
+#include <algorithm>
+
 namespace openwow::render {
 
 namespace {
@@ -90,6 +92,42 @@ RenderMatrix4x4 BuildM2AttachmentTransformMatrix(
 
     ScaleMatrixBasisVectorsUniform(matrix, scale);
     return matrix;
+}
+
+float M2SequenceGroundAlignmentWeight(
+    const std::uint32_t flags, const std::uint32_t time_ms,
+    const std::uint32_t duration_ms, const float playback_speed) {
+    const auto mode = flags & 0xEu;
+    if (mode == 8u) return 1.0f;
+    if (mode != 2u && mode != 4u) return 0.0f;
+
+    float weight = 0.0f;
+    if (playback_speed == 0.0f) {
+        weight = 1.0f;
+    } else if (playback_speed > 0.0f) {
+        const auto half_duration_ms = duration_ms / 2u;
+        weight = half_duration_ms == 0u
+                     ? 1.0f
+                     : std::clamp(static_cast<float>(time_ms) /
+                                      static_cast<float>(half_duration_ms),
+                                  0.0f, 1.0f);
+    }
+    return mode == 4u ? 1.0f - weight : weight;
+}
+
+void ApplyM2SequenceGroundAlignment(
+    RenderMatrix4x4& matrix, const float facing, const float scale,
+    const RenderVec3View up_vector, const float weight) {
+    if (weight <= 0.0f) return;
+    const RenderVec3 position{matrix[12], matrix[13], matrix[14]};
+    const auto aligned = BuildM2AttachmentTransformMatrix(
+        RenderVec3View{position}, facing, scale, up_vector,
+        AttachmentOrientationMode::kGravityAlign);
+    // Blend basis components with the model's ordinary orientation. Translation
+    // and the authored animation pose retain their separate owners.
+    for (const auto index : {0u, 1u, 2u, 4u, 5u, 6u, 8u, 9u, 10u}) {
+        matrix[index] = matrix[index] * (1.0f - weight) + aligned[index] * weight;
+    }
 }
 
 }

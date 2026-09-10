@@ -366,17 +366,17 @@ bool SpellBook::HandleLearnedSpell(const std::uint8_t* data, std::size_t len) {
   PacketReader reader(data, len);
 
   std::uint32_t spell_id;
-  std::uint16_t unk;
+  std::uint16_t slot_or_zero;
   if (!reader.ReadU32(spell_id)) return false;
-  if (!reader.ReadU16(unk)) return false;
+  if (!reader.ReadU16(slot_or_zero)) return false;
 
   PreloadLearnedSpellStreamingVisuals(dbc_loader_, spell_id);
 
   spells_.insert(spell_id);
   ApplyLearnedMultiCastSpellUpdates(
-      *this, spell_id, [this, spell_id, unk]() {
+      *this, spell_id, [this, spell_id]() {
         if (effects_.spell_learned) {
-          effects_.spell_learned(spell_id, unk != 0, 0);
+          effects_.spell_learned(spell_id, true, 0);
         }
       });
   if (auto* active_player = map_runtime_.objects().GetActivePlayer();
@@ -387,7 +387,8 @@ bool SpellBook::HandleLearnedSpell(const std::uint8_t* data, std::size_t len) {
       effects_.refresh_active_player_mutation_ui();
     }
   } else {
-    pending_initial_spells_.push_back(PendingInitialSpell{spell_id, unk});
+    pending_initial_spells_.push_back(
+        PendingInitialSpell{spell_id, slot_or_zero});
   }
   return true;
 }

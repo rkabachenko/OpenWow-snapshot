@@ -1933,8 +1933,20 @@ int LuaGetMapInfo(lua_State *L) {
 int LuaSetPortraitTexture(lua_State *L) {
   const LuaCallFrame call{L};
   const int texture_index = ValidateTextureWidgetArgument(L);
+  if (lua_isnumber(L, 2) != 0) {
+    const auto display_id = SaturateLuaNumberToU32(lua_tonumber(L, 2));
+    const auto* const dbc = GetDbcLoader(L);
+    if (display_id == 0 || dbc == nullptr ||
+        dbc->creature_display_info().LookupEntry(display_id) == nullptr) {
+      ClearPortraitState(L, texture_index);
+      return call.boolean(false);
+    }
+    BindPortraitDisplayId(L, texture_index, display_id);
+    return call.boolean(true);
+  }
   if (lua_isstring(L, 2) == 0) {
-    return luaL_error(L, "Usage: SetPortraitTexture(texture, \"unit\")");
+    return luaL_error(
+        L, "Usage: SetPortraitTexture(texture, \"unit\"|displayID)");
   }
 
   const std::string unit_id = SafeLuaString(L, 2);
@@ -2147,6 +2159,8 @@ int LuaRegisterForSave(lua_State *L) {
 int LuaReloadUI(lua_State *L) {
 
   if (!GameUI_CanPerformHardwareEventAction()) {
+    openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kWarn,
+        "WorldUI reload rejected: source=ReloadUI reason=protected-action-gate");
     return 0;
   }
   openwow::ui::game::RequestWorldUiReload(L);

@@ -43,7 +43,10 @@ target_include_directories(openwow_lua PUBLIC
 # passes nothing on Windows, where luaconf.h derives LUA_WIN from _WIN32 and
 # supplies the equivalents itself (_popen/_pclose, _isatty, tmpnam).
 target_compile_definitions(openwow_lua PRIVATE
-  $<$<NOT:$<PLATFORM_ID:Windows>>:LUA_USE_POSIX>
+  $<$<NOT:$<OR:$<PLATFORM_ID:Windows>,$<PLATFORM_ID:iOS>>>:LUA_USE_POSIX>
+  $<$<PLATFORM_ID:iOS>:LUA_USE_MKSTEMP>
+  $<$<PLATFORM_ID:iOS>:LUA_USE_ISATTY>
+  $<$<PLATFORM_ID:iOS>:LUA_USE_ULONGJMP>
   $<$<CONFIG:Debug>:LUA_USE_APICHECK>
 )
 

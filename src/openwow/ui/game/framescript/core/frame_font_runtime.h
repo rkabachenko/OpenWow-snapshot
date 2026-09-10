@@ -35,7 +35,8 @@ void SetBoundFontObject(lua_State* lua, int target_index, int font_index);
                                                     int font_string_index);
 
 [[nodiscard]] std::optional<openwow::render::text::TextLayout>
-MeasureLuaFontStringMetrics(lua_State* lua, int font_string_index);
+MeasureLuaFontStringMetrics(lua_State* lua, int font_string_index,
+                            bool constrain_height = true);
 int SetTableJustifyField(lua_State* lua, const char* expected_type,
                          const char* field_name, const char* method_name,
                          bool horizontal);

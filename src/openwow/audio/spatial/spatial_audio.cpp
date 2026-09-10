@@ -5,7 +5,7 @@
 #include <algorithm>
 #include <cmath>
 
-#ifdef __APPLE__
+#if defined(__APPLE__) && !defined(OPENWOW_PLATFORM_IOS)
 #include <CoreAudio/CoreAudio.h>
 #include <AudioToolbox/AudioToolbox.h>
 #endif
@@ -23,7 +23,7 @@ SpeakerMode DetectSpeakerMode() {
         }
     }
 
-#ifdef __APPLE__
+#if defined(__APPLE__) && !defined(OPENWOW_PLATFORM_IOS)
 
     AudioObjectPropertyAddress addr = {
         kAudioDevicePropertyStreamConfiguration,

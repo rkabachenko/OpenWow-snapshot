@@ -263,13 +263,13 @@ ResolveFactionGroupStrings(const openwow::data::dbc::DbcLoader &dbc,
     if ((faction_template.faction_group & faction_group_mask) == 0u) {
       continue;
     }
-    if (entry.name.empty()) {
+    if (entry.internal_name.empty()) {
       continue;
     }
 
     return {
         .token = entry.internal_name,
-        .localized_name = entry.name,
+        .localized_name = entry.name.empty() ? entry.internal_name : entry.name,
         .valid = true,
     };
   }
@@ -2969,10 +2969,7 @@ int LuaUnitRangedAttack(lua_State *L) {
       if (auto slot = player->FindActiveSkillSlot(
               static_cast<std::uint16_t>(skill_line_id))) {
         auto skill = player->GetSkill(*slot);
-        base_skill = skill.value;
-        if (base_skill != 0) {
-          base_skill += static_cast<std::uint16_t>(skill.step_modifier);
-        }
+        base_skill = static_cast<int>(skill.EffectiveValue());
         modifier = skill.modifier;
       }
     }

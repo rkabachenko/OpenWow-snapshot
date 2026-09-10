@@ -12,11 +12,9 @@
 #include <unordered_map>
 #include <vector>
 
-namespace openwow::data::dbc {
-class DbcLoader;
-}
-
 namespace openwow::render {
+
+class ObjectRenderer;
 
 class BlobShadowRenderer {
  public:
@@ -37,7 +35,7 @@ class BlobShadowRenderer {
   void Render(std::uint8_t view_id, const float* view_mtx,
               const float* proj_mtx,
               const game::ObjectPresentationSnapshot& objects,
-              const data::dbc::DbcLoader* dbc,
+              const ObjectRenderer& object_renderer,
               const FacetGather& gather);
 
  private:
@@ -53,11 +51,15 @@ class BlobShadowRenderer {
 
   void SubmitProjectedShadow(std::uint8_t view_id, std::uint64_t guid,
                              const std::array<float, 6>& box,
+                             const std::array<float, 2>& reference_xy,
+                             const std::array<float, 4>& uv_jacobian,
                              std::uint8_t vertex_alpha,
                              const FacetGather& gather);
 
   struct CachedShadowGeometry {
     std::array<float, 6> box{};
+    std::array<float, 2> reference_xy{};
+    std::array<float, 4> uv_jacobian{};
     std::uint8_t vertex_alpha{0};
     std::uint64_t frame_stamp{0};
     std::vector<ShadowVertex> vertices;
@@ -75,11 +77,6 @@ class BlobShadowRenderer {
   std::uint64_t shadow_frame_stamp_{0};
 
   static constexpr float kShadowCacheSlopSquared = 0.01f * 0.01f;
-
-  static constexpr float kShadowXyHalfExtentClamp = 5.0f;
-
-  static constexpr float kShadowZBelowPivotFactor = 1.6666667f;
-  static constexpr float kShadowZAbovePivotFactor = 1.0f;
 
   static constexpr std::size_t kMaxTrianglesPerShadow = 256;
 

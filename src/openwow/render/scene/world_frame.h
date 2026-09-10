@@ -41,6 +41,7 @@ struct PickResult {
   float world_y{0.0f};
   float world_z{0.0f};
   HitType type{HitType::kNone};
+  bool from_nameplate{false};
 };
 
 [[nodiscard]] constexpr PickResult SelectNearestPick(PickResult model,
@@ -94,6 +95,9 @@ public:
   [[nodiscard]] RenderScreenProjection WorldToScreen(RenderVec3View world_pos) const;
 
   [[nodiscard]] PickResult Pick(int screen_x, int screen_y) const;
+
+  [[nodiscard]] PickResult PickForInteraction(
+      int screen_x, int screen_y, game::ObjectGuid current_target) const;
 
   void OnMouseDown(int button, int x, int y);
   void OnMouseUp(int button, int x, int y);
@@ -150,6 +154,8 @@ public:
   using InteractCallback = std::function<void(game::ObjectGuid)>;
   using TerrainClickCallback = std::function<void(const game::targeting::WorldTerrainClick &)>;
   using TargetSelectionCallback = std::function<void(game::ObjectGuid)>;
+  using NameplateHitTestCallback =
+      std::function<game::ObjectGuid(int, int, game::ObjectGuid)>;
 
   void SetScrollCallback(ScrollCallback fn) {
     scroll_cb_ = std::move(fn);
@@ -165,6 +171,9 @@ public:
   }
   void SetTargetSelectionCallback(TargetSelectionCallback fn) {
     target_selection_cb_ = std::move(fn);
+  }
+  void SetNameplateHitTestCallback(NameplateHitTestCallback fn) {
+    nameplate_hit_test_cb_ = std::move(fn);
   }
 
   bool SetMouseoverGuid(game::ObjectGuid guid);
@@ -255,6 +264,7 @@ private:
   InteractCallback interact_cb_;
   TerrainClickCallback terrain_click_cb_;
   TargetSelectionCallback target_selection_cb_;
+  NameplateHitTestCallback nameplate_hit_test_cb_;
 };
 
 }

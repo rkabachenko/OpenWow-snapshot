@@ -55,11 +55,15 @@ struct PreparedTerrainTile {
 
   std::vector<uint16_t> hole_indices;
   std::vector<uint8_t> alpha_atlas_rgba;
+  std::uint16_t alpha_map_dimension{static_cast<std::uint16_t>(kAlphaMapSize)};
+  std::uint16_t alpha_atlas_dimension{
+      static_cast<std::uint16_t>(kTerrainAlphaAtlasSize)};
   std::array<PreparedTerrainChunk, data::terrain::kTotalChunks> chunks{};
   bool has_alpha_layers{false};
 };
 
 PreparedTerrainTile PrepareAdtTerrainTile(const data::terrain::AdtFile &adt, uint32_t tile_x,
-                                          uint32_t tile_y, bool big_alpha);
+                                          uint32_t tile_y, bool big_alpha,
+                                          std::uint32_t alpha_map_dimension = kAlphaMapSize);
 
 }

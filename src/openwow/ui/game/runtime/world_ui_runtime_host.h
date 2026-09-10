@@ -3,6 +3,8 @@
 #include "openwow/ui/game/addon_runtime_loader.h"
 
 #include <functional>
+#include <array>
+#include <cstdint>
 #include <string>
 #include <string_view>
 
@@ -49,6 +51,7 @@ class WorldUiRuntimeHost final {
  private:
   GameUIManager& owner_;
   AddonRuntimeIdentity persistence_identity_;
+  std::array<std::uint32_t, 2> minimap_zoom_callbacks_{};
 };
 
 }

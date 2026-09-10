@@ -14,7 +14,7 @@
 
 [![CI](https://github.com/rkabachenko/OpenWow-snapshot/actions/workflows/ci.yml/badge.svg)](https://github.com/rkabachenko/OpenWow-snapshot/actions/workflows/ci.yml)
 [![Licence: AGPL v3](https://img.shields.io/badge/licence-AGPL--3.0-blue.svg)](LICENSE)
-![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-informational)
+![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows%20%7C%20iOS-informational)
 
 ![C++20](https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus&logoColor=white)
 ![CMake](https://img.shields.io/badge/CMake-3.24%2B-064F8C?logo=cmake&logoColor=white)
@@ -32,11 +32,13 @@ This is not a mod, a patch, or a launcher — it is a new client binary. No game
 code or game assets are included; you supply those yourself from your own copy
 of the game.
 
-It is built as a **drop-in replacement**: a single executable (or `.app` bundle)
-you place inside an existing 3.3.5a game folder. It reads `Data/`, `Interface/`
-and `WTF/` from that folder and ships no game content of its own. The goal is
-full compatibility — everything written for the original client should work
-here, unchanged.
+On desktop it is built as a **drop-in replacement**: a single executable (or
+`.app` bundle) you place inside an existing 3.3.5a game folder. Native iOS
+builds instead copy the developer's local `Data/` into the signed application
+bundle because iOS has no adjacent game-install directory. The source and
+published artifacts ship no game content of their own. The goal is full
+compatibility — everything written for the original client should work here,
+unchanged.
 
 ## What works
 
@@ -68,9 +70,13 @@ platform is mostly a build-and-test exercise.
 
 | | |
 | --- | --- |
-| Operating systems | Linux, macOS, Windows |
+| Operating systems | Linux, macOS, Windows, iOS 15+ |
 | Architectures | x86-64, ARM64 (including Apple Silicon), RISC-V 64 |
 | Graphics backends | Metal, Vulkan, Direct3D, OpenGL — selected per platform by bgfx |
+
+iOS uses Metal and supports external keyboard, mouse/trackpad and existing
+controller input paths. It does not yet provide a dedicated touch-first control
+scheme.
 
 ## Requirements
 

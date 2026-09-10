@@ -23,6 +23,7 @@ struct CameraSnapshot {
   std::array<float, 24> frustum_planes{};
   float near_clip{0.5f};
   float far_clip{350.0f};
+  float low_detail_far_clip{1400.0f};
 };
 
 struct WorldPresentationItem {
@@ -91,11 +92,10 @@ struct WorldSkyPresentation {
 };
 
 struct ShadowPresentationSettings {
-  bool enabled{true};
+  bool enabled{false};
+  bool precomputed_terrain_enabled{true};
   std::uint8_t quality{2};
   std::uint16_t map_resolution{1024};
-  float distance{80.0f};
-  float depth_bias{0.005f};
 };
 
 struct WorldPresentationSnapshot {

@@ -1425,9 +1425,11 @@ void WorldSession::HandleBinderConfirm(const net::wotlk::WorldPacket &pkt) {
 
   std::string inn_name;
   if (const auto *dbc = GetDbcLoader(); dbc != nullptr) {
-    const auto area_id = misc_.bind_point().area_id;
-    if (const auto *area = dbc->area_table().LookupEntry(area_id);
-        area != nullptr) {
+    const auto *area = dbc->area_table().LookupEntry(objects().GetAreaId());
+    if (area == nullptr) {
+      area = dbc->area_table().LookupEntry(objects().GetZoneId());
+    }
+    if (area != nullptr) {
       inn_name = area->name;
     }
   }
@@ -1511,6 +1513,10 @@ void WorldSession::HandleToggleXpGain(const net::wotlk::WorldPacket &pkt) {
 
 void WorldSession::HandleQueryQuestsCompleted(const net::wotlk::WorldPacket &pkt) {
   if (!quests_.HandleQueryQuestsCompleted(pkt.payload.data(), pkt.payload.size())) {
+    openwow::diagnostics::Log(
+        openwow::diagnostics::LogLevel::kWarn,
+        "quest snapshot rejected malformed SMSG_QUERY_QUESTS_COMPLETED_RESPONSE bytes=" +
+            std::to_string(pkt.payload.size()));
     return;
   }
 

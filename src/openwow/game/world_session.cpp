@@ -554,6 +554,34 @@ void WorldSession::FlushInventoryReplicaTransaction() {
     SpellBookFrame::HandleTrackedMultiCastTotemItemEntry(*this, entry);
   }
 
+  bool quest_items_changed = false;
+  for (const auto entry : inventory_bridge_.ConsumeCountChangedEntries()) {
+    for (const auto &quest : quests_.quest_log()) {
+      const auto *quest_template = quests_.GetTemplate(quest.quest_id);
+      if (quest_template == nullptr) {
+        // The pending quest-template query publishes QUEST_LOG_UPDATE on arrival.
+        continue;
+      }
+      for (const auto &objective : quest_template->item_objectives) {
+        if (objective.item_id == entry) {
+          quest_items_changed = true;
+          break;
+        }
+      }
+      if (quest_items_changed) {
+        break;
+      }
+    }
+  }
+
+  if (quest_items_changed) {
+    if (const auto *player = objects().GetLocalPlayerTyped(); player != nullptr) {
+      quests_.SyncQuestLogFromPlayer(*this, *player);
+    }
+    ui::game::ScriptEventDispatch::Get().QueueGlobalEvent("QUEST_LOG_UPDATE");
+    RequestQuestgiverStatusRefresh("quest-item-update");
+  }
+
   for (const auto container : inventory_bridge_.ConsumeChangedContainers()) {
     const auto deferred = std::find(deferred_inventory_template_containers_.begin(),
                                     deferred_inventory_template_containers_.end(),
@@ -637,13 +665,13 @@ WorldSession::WorldSession(openwow::data::DBCacheRuntime& db_cache_runtime,
                   },
               .spell_learned =
                   [this](const std::uint32_t spell_id,
-                         const bool superseded,
+                         const bool notify,
                          const std::uint32_t old_spell_id) {
 
                     gossip_.MarkTrainerSpellKnown(
                         static_cast<std::int32_t>(spell_id));
                     SpellBookFrame::LearnSpell(
-                        *this, spell_id, superseded, old_spell_id);
+                        *this, spell_id, notify, old_spell_id);
                   },
               .spell_forgotten =
                   [this](const std::uint32_t spell_id) {
@@ -741,6 +769,11 @@ WorldSession::WorldSession(openwow::data::DBCacheRuntime& db_cache_runtime,
       consume_legacy_token_seed_verification_(
           std::move(consume_legacy_token_seed_verification)),
       build_bot_detected_digest_(std::move(build_bot_detected_digest)) {
+  // SMSG_TALENTS_INFO is part of the initial login burst and normally arrives
+  // before the local player object.  Talent packet decoding joins talent IDs
+  // against this catalog, so the DBC side must be ready when the session starts
+  // rather than waiting for OnLocalPlayerCreated().
+  TalentInfoStore::Get().LoadFromDbc(dbc_loader);
   SpellbookSystem::Get().SetDbcLoader(
       &dbc_loader, map_runtime_.objects());
   combat_log_.SetObjectManagerProvider(
@@ -847,6 +880,7 @@ WorldSession::WorldSession(openwow::data::DBCacheRuntime& db_cache_runtime,
     }
     (void)inventory_bridge_.ConsumeChangedContainers();
     (void)inventory_bridge_.ConsumeChangedEntries();
+    (void)inventory_bridge_.ConsumeCountChangedEntries();
     (void)inventory_bridge_.ConsumeItemTemplateRefreshes();
   };
   cbs.send_sheathed = [this](const std::uint32_t state) {
@@ -855,6 +889,7 @@ WorldSession::WorldSession(openwow::data::DBCacheRuntime& db_cache_runtime,
   cbs.on_object_created = [this](WorldObject &obj) {
     if (obj.IsUnit()) {
       auto& unit = static_cast<CGUnit_C&>(obj);
+      unit.Interaction().RefreshNpcInteractionStatus(*this, "object-create");
 
       unit.Mount().ApplyDisplayChange(
           unit, *this, unit.Mount().DisplayId(unit));
@@ -982,6 +1017,12 @@ WorldSession::WorldSession(openwow::data::DBCacheRuntime& db_cache_runtime,
         *this, static_cast<const CGItem_C&>(obj));
   };
   cbs.on_object_packet_promoted = [this](WorldObject& obj) {
+    if (obj.IsUnit()) {
+      static_cast<CGUnit_C&>(obj).Interaction().RefreshNpcInteractionStatus(
+          *this, "object-promotion");
+    }
+    RefreshCreatedGameObjectQuestgiverStatus(obj);
+
     if (obj.IsPlayer() && obj.IsActivePlayer()) {
 
       RebindActivePlayerDescriptorCallbacks(obj.GetGuid());
@@ -1975,7 +2016,7 @@ bool WorldSession::HandlePacket(const net::wotlk::WorldPacket &pkt) {
     return true;
   case Op::SMSG_TRAINER_LIST:
     HandleTrainerListPacket(
-        gossip_, [this]() { Trainer_UpdateGreetingText(*this); }, pkt);
+        gossip_, [this]() { return Trainer_PrepareFrameState(*this); }, pkt);
     return true;
   case Op::SMSG_LIST_INVENTORY:
     HandleMerchantListPacket(objects(), gossip_, query_cache_, pkt);
@@ -3283,7 +3324,7 @@ void WorldSession::Update(float dt_seconds, std::uint32_t client_time_ms) {
   map_runtime_.objects().AdvanceEmoteQueues();
   movement_spline_mgr_.Update(client_time_ms);
 
-  map_runtime_.objects().AdvanceSplineMovement(movement_spline_mgr_);
+  map_runtime_.objects().AdvanceSplineMovement(*this, client_time_ms);
 
   ChatBubbleSystem::Get().Update(dt_seconds, map_runtime_.objects());
   chat_sender_.Update(client_time_ms);

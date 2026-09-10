@@ -104,6 +104,8 @@ bool GxApplyRegisteredDefaultDisplayCVars();
 
 bool GxRestartCurrentDisplayMode();
 
+bool GxToggleFullscreen();
+
 struct GxDeviceOverrideState {
   std::array<bool, 9> enabled{};
   std::array<int, 9> values{};

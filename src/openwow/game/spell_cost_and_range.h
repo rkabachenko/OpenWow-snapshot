@@ -33,7 +33,7 @@ bool GetTargetRangeWindow(const WorldSession& session,
                           float* out_max);
 
 std::uint32_t GetCastFailureMessageId(std::uint32_t error_code,
-                                       std::uintptr_t spell_rec,
+                                       const data::dbc::SpellEntry* spell,
                                        std::int32_t extra_param);
 
 void PlaySpellSchoolFizzleSound(const data::dbc::DbcLoader& dbc,

@@ -259,6 +259,7 @@ class M2System final : public api::RendererDeviceLifecycleObserver {
 
   [[nodiscard]] M2VisualCloneCreateResult CreateVisualClone(std::uint32_t source, std::uint64_t revision);
   [[nodiscard]] M2RenderInstanceResult RenderVisualClone(std::uint16_t view, const M2VisualCloneLease& lease, const RenderMatrix4x4& root, RenderMatrix4x4View matrix);
+  [[nodiscard]] M2ResultStatus SetVisualCloneAlpha(const M2VisualCloneLease& lease, float alpha);
   [[nodiscard]] M2ResultStatus SetVisualCloneAnimation(const M2VisualCloneLease& lease, std::uint32_t animation, float speed = 1.0f);
   [[nodiscard]] M2ResultStatus SetVisualCloneAnimationSample(const M2VisualCloneLease& lease, std::uint32_t animation, std::uint32_t time, float speed = 1.0f);
   [[nodiscard]] M2CameraSampleQuery QueryVisualCloneCamera(const M2VisualCloneLease& lease, int camera) const;

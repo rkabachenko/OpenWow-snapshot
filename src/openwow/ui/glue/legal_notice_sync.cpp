@@ -1,6 +1,7 @@
 #include "openwow/ui/glue/legal_notice_sync.h"
 
 #include "openwow/data/startup_filesystem_state.h"
+#include "openwow/foundation/diagnostics/logging.h"
 #include "openwow/game/localization.h"
 #include "openwow/ui/game/cvar_system.h"
 #include "openwow/ui/glue/cgluemgr.h"
@@ -47,15 +48,11 @@ const LegalNoticeDefinition& NoticeDefinition(const LegalNoticeId id) {
 }
 
 std::filesystem::path ResolveClientRoot() {
-  const auto& startup_state = openwow::data::GetStartupFileSystemState();
-  if (!startup_state.executable_base_path.empty()) {
-    return std::filesystem::path(startup_state.executable_base_path);
-  }
-  return std::filesystem::current_path();
+  return openwow::data::ResolveStartupContentPath();
 }
 
 std::filesystem::path ResolveArchiveDataRoot() {
-  auto root = ResolveClientRoot();
+  auto root = openwow::data::ResolveStartupWritablePath("ContentOverrides");
   const auto& startup_state = openwow::data::GetStartupFileSystemState();
   if (startup_state.archive_data_path.empty()) {
     return root / "Data";
@@ -104,16 +101,33 @@ bool RemoveExistingRegularFile(const std::filesystem::path& path) {
   return std::filesystem::remove(path, ec);
 }
 
-bool WriteBinaryFileWithoutCreatingParents(const std::filesystem::path& path,
-                                           const std::string_view bytes) {
+bool WriteBinaryFile(const std::filesystem::path& path,
+                     const std::string_view bytes) {
+  std::error_code ec;
+  std::filesystem::create_directories(path.parent_path(), ec);
+  if (ec) {
+    openwow::diagnostics::Log(
+        openwow::diagnostics::LogLevel::kError,
+        "Legal notice sync failed to create directory for " + path.string() +
+            ": " + ec.message());
+    return false;
+  }
+
   std::ofstream output(path, std::ios::binary | std::ios::trunc);
   if (!output) {
+    openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kError,
+                              "Legal notice sync failed to open " + path.string());
     return false;
   }
 
   output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
   output.close();
-  return static_cast<bool>(output);
+  if (!output) {
+    openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kError,
+                              "Legal notice sync failed to write " + path.string());
+    return false;
+  }
+  return true;
 }
 
 void ProcessDownloadedArchiveToDisk(std::string_view archive_bytes) {
@@ -125,7 +139,7 @@ void ProcessDownloadedArchiveToDisk(std::string_view archive_bytes) {
   const bool locale_prefix = openwow::data::ProbeCommonArchiveLayout(client_root);
   const auto archive_path = BuildDataFilePath("agreements.mpq", locale_prefix);
 
-  if (!WriteBinaryFileWithoutCreatingParents(archive_path, archive_bytes)) {
+  if (!WriteBinaryFile(archive_path, archive_bytes)) {
     return;
   }
 
@@ -134,6 +148,10 @@ void ProcessDownloadedArchiveToDisk(std::string_view archive_bytes) {
                                              0,
                                              kAgreementsArchiveFlags,
                                              &archive_handle)) {
+    openwow::diagnostics::Log(
+        openwow::diagnostics::LogLevel::kError,
+        "Legal notice sync could not open downloaded archive " +
+            archive_path.string());
     std::error_code ec;
     std::filesystem::remove(archive_path, ec);
     return;
@@ -148,6 +166,10 @@ void ProcessDownloadedArchiveToDisk(std::string_view archive_bytes) {
     int loaded_size = 0;
     if (!openwow::vfs::SFileReadFileToBuffer(
             archive_handle, notice.filename, &loaded_data, &loaded_size, 0, 0)) {
+      openwow::diagnostics::Log(
+          openwow::diagnostics::LogLevel::kWarn,
+          "Legal notice sync archive is missing " +
+              std::string(notice.filename) + " from " + archive_path.string());
       continue;
     }
 
@@ -422,10 +444,13 @@ bool CGlueMgr_SyncDataFile(const std::string_view filename,
   }
 
   if (!RemoveExistingRegularFile(target_path)) {
+    openwow::diagnostics::Log(
+        openwow::diagnostics::LogLevel::kError,
+        "Legal notice sync failed to replace " + target_path.string());
     return false;
   }
 
-  if (!WriteBinaryFileWithoutCreatingParents(target_path, source_bytes)) {
+  if (!WriteBinaryFile(target_path, source_bytes)) {
     return false;
   }
 

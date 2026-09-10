@@ -75,9 +75,12 @@ public:
                                std::uint32_t spline_flags = 0u,
                                float spline_arc_length = 0.0f,
                                std::uint32_t spline_duration_ms = 0u,
-                               bool parent_movement_active = false);
+                               bool parent_movement_active = false,
+                               std::uint32_t spline_id = 0u);
   void ClearSplineMovementPoseOwnership();
   [[nodiscard]] bool TrySettleSplineMovementPoseOwnership();
+  bool CompleteSplineMovement(WorldSession &session, std::uint32_t timestamp,
+                               std::uint32_t spline_id, std::uint32_t spline_flags);
   void StopLocomotionForDeath(WorldSession &session);
   [[nodiscard]] bool HasSplineMovementPoseOwnership() const noexcept {
     return spline_movement_pose_owned_;
@@ -132,6 +135,10 @@ public:
     ground_orientation_mode_ = mode;
   }
   void InterpolateShadowBlobPosition(float dt);
+  [[nodiscard]] const std::optional<std::array<float, 3>> &ModelGroundNormal() const {
+    return model_ground_normal_;
+  }
+  void ClearModelGroundNormal() { model_ground_normal_.reset(); }
   void BlendMountTransitionPosition(float dt, std::uint32_t current_tick_ms);
   void BuildStaticBodyMatrix(float *out_matrix) const;
   void ComputeBodyLeanMatrix(float *out_matrix, float dt, bool apply_lean);
@@ -358,10 +365,13 @@ public:
   std::shared_ptr<MovementCollisionSolver> collision_solver_{};
 
   bool collision_stepping_{false};
+  std::optional<std::uint32_t> last_collision_block_log_ms_;
+  std::uint8_t last_collision_log_status_{255};
   bool spline_movement_pose_owned_{false};
   bool spline_locomotion_active_{false};
   bool spline_locomotion_backward_{false};
 
+  std::uint32_t spline_locomotion_id_{0};
   std::uint32_t spline_locomotion_flags_{0};
   float spline_locomotion_arc_length_{0.0f};
   std::uint32_t spline_locomotion_duration_ms_{0};
@@ -381,6 +391,11 @@ public:
   std::int32_t move_sequence_{0};
   std::array<float, 6> speed_bounds_{};
   std::array<float, 3> ground_contact_normal_{{0.0f, 0.0f, 1.0f}};
+  bool ground_projection_seeded_{false};
+  bool ground_projection_failed_{false};
+  std::optional<std::uint32_t> last_ground_discontinuity_log_tick_;
+  std::array<float, 3> ground_projection_anchor_{};
+  std::array<float, 3> ground_projection_position_{};
   std::uint8_t ground_orientation_mode_{0};
 
   struct GroundAlignedMatrixMemo {
@@ -393,6 +408,7 @@ public:
     std::array<float, 16> matrix{};
   };
   GroundAlignedMatrixMemo ground_aligned_matrix_memo_{};
+  std::optional<std::array<float, 3>> model_ground_normal_;
   float body_lean_last_facing_{0.0f};
   float body_lean_yaw_{0.0f};
   float body_lean_pitch_{0.0f};

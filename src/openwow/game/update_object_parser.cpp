@@ -551,9 +551,10 @@ bool ParseUpdateObject(const std::uint8_t *data, std::size_t len,
                 std::to_string(upd.movement.movement.flags),
             len, block_count);
       }
-      upd.client_receive_tick_ms = GetUpdateObjectTickCount();
-      if (handler.on_movement)
+      if (handler.on_movement) {
+        upd.client_receive_tick_ms = GetUpdateObjectTickCount();
         handler.on_movement(upd);
+      }
       break;
     }
 
@@ -599,9 +600,10 @@ bool ParseUpdateObject(const std::uint8_t *data, std::size_t len,
             "create-fields objectType=" + std::to_string(type_raw), len,
             block_count);
       }
-      upd.client_receive_tick_ms = GetUpdateObjectTickCount();
-      if (handler.on_create)
+      if (handler.on_create) {
+        upd.client_receive_tick_ms = GetUpdateObjectTickCount();
         handler.on_create(upd);
+      }
       break;
     }
 

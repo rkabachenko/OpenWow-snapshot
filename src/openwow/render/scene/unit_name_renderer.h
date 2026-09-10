@@ -5,6 +5,7 @@
 #include "openwow/render/ui/text_renderer.h"
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -38,6 +39,10 @@ class UnitNameRenderer {
   bool Initialize();
   void Shutdown();
 
+  void SetFontPath(std::string path);
+  void SetFileLoader(
+      std::function<std::vector<std::uint8_t>(const std::string&)> loader);
+
   void ConsumePresentation(UnitNamePresentationSnapshot snapshot);
 
   void Render(std::uint8_t view_id, const WorldOverlayMetrics& metrics,
@@ -51,6 +56,9 @@ class UnitNameRenderer {
   std::vector<UnitNameDrawEntry> entries_;
   openwow::render::ui::TextRenderer text_renderer_;
   bool initialized_{false};
+  bool font_failure_reported_{false};
+  std::string font_path_{"Fonts\\FRIZQT__.TTF"};
+  std::function<std::vector<std::uint8_t>(const std::string&)> file_loader_;
 
   std::unordered_map<std::string,
                      std::shared_ptr<const openwow::render::text::TextLayout>>
@@ -60,7 +68,6 @@ class UnitNameRenderer {
 
   static constexpr int kBaseFontPixelHeight = kRetailMaxFontPixelHeight;
 
-  static constexpr const char* kUnitNameFontPath = "Fonts\\FRIZQT__.TTF";
 };
 
 }

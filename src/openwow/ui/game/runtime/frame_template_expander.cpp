@@ -250,6 +250,20 @@ void MergeInheritedFrameDefinition(openwow::ui::framexml::UiFrame &dst,
     merged.insert(merged.end(), dst.parent_keys.begin(), dst.parent_keys.end());
     dst.parent_keys = std::move(merged);
   }
+  if (dst.parent_arrays.empty()) {
+    dst.parent_arrays = src.parent_arrays;
+  } else if (!src.parent_arrays.empty()) {
+    auto merged = src.parent_arrays;
+    merged.insert(merged.end(), dst.parent_arrays.begin(), dst.parent_arrays.end());
+    dst.parent_arrays = std::move(merged);
+  }
+  if (dst.mixins.empty()) {
+    dst.mixins = src.mixins;
+  } else if (!src.mixins.empty()) {
+    auto merged = src.mixins;
+    merged.insert(merged.end(), dst.mixins.begin(), dst.mixins.end());
+    dst.mixins = std::move(merged);
+  }
   if (dst.texture_role == openwow::ui::framexml::UiFrame::TextureRole::Normal &&
       src.texture_role != openwow::ui::framexml::UiFrame::TextureRole::Normal)
     dst.texture_role = src.texture_role;

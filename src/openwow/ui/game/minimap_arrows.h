@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 namespace openwow::ui {
 
@@ -15,6 +16,7 @@ struct MinimapRotatingArrow {
   float angle_radians{0.0f};
   MinimapRotatingArrowKind kind{MinimapRotatingArrowKind::kGuidePoi};
   bool visible_in_indoor_minimap{false};
+  std::string tooltip;
 };
 
 inline constexpr float kMinimapNominalRadiusUiUnits = 70.4f;

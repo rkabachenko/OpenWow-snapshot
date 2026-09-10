@@ -65,7 +65,7 @@ int Player_C_TickAreaCheck(WorldSession& session,
     if (!world_map.IsAreaResolutionSettledAt(position.x, position.y)) {
       return 1;
     }
-    const auto area_context = world_map.ResolveAreaEnvironmentContextAtPosition(
+    const auto area_context = world_map.ResolveZoneUiAreaContextAtPosition(
         position.x, position.y, position.z);
 
     openwow::world::PublishActiveMoverWmoSoundContext(

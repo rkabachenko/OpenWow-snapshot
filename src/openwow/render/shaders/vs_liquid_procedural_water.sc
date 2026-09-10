@@ -94,7 +94,7 @@ void main()
     v_tangent = tangent;
     v_bitangent = bitangent;
     v_surfaceNormal = surfaceNormal;
-    v_viewDist = openwowWorldFogDepth(
-        mul(u_modelView, worldPosition).xyz);
-    gl_Position = mul(u_modelViewProj, worldPosition);
+    vec4 viewPosition = mul(u_modelView, worldPosition);
+    v_viewDist = openwowWorldFogDepth(viewPosition.xyz);
+    gl_Position = mul(u_proj, viewPosition);
 }

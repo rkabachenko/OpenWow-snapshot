@@ -619,7 +619,8 @@ bool CEffect_C::RestoreOwnerAlpha() {
   return false;
 }
 
-bool CEffect_C::Update(const std::uint32_t frame_tick_ms) {
+bool CEffect_C::Update(const std::uint32_t frame_tick_ms,
+                       const float delta_seconds) {
   if (lifecycle_ == CEffectLifecycle::kTearingDown) {
     return false;
   }
@@ -633,6 +634,25 @@ bool CEffect_C::Update(const std::uint32_t frame_tick_ms) {
     }
   } else if (lifecycle_ == CEffectLifecycle::kPendingInitialization) {
     lifecycle_ = CEffectLifecycle::kActive;
+  }
+
+  if (HasModel()) {
+    const auto animation_status = m2_system().UpdateAnimation(
+        primary_model_instance_id_, std::max(delta_seconds, 0.0f));
+    if (render::m2::IsTerminalM2ResultStatus(animation_status)) {
+      diagnostics::Log(
+          diagnostics::LogLevel::kWarn,
+          "CEffect_C: model animation update failed effect_id=" +
+              std::to_string(effect_id_) + " owner_guid=" +
+              std::to_string(attachment_owner_guid_.GetRawValue()) +
+              " effect_name_id=" + std::to_string(effect_name_id_) +
+              " status=" +
+              render::m2::M2ResultStatusName(animation_status));
+      BeginTeardown();
+    }
+    if (IsTornDown()) {
+      return false;
+    }
   }
 
   if ((flags_ & CEffectFlags::kEmitterCountdown) != 0u &&
@@ -737,12 +757,13 @@ void CEffect_C::ReleaseOwnerReference() {
   }
 }
 
-void CEffect_C::UpdateAll(const std::uint32_t frame_tick_ms) {
+void CEffect_C::UpdateAll(const std::uint32_t frame_tick_ms,
+                          const float delta_seconds) {
   auto& effects = Registry().effects;
   for (const auto& effect : effects) {
     if (effect->GetLifecycle() != CEffectLifecycle::kTearingDown &&
         TickEligible(frame_tick_ms, effect->activation_tick_)) {
-      (void)effect->Update(frame_tick_ms);
+      (void)effect->Update(frame_tick_ms, delta_seconds);
     }
   }
   ProcessTeardownList();

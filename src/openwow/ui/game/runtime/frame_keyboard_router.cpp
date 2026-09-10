@@ -1,5 +1,6 @@
 #include "openwow/ui/game/runtime/frame_input_router.h"
 
+#include "openwow/foundation/text/ascii.h"
 #include "openwow/foundation/text/utf8.h"
 #include "openwow/game/actions/bindings/adapters/platform/sdl_binding_input.h"
 #include "openwow/ui/game/api/game_lua_api_internal.h"
@@ -96,6 +97,12 @@ bool FrameIsShown(lua_State* state, const FrameStore& frames,
   return shown;
 }
 
+bool FrameIsEditBox(const openwow::ui::framexml::UiFrame& frame) {
+  return frame.runtime_kind ==
+             openwow::ui::framexml::UiFrame::RuntimeKind::EditBox ||
+         openwow::text::EqualsIgnoreCaseAscii(frame.kind, "EditBox");
+}
+
 int ReadInteger(lua_State* state, int frame_index, const char* field,
                 int fallback) {
   lua_getfield(state, frame_index, field);
@@ -177,9 +184,44 @@ bool FrameInputRouter::HandleKeyDown(std::uint32_t key, bool shift_down,
       openwow::game::actions::bindings::adapters::platform::
           SdlScancodeToBaseKey(static_cast<int>(key));
 
+  if (const auto capture = keyboard_captures_.find(key);
+      capture != keyboard_captures_.end()) {
+    if (!capture->second.frame_name.empty()) {
+      const auto ref = frames_.FindLuaRef(capture->second.frame_name);
+      if (ref.has_value()) {
+        if (capture->second.dispatch_key_handlers) {
+          (void)FireString(lua_, *ref, "OnKeyDown", key_name);
+        }
+        const auto *const frame = frames_.FindFrame(capture->second.frame_name);
+        if (frame != nullptr && FrameIsEditBox(*frame) &&
+            IsEditBoxEditingKey(key_name, ctrl_down)) {
+          const int top = lua_gettop(lua_);
+          lua_rawgeti(lua_, LUA_REGISTRYINDEX, *ref);
+          if (lua_istable(lua_, -1) != 0) {
+            const int frame_index = lua_absindex(lua_, -1);
+            auto edit = ReadEditBoxInputState(lua_, frame_index);
+            const bool text_changed = ApplyEditBoxEditingKey(
+                edit, key_name, shift_down, ctrl_down);
+            StoreEditBoxInputState(lua_, frame_index, edit);
+            QueueEditBoxDirtyState(lua_, frame_index, text_changed,
+                                   text_changed, true);
+          }
+          lua_settop(lua_, top);
+        }
+      }
+    }
+    return true;
+  }
+
   if (key_name == "ESCAPE" && !focused_frame_.empty()) {
     const std::string focus_owner = focused_frame_;
     if (const auto ref = frames_.FindLuaRef(focus_owner); ref.has_value()) {
+      keyboard_captures_.insert_or_assign(
+          key, KeyboardCaptureState{
+                   .frame_name = focus_owner,
+                   .dispatch_key_handlers =
+                       FrameUsesKeyboard(lua_, frames_, focus_owner),
+               });
       (void)FireNoArg(lua_, *ref, "OnEscapePressed");
     }
     if (focused_frame_ == focus_owner) {
@@ -190,10 +232,17 @@ bool FrameInputRouter::HandleKeyDown(std::uint32_t key, bool shift_down,
 
   if (!focused_frame_.empty() &&
       FrameIsShown(lua_, frames_, focused_frame_)) {
-    const auto ref = frames_.FindLuaRef(focused_frame_);
+    const std::string focus_owner = focused_frame_;
+    const auto ref = frames_.FindLuaRef(focus_owner);
     if (ref.has_value()) {
+      const bool uses_keyboard = FrameUsesKeyboard(lua_, frames_, focus_owner);
+      keyboard_captures_.insert_or_assign(
+          key, KeyboardCaptureState{
+                   .frame_name = focus_owner,
+                   .dispatch_key_handlers = uses_keyboard,
+               });
       const bool key_handler_invoked =
-          FrameUsesKeyboard(lua_, frames_, focused_frame_) &&
+          uses_keyboard &&
           FireString(lua_, *ref, "OnKeyDown", key_name);
       if (IsEditBoxEditingKey(key_name, ctrl_down)) {
         const int top = lua_gettop(lua_);
@@ -234,6 +283,11 @@ bool FrameInputRouter::HandleKeyDown(std::uint32_t key, bool shift_down,
     if (entry.effective_visible && entry.uses_keyboard &&
         entry.lua_ref != LUA_NOREF &&
         FireString(lua_, entry.lua_ref, "OnKeyDown", key_name)) {
+      keyboard_captures_.insert_or_assign(
+          key, KeyboardCaptureState{
+                   .frame_name = entry.key,
+                   .dispatch_key_handlers = true,
+               });
       return true;
     }
   }
@@ -244,27 +298,21 @@ bool FrameInputRouter::HandleKeyUp(std::uint32_t key) {
   if (lua_ == nullptr) {
     return false;
   }
-  RebuildTraversalIfDirty();
   const std::string key_name =
       openwow::game::actions::bindings::adapters::platform::
           SdlScancodeToBaseKey(static_cast<int>(key));
-  if (!focused_frame_.empty() &&
-      FrameIsShown(lua_, frames_, focused_frame_)) {
-    if (const auto ref = frames_.FindLuaRef(focused_frame_); ref.has_value() &&
-        FrameUsesKeyboard(lua_, frames_, focused_frame_) &&
-        FireString(lua_, *ref, "OnKeyUp", key_name)) {
-      return true;
-    }
-    return true;
+  const auto capture = keyboard_captures_.find(key);
+  if (capture == keyboard_captures_.end()) {
+    return false;
   }
-  for (const auto& entry : traversal_.input_snapshot()) {
-    if (entry.effective_visible && entry.uses_keyboard &&
-        entry.lua_ref != LUA_NOREF &&
-        FireString(lua_, entry.lua_ref, "OnKeyUp", key_name)) {
-      return true;
+  const KeyboardCaptureState owner = std::move(capture->second);
+  keyboard_captures_.erase(capture);
+  if (owner.dispatch_key_handlers && !owner.frame_name.empty()) {
+    if (const auto ref = frames_.FindLuaRef(owner.frame_name); ref.has_value()) {
+      (void)FireString(lua_, *ref, "OnKeyUp", key_name);
     }
   }
-  return false;
+  return true;
 }
 
 bool FrameInputRouter::HandleTextInput(const char* text) {

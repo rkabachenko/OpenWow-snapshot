@@ -9,6 +9,25 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
 
 project(OpenWoW VERSION 0.1.2 LANGUAGES C CXX)
 
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+  enable_language(OBJCXX)
+  # Archive only the application; its static-library dependencies stay linked
+  # into the bundle rather than becoming additional top-level products.
+  set(CMAKE_XCODE_ATTRIBUTE_SKIP_INSTALL "YES")
+endif()
+
+add_custom_target(openwow-compatibility-audit
+  COMMAND ${CMAKE_COMMAND}
+    -DOPENWOW_SOURCE_DIR:PATH=${CMAKE_CURRENT_SOURCE_DIR}
+    -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/CompatibilityAudit.cmake
+  COMMENT "Auditing cross-system compatibility contracts"
+  VERBATIM
+)
+
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+  add_compile_definitions(OPENWOW_PLATFORM_IOS=1)
+endif()
+
 if(APPLE)
   if(POLICY CMP0156)
     cmake_policy(SET CMP0156 NEW)
@@ -34,6 +53,22 @@ find_package(SDL2 CONFIG REQUIRED)
 find_package(imgui CONFIG REQUIRED)
 find_package(bgfx CONFIG REQUIRED)
 find_package(OpenSSL REQUIRED)
+
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+  # The vcpkg bgfx export carries macOS's IOKit framework into every Apple
+  # target even though the iOS archive has no IOKit references. Keeping that
+  # item would give the app a private, arm64e-only runtime dependency.
+  get_target_property(OPENWOW_BGFX_LINK_LIBRARIES
+    bgfx::bgfx INTERFACE_LINK_LIBRARIES)
+  set(OPENWOW_BGFX_IOS_LINK_LIBRARIES "")
+  foreach(OPENWOW_BGFX_LINK_ITEM IN LISTS OPENWOW_BGFX_LINK_LIBRARIES)
+    string(REPLACE " -framework IOKit" ""
+      OPENWOW_BGFX_LINK_ITEM "${OPENWOW_BGFX_LINK_ITEM}")
+    list(APPEND OPENWOW_BGFX_IOS_LINK_LIBRARIES "${OPENWOW_BGFX_LINK_ITEM}")
+  endforeach()
+  set_property(TARGET bgfx::bgfx PROPERTY INTERFACE_LINK_LIBRARIES
+    "${OPENWOW_BGFX_IOS_LINK_LIBRARIES}")
+endif()
 
 find_package(ZLIB REQUIRED)
 
@@ -131,6 +166,10 @@ else()
 endif()
 
 add_subdirectory(src/openwow)
+
+if(APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+  add_subdirectory(tools/ios_texture_cache)
+endif()
 
 if(OPENWOW_BUILD_CLIENT)
   add_subdirectory(apps/client)

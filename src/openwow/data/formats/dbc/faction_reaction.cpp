@@ -7,7 +7,10 @@ namespace {
 [[nodiscard]] bool HasEnemyFaction(const FactionTemplateEntry& a,
                                    const FactionTemplateEntry& b) {
   for (const auto enemy : a.enemies) {
-    if (enemy != 0u && enemy == b.faction) {
+    if (enemy == 0u) {
+      return false;
+    }
+    if (enemy == b.faction) {
       return true;
     }
   }
@@ -17,7 +20,10 @@ namespace {
 [[nodiscard]] bool HasFriendFaction(const FactionTemplateEntry& a,
                                     const FactionTemplateEntry& b) {
   for (const auto friend_faction : a.friends) {
-    if (friend_faction != 0u && friend_faction == b.faction) {
+    if (friend_faction == 0u) {
+      return false;
+    }
+    if (friend_faction == b.faction) {
       return true;
     }
   }
@@ -59,11 +65,10 @@ game::ReactionType ComputeFactionReactionForEntries(
   if ((a->friend_group & b->faction_group) != 0) {
     return game::ReactionType::kFriendly;
   }
-  if ((b->friend_group & a->faction_group) != 0) {
+  if (HasFriendFaction(*a, *b)) {
     return game::ReactionType::kFriendly;
   }
-
-  if (HasFriendFaction(*a, *b)) {
+  if ((b->friend_group & a->faction_group) != 0) {
     return game::ReactionType::kFriendly;
   }
   if (HasFriendFaction(*b, *a)) {

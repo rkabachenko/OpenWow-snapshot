@@ -1,0 +1,226 @@
+<Ui xmlns="http://www.blizzard.com/wow/ui/"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.blizzard.com/wow/ui/ ..\FrameXML\UI.xsd">
+    <Texture name="UI-Common-SearchIconFrameLg" file="Interface\EncounterJournal\UI-EncounterJournalTextures" virtual="true">
+        <Size x="38" y="38"/>
+        <TexCoords left="0.63085938" right="0.70507813" top="0.58886719" bottom="0.66308594"/>
+    </Texture>
+    <Texture name="UI-Common-SearchBarHighlightLg" file="Interface\EncounterJournal\UI-EncounterJournalTextures" virtual="true">
+        <Size x="256" y="47"/>
+        <TexCoords left="0.00195313" right="0.50195313" top="0.80468750" bottom="0.85058594"/>
+    </Texture>
+
+    <Frame name="InlineHyperlinkFrameTemplate" virtual="true"/>
+    <Frame name="TooltipBackdropTemplate" virtual="true">
+        <Backdrop bgFile="Interface\Tooltips\UI-Tooltip-Background" edgeFile="Interface\Tooltips\UI-Tooltip-Border" tile="true">
+            <TileSize><AbsValue val="16"/></TileSize>
+            <EdgeSize><AbsValue val="16"/></EdgeSize>
+            <BackgroundInsets><AbsInset left="4" right="4" top="4" bottom="4"/></BackgroundInsets>
+        </Backdrop>
+    </Frame>
+
+    <ScrollFrame name="WowScrollBoxList" virtual="true" enableMouse="true">
+        <Scripts>
+            <OnMouseWheel>OpenWoWScrollBox_OnMouseWheel(self, delta);</OnMouseWheel>
+        </Scripts>
+    </ScrollFrame>
+
+    <Slider name="MinimalScrollBar" virtual="true" mixin="OpenWoWMinimalScrollBarMixin" orientation="VERTICAL" minValue="0" maxValue="0" defaultValue="0" valueStep="1">
+        <Size x="18" y="0"/>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <Texture parentKey="trackBG" setAllPoints="true">
+                    <Color r="0.12" g="0.075" b="0.035" a="0.65"/>
+                </Texture>
+            </Layer>
+        </Layers>
+        <Scripts>
+            <OnValueChanged>OpenWoWScrollBar_OnValueChanged(self, value);</OnValueChanged>
+        </Scripts>
+        <ThumbTexture file="Interface\Buttons\UI-ScrollBar-Knob">
+            <Size x="18" y="24"/>
+            <TexCoords left="0.20" right="0.80" top="0.125" bottom="0.875"/>
+        </ThumbTexture>
+    </Slider>
+
+    <ScrollFrame name="OpenWoWPanelScrollFrameTemplate" virtual="true" inherits="WowScrollBoxList">
+        <Frames>
+            <Slider name="$parentScrollBar" parentKey="ScrollBar" inherits="MinimalScrollBar">
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativePoint="TOPRIGHT" x="-15" y="-6"/>
+                    <Anchor point="BOTTOMLEFT" relativePoint="BOTTOMRIGHT" x="-15" y="6"/>
+                </Anchors>
+            </Slider>
+        </Frames>
+        <Scripts>
+            <OnLoad>OpenWoWPanelScrollFrame_OnLoad(self);</OnLoad>
+            <OnScrollRangeChanged>OpenWoWPanelScrollFrame_OnScrollRangeChanged(self, xrange, yrange);</OnScrollRangeChanged>
+        </Scripts>
+    </ScrollFrame>
+
+    <Button name="OpenWoWDropdownChoiceTemplate" virtual="true">
+        <Size x="120" y="20"/>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <Texture setAllPoints="true">
+                    <Color r="0.08" g="0.05" b="0.025" a="0.96"/>
+                </Texture>
+            </Layer>
+        </Layers>
+        <ButtonText inherits="GameFontHighlightSmall" justifyH="LEFT">
+            <Anchors>
+                <Anchor point="LEFT" x="7" y="0"/>
+                <Anchor point="RIGHT" x="-5" y="0"/>
+            </Anchors>
+        </ButtonText>
+        <HighlightTexture file="Interface\QuestFrame\UI-QuestTitleHighlight" alphaMode="ADD"/>
+        <Scripts>
+            <OnClick>OpenWoWDropdownChoice_OnClick(self);</OnClick>
+        </Scripts>
+    </Button>
+
+    <Frame name="WowStyle1DropdownTemplate" virtual="true" mixin="OpenWoWDropdownMixin">
+        <Size x="60" y="24"/>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <Texture parentKey="Background" file="Interface\EncounterJournal\OpenWoW\mop-5767279">
+                    <Anchors>
+                        <Anchor point="TOPLEFT" x="-9" y="8"/>
+                        <Anchor point="BOTTOMRIGHT" x="8" y="-9"/>
+                    </Anchors>
+                    <TexCoords left="0.38671875" right="0.81640625" top="0.00390625" bottom="0.1640625"/>
+                </Texture>
+            </Layer>
+            <Layer level="OVERLAY">
+                <FontString parentKey="Text" inherits="GameFontHighlightSmall" wordwrap="false" justifyH="RIGHT">
+                    <Size x="0" y="10"/>
+                    <Anchors>
+                        <Anchor point="TOPLEFT" x="9" y="-7"/>
+                        <Anchor point="TOPRIGHT" x="-24" y="-7"/>
+                    </Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Frames>
+            <Button parentKey="Button" setAllPoints="true">
+                <NormalTexture file="Interface\EncounterJournal\OpenWoW\mop-5767279">
+                    <Size x="23" y="22"/>
+                    <Anchors><Anchor point="RIGHT" x="-1" y="0"/></Anchors>
+                    <TexCoords left="0.80078125" right="0.890625" top="0.171875" bottom="0.2578125"/>
+                </NormalTexture>
+                <PushedTexture file="Interface\EncounterJournal\OpenWoW\mop-5767279">
+                    <Size x="23" y="22"/>
+                    <Anchors><Anchor point="RIGHT" x="-1" y="0"/></Anchors>
+                    <TexCoords left="0.8984375" right="0.98828125" top="0.265625" bottom="0.3515625"/>
+                </PushedTexture>
+                <DisabledTexture file="Interface\EncounterJournal\OpenWoW\mop-5767279">
+                    <Size x="23" y="22"/>
+                    <Anchors><Anchor point="RIGHT" x="-1" y="0"/></Anchors>
+                    <TexCoords left="0.8984375" right="0.98828125" top="0.171875" bottom="0.2578125"/>
+                </DisabledTexture>
+                <HighlightTexture file="Interface\EncounterJournal\OpenWoW\mop-5767279" alphaMode="ADD">
+                    <Size x="23" y="22"/>
+                    <Anchors><Anchor point="RIGHT" x="-1" y="0"/></Anchors>
+                    <TexCoords left="0.80078125" right="0.890625" top="0.265625" bottom="0.3515625"/>
+                </HighlightTexture>
+                <Scripts><OnClick>OpenWoWDropdownButton_OnClick(self);</OnClick></Scripts>
+            </Button>
+            <Frame parentKey="Menu" hidden="true" frameStrata="DIALOG">
+                <Size y="24"/>
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativePoint="BOTTOMLEFT" x="0" y="-2"/>
+                    <Anchor point="TOPRIGHT" relativePoint="BOTTOMRIGHT" x="0" y="-2"/>
+                </Anchors>
+                <Backdrop bgFile="Interface\Tooltips\UI-Tooltip-Background" edgeFile="Interface\Tooltips\UI-Tooltip-Border" tile="true">
+                    <TileSize><AbsValue val="16"/></TileSize>
+                    <EdgeSize><AbsValue val="12"/></EdgeSize>
+                    <BackgroundInsets><AbsInset left="3" right="3" top="3" bottom="3"/></BackgroundInsets>
+                </Backdrop>
+            </Frame>
+        </Frames>
+        <Scripts><OnLoad>OpenWoWDropdown_OnLoad(self);</OnLoad></Scripts>
+    </Frame>
+
+    <Button name="SearchBoxListAllButtonTemplate" virtual="true">
+        <Size x="275" y="24"/>
+        <ButtonText inherits="GameFontHighlightSmall" justifyH="CENTER"/>
+        <HighlightTexture file="Interface\QuestFrame\UI-QuestTitleHighlight" alphaMode="ADD"/>
+    </Button>
+
+    <EditBox name="SearchBoxListTemplate" inherits="SearchBoxTemplate" mixin="SearchBoxListMixin" autoFocus="false" virtual="true">
+        <Frames>
+            <Frame parentKey="searchPreview" hidden="true" frameStrata="DIALOG">
+                <Size x="275" y="159"/>
+                <Anchors><Anchor point="TOPRIGHT" relativePoint="BOTTOMRIGHT" x="0" y="-4"/></Anchors>
+                <Backdrop bgFile="Interface\Tooltips\UI-Tooltip-Background" edgeFile="Interface\Tooltips\UI-Tooltip-Border" tile="true">
+                    <TileSize><AbsValue val="16"/></TileSize>
+                    <EdgeSize><AbsValue val="12"/></EdgeSize>
+                    <BackgroundInsets><AbsInset left="3" right="3" top="3" bottom="3"/></BackgroundInsets>
+                </Backdrop>
+            </Frame>
+            <Frame parentKey="searchProgress" hidden="true">
+                <Size x="180" y="5"/>
+                <Anchors><Anchor point="BOTTOMLEFT" x="5" y="-5"/></Anchors>
+                <Frames>
+                    <StatusBar parentKey="bar" minValue="0" maxValue="1" defaultValue="0" setAllPoints="true">
+                        <BarTexture file="Interface\TargetingFrame\UI-StatusBar"/>
+                    </StatusBar>
+                </Frames>
+            </Frame>
+        </Frames>
+        <Scripts><OnLoad>OpenWoWSearchBoxList_OnLoad(self);</OnLoad></Scripts>
+    </EditBox>
+
+    <Frame name="BottomPopupScrollBoxTemplate" virtual="true">
+        <Size x="620" y="330"/>
+        <Anchors><Anchor point="CENTER" x="0" y="-15"/></Anchors>
+        <Backdrop bgFile="Interface\EncounterJournal\UI-EJ-JournalBG" edgeFile="Interface\Tooltips\UI-Tooltip-Border" tile="false">
+            <EdgeSize><AbsValue val="16"/></EdgeSize>
+            <BackgroundInsets><AbsInset left="4" right="4" top="4" bottom="4"/></BackgroundInsets>
+        </Backdrop>
+        <Layers>
+            <Layer level="OVERLAY">
+                <FontString parentKey="TitleText" inherits="GameFontNormalLarge" justifyH="LEFT">
+                    <Anchors><Anchor point="TOPLEFT" x="20" y="-17"/></Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Frames>
+            <ScrollFrame parentKey="ScrollBox" inherits="WowScrollBoxList">
+                <Size x="575" y="270"/>
+                <Anchors><Anchor point="TOPLEFT" x="20" y="-45"/></Anchors>
+            </ScrollFrame>
+            <Slider parentKey="ScrollBar" inherits="MinimalScrollBar">
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativeKey="$parent.ScrollBox" relativePoint="TOPRIGHT" x="4" y="0"/>
+                    <Anchor point="BOTTOMLEFT" relativeKey="$parent.ScrollBox" relativePoint="BOTTOMRIGHT" x="4" y="0"/>
+                </Anchors>
+            </Slider>
+            <Button inherits="UIPanelCloseButton">
+                <Anchors><Anchor point="TOPRIGHT" x="3" y="3"/></Anchors>
+            </Button>
+        </Frames>
+    </Frame>
+
+    <Frame name="ScrollingFontTemplate" virtual="true" mixin="OpenWoWScrollingFontMixin">
+        <Frames>
+            <ScrollFrame parentKey="ScrollBox" setAllPoints="true" enableMouse="true">
+                <Scripts><OnMouseWheel>OpenWoWScrollBox_OnMouseWheel(self, delta);</OnMouseWheel></Scripts>
+            </ScrollFrame>
+            <Frame parentKey="Content">
+                <Size x="300" y="95"/>
+                <Layers>
+                    <Layer level="ARTWORK">
+                        <FontString parentKey="Text" inherits="GameFontBlack" justifyH="LEFT" justifyV="TOP" wordWrap="true">
+                            <Anchors>
+                                <Anchor point="TOPLEFT" x="0" y="0"/>
+                                <Anchor point="TOPRIGHT" x="0" y="0"/>
+                            </Anchors>
+                        </FontString>
+                    </Layer>
+                </Layers>
+            </Frame>
+        </Frames>
+        <Scripts><OnLoad>OpenWoWScrollingFont_OnLoad(self);</OnLoad></Scripts>
+    </Frame>
+</Ui>

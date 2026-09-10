@@ -73,6 +73,11 @@ public:
     [[nodiscard]] float GetGamma() const;
 
     void SetCursorPosition(int x, int y);
+    // A touch-controlled pointer supplies window coordinates without OS warping.
+    // The same resolved position feeds input, hover queries and cursor rendering.
+    void SetVirtualCursorPosition(int x, int y);
+    void ClearVirtualCursorPosition();
+    [[nodiscard]] bool HasVirtualCursorPosition() const;
     [[nodiscard]] std::optional<std::pair<int, int>> GetCursorPositionInWindow();
 
     [[nodiscard]] std::optional<std::pair<int, int>> ResolveLogicalCursorPosition();
@@ -142,6 +147,7 @@ private:
     FocusCallback  focus_cb_;
     CloseCallback  close_cb_;
     std::optional<std::pair<int, int>> cursor_position_override_;
+    std::optional<std::pair<int, int>> virtual_cursor_position_;
     std::optional<std::pair<int, int>> cursor_anchor_;
 
     bool relative_cursor_mode_active_ = false;

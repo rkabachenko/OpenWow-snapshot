@@ -8,7 +8,7 @@
 #    define NOMINMAX
 #  endif
 #  include <windows.h>
-#else
+#elif !defined(OPENWOW_PLATFORM_IOS)
 #  include <fcntl.h>
 #  include <sys/file.h>
 #  include <unistd.h>
@@ -28,7 +28,9 @@ class SingleInstanceGuard {
   ~SingleInstanceGuard() { Release(); }
 
   bool TryAcquire() {
-#if defined(_WIN32)
+#if defined(OPENWOW_PLATFORM_IOS)
+    return true;
+#elif defined(_WIN32)
     mutex_handle_ = ::CreateMutexA(nullptr, TRUE,
                                    "Blizzard Entertainment World of Warcraft");
     if (mutex_handle_ == nullptr) {
@@ -62,7 +64,9 @@ class SingleInstanceGuard {
   }
 
   void Release() {
-#if defined(_WIN32)
+#if defined(OPENWOW_PLATFORM_IOS)
+    return;
+#elif defined(_WIN32)
     if (mutex_handle_ != nullptr) {
       ::ReleaseMutex(mutex_handle_);
       ::CloseHandle(mutex_handle_);
@@ -80,7 +84,7 @@ class SingleInstanceGuard {
  private:
 #if defined(_WIN32)
   HANDLE mutex_handle_{nullptr};
-#else
+#elif !defined(OPENWOW_PLATFORM_IOS)
   int lock_fd_{-1};
 #endif
 };

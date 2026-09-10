@@ -117,7 +117,7 @@ void ApplyScrollFrameMethods(lua_State* L) {
       L,
       [](lua_State* Ls) -> int {
         const int self_idx = ValidateFrameSelf(Ls);
-        if (detail::LuaFrameMutationBlocked(Ls, 1)) {
+        if (!detail::AllowLuaFrameProtectedMutation(Ls, 1)) {
           return 0;
         }
         if (lua_isnumber(Ls, 2) == 0) {
@@ -152,7 +152,7 @@ void ApplyScrollFrameMethods(lua_State* L) {
       L,
       [](lua_State* Ls) -> int {
         const int self_idx = ValidateFrameSelf(Ls);
-        if (detail::LuaFrameMutationBlocked(Ls, 1)) {
+        if (!detail::AllowLuaFrameProtectedMutation(Ls, 1)) {
           return 0;
         }
         if (lua_isnumber(Ls, 2) == 0) {
@@ -872,7 +872,7 @@ void ApplySliderMethods(lua_State* L) {
   lua_pushcclosure(
       L,
       [](lua_State* Ls) -> int {
-        if (detail::LuaFrameMutationBlocked(Ls, 1)) {
+        if (!detail::AllowLuaFrameProtectedMutation(Ls, 1)) {
           return 0;
         }
         if (lua_istable(Ls, 1)) {
@@ -888,7 +888,7 @@ void ApplySliderMethods(lua_State* L) {
   lua_pushcclosure(
       L,
       [](lua_State* Ls) -> int {
-        if (detail::LuaFrameMutationBlocked(Ls, 1)) {
+        if (!detail::AllowLuaFrameProtectedMutation(Ls, 1)) {
           return 0;
         }
         if (lua_istable(Ls, 1)) {

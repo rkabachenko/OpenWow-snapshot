@@ -19,8 +19,8 @@ WorldPresentationSnapshot WorldMap::BuildPresentationSnapshot(
                              camera.map_generation == world_staging_generation_;
   snapshot.camera = camera;
   snapshot.environment = environment_;
-  snapshot.environment.weather = active_weather_type_;
-  snapshot.environment.weather_density = active_weather_density_;
+  snapshot.environment.weather = weather_.kind;
+  snapshot.environment.weather_density = weather_.density;
 
   (void)ResolveAreaEnvironmentAtPosition(camera.position[0], camera.position[1],
                                          camera.position[2],

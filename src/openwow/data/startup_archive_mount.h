@@ -73,6 +73,7 @@ static_assert(kLooseParentRootPriority >
               "the loose band must outrank every archive, as stock's resolver does");
 
 inline constexpr int kEnhancedOverridePriority = 1000;
+inline constexpr int kRuntimeOverridePriority = 900;
 
 using MountProgressFn = std::function<void(const std::string&, int, int)>;
 

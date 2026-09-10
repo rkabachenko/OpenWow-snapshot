@@ -12,6 +12,7 @@
 #include "openwow/render/resources/readback/pixel_readback.h"
 #include "openwow/render/ui/ui_shaders.h"
 #include "openwow/foundation/diagnostics/logging.h"
+#include "openwow/core/platform_runtime_policy.h"
 #include "openwow/runtime/scheduling/frame_job_system.h"
 
 #include <SDL2/SDL.h>
@@ -323,7 +324,11 @@ bool FillPlatformData(SDL_Window* window, bgfx::PlatformData* out) {
   }
 #endif
 #if defined(__APPLE__)
+#if defined(OPENWOW_PLATFORM_IOS)
+  if (wmi.subsystem == SDL_SYSWM_UIKIT) {
+#else
   if (wmi.subsystem == SDL_SYSWM_COCOA) {
+#endif
     if (s_metal_view != nullptr) {
       SDL_Metal_DestroyView(static_cast<SDL_MetalView>(s_metal_view));
       s_metal_view = nullptr;
@@ -333,9 +338,11 @@ bool FillPlatformData(SDL_Window* window, bgfx::PlatformData* out) {
       s_metal_view = metal_view;
       pd.nwh = SDL_Metal_GetLayer(metal_view);
     }
+#if !defined(OPENWOW_PLATFORM_IOS)
     if (pd.nwh == nullptr) {
       pd.nwh = wmi.info.cocoa.window;
     }
+#endif
   }
 #endif
 
@@ -433,8 +440,12 @@ class BgfxRendererContext final : public api::RendererContext {
     init.resolution.reset = ResetFlags(create_info.presentation, resolved);
     init.resolution.maxFrameLatency = create_info.presentation.maximum_frame_latency;
 
-    init.limits.transientVbSize = 32u * 1024u * 1024u;
-    init.limits.transientIbSize = 8u * 1024u * 1024u;
+    constexpr auto runtime_policy =
+        openwow::core::GetPlatformRuntimePolicy();
+    init.limits.transientVbSize =
+        runtime_policy.transient_vertex_buffer_bytes;
+    init.limits.transientIbSize =
+        runtime_policy.transient_index_buffer_bytes;
 
     constexpr std::uint32_t kDedicatedWorldEncodePassEncoders = 2u;
     constexpr std::uint32_t kM2RenderBatchWaveSitesPerFrame = 11u;
@@ -581,6 +592,16 @@ class BgfxRendererContext final : public api::RendererContext {
     frame_active_ = true;
 
     const bgfx::Caps* const caps = bgfx::getCaps();
+    // Frame graphs allocate view IDs again for each frame. bgfx retains view
+    // state, so a reused ID must not inherit another pass's framebuffer,
+    // scissor, clear operation, ordering mode, or transform.
+    if (caps != nullptr) {
+      for (std::uint16_t view = 0; view < caps->limits.maxViews; ++view) {
+        bgfx::resetView(view);
+      }
+    }
+    bgfx::setViewRect(0, 0, 0, bgfx::BackbufferRatio::Equal);
+    bgfx::setViewClear(0, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH, 0x1a1412ff, 1.0f, 0);
     const std::uint32_t granted_encoders =
         caps != nullptr ? caps->limits.maxEncoders : 0u;
     s_frame_encoders_available.store(

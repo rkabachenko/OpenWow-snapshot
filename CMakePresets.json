@@ -68,6 +68,86 @@
       }
     },
     {
+      "name": "ios-base",
+      "hidden": true,
+      "generator": "Xcode",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/.vcpkg/scripts/buildsystems/vcpkg.cmake",
+        "CMAKE_SYSTEM_NAME": "iOS",
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_OSX_ARCHITECTURES": "arm64",
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "15.0",
+        "CMAKE_SUPPRESS_REGENERATION": "ON",
+        "VCPKG_HOST_TRIPLET": "arm64-osx",
+        "VCPKG_OVERLAY_TRIPLETS": "${sourceDir}/vcpkg-overlay-triplets",
+        "BUILD_TESTING": "OFF",
+        "OPENWOW_EMBED_GAME_DATA": "ON"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      }
+    },
+    {
+      "name": "ios-simulator",
+      "displayName": "iOS Simulator arm64",
+      "inherits": [
+        "ios-base"
+      ],
+      "cacheVariables": {
+        "CMAKE_OSX_SYSROOT": "iphonesimulator",
+        "VCPKG_TARGET_TRIPLET": "arm64-ios-simulator"
+      }
+    },
+    {
+      "name": "ios-device",
+      "displayName": "iOS device arm64",
+      "inherits": [
+        "ios-base"
+      ],
+      "cacheVariables": {
+        "CMAKE_OSX_SYSROOT": "iphoneos",
+        "VCPKG_TARGET_TRIPLET": "arm64-ios"
+      }
+    },
+    {
+      "name": "ios-simulator-code-only",
+      "displayName": "iOS Simulator arm64 (code only)",
+      "description": "Build the native iOS application without copying the local build-12340 Data directory into the bundle.",
+      "inherits": [
+        "ios-simulator"
+      ],
+      "cacheVariables": {
+        "CMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED": "NO",
+        "OPENWOW_EMBED_GAME_DATA": "OFF"
+      }
+    },
+    {
+      "name": "ios-device-code-only",
+      "displayName": "iOS device arm64 (code only)",
+      "description": "Build the native iOS application without copying the local build-12340 Data directory into the bundle.",
+      "inherits": [
+        "ios-device"
+      ],
+      "cacheVariables": {
+        "CMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED": "NO",
+        "OPENWOW_EMBED_GAME_DATA": "OFF"
+      }
+    },
+    {
+      "name": "ios-device-development",
+      "displayName": "iOS device arm64 (signed development)",
+      "description": "Build a signed, installable iOS application without embedding Data; pair it with openwow-ios-sync-data for fast iteration.",
+      "inherits": [
+        "ios-device"
+      ],
+      "cacheVariables": {
+        "OPENWOW_EMBED_GAME_DATA": "OFF"
+      }
+    },
+    {
       "name": "ci-base",
       "hidden": true,
       "inherits": [
@@ -208,6 +288,31 @@
     {
       "name": "release-pgo-use",
       "configurePreset": "release-pgo-use"
+    },
+    {
+      "name": "ios-simulator",
+      "configurePreset": "ios-simulator",
+      "configuration": "Release"
+    },
+    {
+      "name": "ios-device",
+      "configurePreset": "ios-device",
+      "configuration": "Release"
+    },
+    {
+      "name": "ios-simulator-code-only",
+      "configurePreset": "ios-simulator-code-only",
+      "configuration": "Release"
+    },
+    {
+      "name": "ios-device-code-only",
+      "configurePreset": "ios-device-code-only",
+      "configuration": "Release"
+    },
+    {
+      "name": "ios-device-development",
+      "configurePreset": "ios-device-development",
+      "configuration": "Release"
     },
     {
       "name": "ci-linux-gcc",

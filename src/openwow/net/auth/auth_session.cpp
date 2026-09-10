@@ -32,7 +32,9 @@ void AuthSession::Connect(const std::string& host, uint16_t port) {
   state_ = AuthState::Connecting;
 }
 
-void AuthSession::Authenticate(const std::string& username, const std::string& password) {
+void AuthSession::Authenticate(const std::string& username,
+                               const std::string& password,
+                               const std::string& locale) {
   {
     std::lock_guard lock(mutex_);
 
@@ -46,9 +48,20 @@ void AuthSession::Authenticate(const std::string& username, const std::string& p
       srp_username.resize(hash_pos);
 
     srp_.Initialize(srp_username, password);
+    locale_ = locale;
   }
 
   auto pkt = BuildLogonChallenge();
+  if (pkt.empty()) {
+    std::lock_guard lock(mutex_);
+    state_ = AuthState::Failed;
+    last_error_ = AuthResult::FailConnectLater;
+    openwow::diagnostics::Log(
+        openwow::diagnostics::LogLevel::kError,
+        "AuthSession: cannot build C_AUTH_LOGON_CHALLENGE: invalid locale=" +
+            locale_);
+    return;
+  }
   if (tcp_.IsConnected() && tcp_.Write(pkt)) {
     std::lock_guard lock(mutex_);
     state_ = AuthState::ChallengeSent;
@@ -173,6 +186,7 @@ void AuthSession::Reset() {
   tcp_.Disconnect();
   srp_ = openwow::auth::SRP6Client{};
   username_.clear();
+  locale_.clear();
   last_host_.clear();
   last_port_ = 0;
   state_ = AuthState::Disconnected;
@@ -340,7 +354,7 @@ void AuthSession::HandleRealmList(const uint8_t* data, size_t size) {
 }
 
 std::vector<uint8_t> AuthSession::BuildLogonChallenge() const {
-  return BuildRetailLogonChallengePacket(username_);
+  return BuildRetailLogonChallengePacket(username_, locale_);
 }
 
 std::vector<uint8_t> AuthSession::BuildRealmListRequest() {

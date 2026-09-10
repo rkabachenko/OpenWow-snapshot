@@ -11,8 +11,10 @@ int LuaGetCategoryNumAchievements(lua_State* state) {
   const auto category_id = TruncateLuaNumberToSseI32(
       arguments.RequireNumber(
           1, "Usage: GetCategoryNumAchievements(categoryID)"));
-  const auto selector = AchievementCategorySelector::FromLuaValue(
-      category_id, arguments.IsBoolean(2) && arguments.Boolean(2));
+  const auto selector = AchievementCategorySelector::FromLuaValue(category_id);
+  const bool include_all_chain_entries =
+      selector.IsWildcard() ||
+      (arguments.IsBoolean(2) && arguments.Boolean(2));
 
   const auto* session = GetWorldSession(state);
   const auto* dbc = GetDbcLoader(state);
@@ -30,7 +32,7 @@ int LuaGetCategoryNumAchievements(lua_State* state) {
       session->achievements().last_inspect().achievements,
       [](const auto& achievement) { return achievement.id; });
   const auto count = CountLocalCategoryAchievements(
-      *dbc, *session, selector, local_completed_ids,
+      *dbc, *session, selector, include_all_chain_entries, local_completed_ids,
       comparison_completed_ids);
   return openwow::ui::lua::LuaCall(state)
       .PushNumber(count.total)

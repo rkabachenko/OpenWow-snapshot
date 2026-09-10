@@ -92,14 +92,8 @@ constexpr double kAnimationInstanceMicroseconds = 1.15;
       static_cast<std::size_t>(previous.sequence_index) <
           model.animation_sequences.size();
 
-  const bool previous_play_unfinished =
-      previous_slot_valid && previous.time_seconds > 0.0f &&
-      previous.time_seconds * 1000.0f + 0.5f <
-          static_cast<float>(
-              model.animation_sequences[previous.sequence_index].length_ms);
   if (selection.resolved && previous_slot_valid &&
-      (previous.sequence_index != selection.resolved_sequence_index ||
-       previous_play_unfinished) &&
+      previous.sequence_index != selection.resolved_sequence_index &&
       static_cast<std::size_t>(selection.resolved_sequence_index) <
           model.animation_sequences.size()) {
 
@@ -496,14 +490,8 @@ void M2AnimationRuntime::ApplyAnimationSelectionLocked(
         previous_sequence != kInvalidM2AnimationSequenceIndex &&
         previous_sequence < model.animation_sequences.size();
 
-    const bool previous_play_unfinished =
-        previous_sequence_valid && previous_time > 0.0f &&
-        previous_time * 1000.0f + 0.5f <
-            static_cast<float>(
-                model.animation_sequences[previous_sequence].length_ms);
     if (blend_time > 0.0f && previous_sequence_valid &&
-        (previous_sequence != selection.resolved_sequence_index ||
-         previous_play_unfinished)) {
+        previous_sequence != selection.resolved_sequence_index) {
 
       const bool keep_existing_blend = [&] {
         if (previous_blend_source == kInvalidM2AnimationSequenceIndex ||

@@ -95,7 +95,8 @@ void SpellAction_DisplaySpellFailure(const WorldSession& session,
                                      std::uint32_t spell_id,
                                      ObjectGuid caster_guid,
                                      std::uint32_t error_code,
-                                     const std::string& substitution = {});
+                                     const std::string& substitution = {},
+                                     const char* source = "local");
 
 namespace detail {
 

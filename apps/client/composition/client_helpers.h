@@ -23,7 +23,7 @@ class GlueLuaRuntime;
 namespace openwow::client {
 
 inline void GetDrawableSize(SDL_Window* window, int* width, int* height) {
-  SDL_GL_GetDrawableSize(window, width, height);
+  SDL_GetWindowSizeInPixels(window, width, height);
   if (*width <= 0 || *height <= 0) {
     SDL_GetWindowSize(window, width, height);
   }

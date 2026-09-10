@@ -1,4 +1,5 @@
 #include "glue_flow.h"
+#include "openwow/foundation/diagnostics/performance_logging.h"
 #include "realm_addon_handshake_composition.h"
 
 #include "openwow/core/client_init.h"
@@ -1602,8 +1603,10 @@ void PumpGlueFlow(GlueFlowContext& ctx, GlueFlowState& state) {
     state.auth_future.reset();
     state.realm_future.reset();
     DisconnectAuthProtocol(state);
+    const std::string locale =
+        openwow::ui::game::CVarSystem::Instance().GetCVar("locale");
     state.auth_protocol =
-        std::make_shared<openwow::net::wotlk::AuthProtocol>();
+        std::make_shared<openwow::net::wotlk::AuthProtocol>(locale);
     openwow::net::ClientServices::Instance().SetLoginFileTransferResponseSender(
         [protocol = std::weak_ptr<openwow::net::wotlk::AuthProtocol>(
              state.auth_protocol)](const bool transfer_needed,
@@ -2668,6 +2671,8 @@ void PumpGlueFlow(GlueFlowContext& ctx, GlueFlowState& state) {
     const std::uint64_t guid = character.id;
     openwow::ui::game::CVarSystem::Instance().SetCVar("lastCharacterIndex",
                                                       std::to_string(idx), true);
+    openwow::diagnostics::LogPerformanceEvent("world.enter_requested",
+        "map=" + std::to_string(character.map_id));
     PrepareEnterWorldLoadingState(character);
     state.cancel_requested.store(false);
     SetFlowPhase(state, GlueFlowState::Phase::kEnteringWorld);
@@ -2679,6 +2684,9 @@ void PumpGlueFlow(GlueFlowContext& ctx, GlueFlowState& state) {
 
     auto* session = ctx.realm_session;
     state.world_enter_future.emplace(std::async(std::launch::async, [session, guid]() {
+      static openwow::diagnostics::PerformanceLogSite performance_site;
+      const openwow::diagnostics::ScopedPerformanceLog performance(
+          performance_site, "world.login_network_wait", {}, 0.0);
       return session->EnterWorld(guid, 10000);
     }));
 

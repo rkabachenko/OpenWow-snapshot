@@ -184,6 +184,8 @@ class CursorSurface {
   PublishedBuiltInCursor published_builtin_cursor_;
   std::unordered_map<std::uint32_t, openwow::render::TextureLease>
       software_cursor_texture_leases_;
+  SDL_Cursor* native_cursor_suppression_handle_ = nullptr;
+  bool native_cursor_suppression_failure_logged_ = false;
   SDL_Cursor* custom_cursor_handle_ = nullptr;
   bool custom_cursor_texture_dirty_ = true;
   bool runtime_cursor_enabled_ = false;
@@ -211,6 +213,8 @@ class CursorSurface {
       int hotspot_x, int hotspot_y);
 
   void FreeCursorHandle(SDL_Cursor*& handle);
+
+  void SuppressNativeCursor();
 
   [[nodiscard]] SDL_Cursor* DetachPublishedBuiltInCursor();
 

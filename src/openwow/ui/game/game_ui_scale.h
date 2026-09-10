@@ -4,6 +4,13 @@ namespace openwow::ui::game {
 
 class GameUIManager;
 
+// Platform option range, not a clamp on frame scales or console CVar writes.
+#if defined(OPENWOW_PLATFORM_IOS)
+inline constexpr float kConfiguredUiScaleSliderMaximum = 1.5F;
+#else
+inline constexpr float kConfiguredUiScaleSliderMaximum = 1.0F;
+#endif
+
 float ComputeDefaultGameUiRootScale(int viewport_width,
                                     int viewport_height,
                                     double aspect_ratio);

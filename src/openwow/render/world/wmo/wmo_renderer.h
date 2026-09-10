@@ -104,6 +104,15 @@ enum class WmoMergedGeometryState : std::uint8_t {
   kUnavailable,
 };
 
+inline constexpr WmoMergedGeometryState kWmoMergedGeometryInitialState =
+#if defined(OPENWOW_PLATFORM_IOS)
+    // Keep the already-resident per-group buffers on iOS. Building a merged
+    // copy would retain CPU staging and both GPU representations at once.
+    WmoMergedGeometryState::kUnavailable;
+#else
+    WmoMergedGeometryState::kAccumulating;
+#endif
+
 inline constexpr std::size_t kMaxWmoOccluderPolygonsPerGroup = 32u;
 inline constexpr float kMinWmoOccluderPolygonArea = 4.0f;
 
@@ -155,6 +164,11 @@ enum class WmoLightingMode : std::uint8_t {
   Interior,
 };
 
+enum class WmoGroupRenderFilter : std::uint8_t {
+  kAll,
+  kExteriorOnly,
+};
+
 [[nodiscard]] WmoLightingMode ResolveRetailWmoLightingMode(
     std::uint32_t group_flags, WmoBatchMesh::Region region,
     std::uint32_t material_flags, bool unified_render_path) noexcept;
@@ -167,6 +181,7 @@ enum WmoSubmitSkipReason : std::uint32_t {
   kWmoSubmitSkipGpuNotReady = 1u << 3u,
   kWmoSubmitSkipFrustum = 1u << 4u,
   kWmoSubmitSkipEmptyBatch = 1u << 5u,
+  kWmoSubmitSkipGroupFilter = 1u << 6u,
 
   kWmoSubmitSkipBatchAlreadySubmitted = 1u << 7u,
   kWmoSubmitSkipOcclusion = 1u << 8u,
@@ -249,7 +264,9 @@ public:
       std::uint16_t viewport_width = 0,
       std::uint16_t viewport_height = 0,
       occlusion::OcclusionDepthBuffer* occlusion = nullptr,
-      bgfx::Encoder *encoder = nullptr);
+      bgfx::Encoder *encoder = nullptr,
+      bool shadow_caster_pass = false,
+      WmoGroupRenderFilter group_filter = WmoGroupRenderFilter::kAll);
 
   void RenderCollisionGeometry(uint8_t view_id, const float *view_mtx, const float *proj_mtx,
                                const RenderMatrix4x4 &model_mtx,
@@ -397,7 +414,7 @@ public:
   std::vector<WmoGroupGpu> groups_;
   std::array<WmoMergedGeometry, kWmoMergedVertexFormCount> merged_geometry_{};
   WmoMergedGeometryState merged_state_{
-      WmoMergedGeometryState::kAccumulating};
+      kWmoMergedGeometryInitialState};
   std::uint32_t submit_generation_{0u};
   std::vector<WmoMaterialGpu> materials_;
   std::vector<std::uint8_t> material_resident_;

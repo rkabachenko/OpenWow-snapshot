@@ -17,7 +17,9 @@ void main()
         float luminance = dot(tex.rgb, vec3(0.299, 0.587, 0.114));
         tex.rgb = vec3_splat(luminance);
     }
-    if (u_uiMaterial.z > 0.5) {
+    if (u_uiMaterial.z > 1.5) {
+        tex.a = texture2D(s_uiMask, v_texcoord0).a;
+    } else if (u_uiMaterial.z > 0.5) {
         tex.a *= texture2D(s_uiMask, v_texcoord0).a;
     }
     vec4 result = tex * v_color0;

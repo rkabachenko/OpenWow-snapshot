@@ -2671,14 +2671,8 @@ std::optional<std::string> BuildTradeSkillListLink(
   }
 
   const auto skill = player->GetSkill(*skill_slot);
-  const auto current_rank = skill.value == 0
-                                ? 0u
-                                : static_cast<std::uint32_t>(skill.value) +
-                                      static_cast<std::uint16_t>(skill.step_modifier);
-  const auto max_rank = skill.max_value == 0
-                            ? 0u
-                            : static_cast<std::uint32_t>(skill.max_value) +
-                                  static_cast<std::uint16_t>(skill.step_modifier);
+  const auto current_rank = skill.EffectiveValue();
+  const auto max_rank = skill.EffectiveMaxValue();
   const auto player_guid = session->objects().GetActivePlayerGuid().GetRawValue();
   if (player_guid == 0) {
     return std::nullopt;

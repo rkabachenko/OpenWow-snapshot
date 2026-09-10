@@ -17,6 +17,7 @@
 #include "openwow/data/startup_filesystem_state.h"
 #include "openwow/core/console.h"
 #include "openwow/debug/diagnostics/debug_console.h"
+#include "openwow/foundation/diagnostics/logging.h"
 #include "openwow/ui/game/cvar_system.h"
 #include "openwow/foundation/text/ascii.h"
 #include "openwow/vfs/sfile_core.h"
@@ -42,17 +43,6 @@ std::filesystem::path BuildNativePath(std::string path) {
     return std::filesystem::path(path);
 }
 
-std::filesystem::path GetStartupPathFallbackRoot() {
-    std::error_code ec;
-    const std::filesystem::path current_directory =
-        std::filesystem::current_path(ec);
-    if (ec) {
-        return {};
-    }
-
-    return current_directory;
-}
-
 std::filesystem::path ResolveConfigPathForIo(
     const std::filesystem::path& path) {
     const std::filesystem::path native_path = BuildNativePath(path.string());
@@ -60,18 +50,7 @@ std::filesystem::path ResolveConfigPathForIo(
         return native_path.lexically_normal();
     }
 
-    const auto& startup_state = openwow::data::GetStartupFileSystemState();
-    if (!startup_state.executable_base_path.empty()) {
-        return (BuildNativePath(startup_state.executable_base_path) / native_path)
-            .lexically_normal();
-    }
-
-    const std::filesystem::path fallback_root = GetStartupPathFallbackRoot();
-    if (fallback_root.empty()) {
-        return native_path;
-    }
-
-    return (fallback_root / native_path).lexically_normal();
+    return openwow::data::ResolveStartupWritablePath(native_path);
 }
 
 std::filesystem::path ResolvePrimaryConfigPathForIo() {
@@ -472,6 +451,9 @@ int CVar_FlushToFile() {
 
     if (s_config_filename.empty()) {
         s_dirty_flag.store(true, std::memory_order_release);
+        openwow::diagnostics::Log(
+            openwow::diagnostics::LogLevel::kError,
+            "CVarSystem: cannot persist archived CVars without a config filename");
         return 0;
     }
 
@@ -481,6 +463,14 @@ int CVar_FlushToFile() {
     if (!parent.empty()) {
         std::error_code ec;
         std::filesystem::create_directories(parent, ec);
+        if (ec) {
+            s_dirty_flag.store(true, std::memory_order_release);
+            openwow::diagnostics::Log(
+                openwow::diagnostics::LogLevel::kError,
+                "CVarSystem: failed to create config directory: path=" +
+                    parent.string() + " error=" + ec.message());
+            return 0;
+        }
     }
 
     auto& cvar_sys = openwow::ui::game::CVarSystem::Instance();
@@ -490,6 +480,9 @@ int CVar_FlushToFile() {
     }
 
     s_dirty_flag.store(true, std::memory_order_release);
+    openwow::diagnostics::Log(
+        openwow::diagnostics::LogLevel::kError,
+        "CVarSystem: failed to persist archived CVars: path=" + path.string());
     return 0;
 }
 

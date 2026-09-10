@@ -297,11 +297,27 @@ bool SessionHandler::HandleStopMirrorTimer(const std::uint8_t* data,
 bool SessionHandler::HandleSetProficiency(const std::uint8_t* data,
                                             std::size_t len) {
   PacketReader r(data, len);
-  if (!r.ReadU8(proficiency_.item_class)) return false;
-  if (!r.ReadU32(proficiency_.subclass_mask)) return false;
-  if (proficiency_.item_class < proficiency_masks_.size()) {
-    proficiency_masks_[proficiency_.item_class] = proficiency_.subclass_mask;
+  ProficiencyInfo update{};
+  if (!r.ReadU8(update.item_class) || !r.ReadU32(update.subclass_mask)) {
+    Log(LogLevel::kWarn,
+        "item proficiency update rejected source=SMSG_SET_PROFICIENCY opcode=0x127 bytes=" +
+            std::to_string(len) + " reason=truncated-payload");
+    return false;
   }
+  if (update.item_class >= proficiency_masks_.size()) {
+    Log(LogLevel::kWarn,
+        "item proficiency update rejected source=SMSG_SET_PROFICIENCY opcode=0x127 class=" +
+            std::to_string(update.item_class) + " reason=invalid-item-class");
+    return false;
+  }
+  const auto previous_mask = proficiency_masks_[update.item_class];
+  proficiency_ = update;
+  proficiency_masks_[update.item_class] = update.subclass_mask;
+  Log(LogLevel::kInfo,
+      "item proficiency updated source=SMSG_SET_PROFICIENCY opcode=0x127 class=" +
+          std::to_string(update.item_class) +
+          " previousMask=" + std::to_string(previous_mask) +
+          " mask=" + std::to_string(update.subclass_mask));
   return true;
 }
 

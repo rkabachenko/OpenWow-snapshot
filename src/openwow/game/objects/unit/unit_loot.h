@@ -45,6 +45,12 @@ public:
     round_robin_guid_ = group;
   }
 
+  void StoreLootListGuids(const ObjectGuid master,
+                          const ObjectGuid round_robin) {
+    master_guid_ = master;
+    round_robin_guid_ = round_robin;
+  }
+
   [[nodiscard]] ObjectGuid MasterGuid() const noexcept { return master_guid_; }
   [[nodiscard]] ObjectGuid RoundRobinGuid() const noexcept {
     return round_robin_guid_;

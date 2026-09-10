@@ -2,6 +2,7 @@
 
 #include "openwow/runtime/scheduling/thread_pool_system.h"
 #include "openwow/data/blp/blp_texture_loader.h"
+#include "openwow/data/derived_texture_cache.h"
 #include "openwow/data/image/image_decoder.h"
 #include "openwow/data/texture_cache.h"
 #include "openwow/render/resources/textures/texture_cache_budget.h"
@@ -38,6 +39,19 @@ bool TextureTraceEnabled() {
 void TraceTexture(const std::string& message) {
   if (TextureTraceEnabled()) {
     openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kInfo, "TextureCache: " + message);
+  }
+}
+
+std::optional<std::vector<std::uint8_t>> TryLoadDerivedTextureCache(
+    const GlueTextureSourceLoader& loader, const std::string& source_path) {
+  if (!loader) {
+    return std::nullopt;
+  }
+  try {
+    return loader(
+        openwow::data::MakeDerivedTextureCacheVirtualPath(source_path));
+  } catch (...) {
+    return std::nullopt;
   }
 }
 
@@ -143,7 +157,7 @@ GlueTextureStream::GlueTextureStream(GlueTextureStreamConfig config)
       async_worker_count_(std::max(1u, config.async_worker_count)),
       async_state_(std::make_shared<AsyncState>()),
       source_rows_(std::make_shared<openwow::data::TextureCacheRowStore>()),
-      memory_budget_(256ull * 1024ull * 1024ull) {
+      memory_budget_(PlatformTextureRuntimePolicy().cache_memory_budget_bytes) {
   if (!source_loader_ && vfs_ != nullptr) {
     const auto* source_vfs = vfs_;
     source_loader_ = [source_vfs](const std::string& path) {
@@ -281,8 +295,19 @@ std::optional<GlueTexture> GlueTextureStream::Load(
     return std::nullopt;
   }
 
-  auto prepared = PrepareTexture(request->row_path, request->cache_key,
-                                 alpha_mode, *source.bytes);
+  std::optional<std::vector<std::uint8_t>> derived_cache;
+  if (alpha_mode == GlueTextureAlphaMode::kStraight &&
+      PlatformTextureRuntimePolicy().prefer_derived_astc_cache &&
+      CurrentBlockCompressionSupport().astc4x4) {
+    derived_cache =
+        TryLoadDerivedTextureCache(source_loader_, request->row_path);
+  }
+  auto prepared = PrepareTexture(
+      request->row_path, request->cache_key, alpha_mode, *source.bytes,
+      derived_cache.has_value() ? &*derived_cache : nullptr);
+  if (PlatformTextureRuntimePolicy().release_source_bytes_after_decode) {
+    source_rows_->ReleaseSource(source.identity);
+  }
   prepared.row_hash = request->row_hash;
   prepared.row_generation = request->row_generation;
   if (!prepared.valid) {
@@ -464,8 +489,20 @@ void GlueTextureStream::QueueAsyncLoadInternal(
                                            : std::vector<std::uint8_t>{};
                 });
             if (source) {
-              prepared = PrepareTexture(row_identity.path, cache_key, alpha_mode,
-                                        *source.bytes);
+              std::optional<std::vector<std::uint8_t>> derived_cache;
+              if (alpha_mode == GlueTextureAlphaMode::kStraight &&
+                  PlatformTextureRuntimePolicy().prefer_derived_astc_cache &&
+                  CurrentBlockCompressionSupport().astc4x4) {
+                derived_cache =
+                    TryLoadDerivedTextureCache(loader, row_identity.path);
+              }
+              prepared = PrepareTexture(
+                  row_identity.path, cache_key, alpha_mode, *source.bytes,
+                  derived_cache.has_value() ? &*derived_cache : nullptr);
+              if (PlatformTextureRuntimePolicy()
+                      .release_source_bytes_after_decode) {
+                rows->ReleaseSource(source.identity);
+              }
               prepared.row_hash = row_identity.hash;
               prepared.row_generation = row_identity.generation;
               if (!prepared.valid) {
@@ -609,7 +646,8 @@ GlueTextureStream::PreparedTexture GlueTextureStream::PrepareTexture(
     std::string path,
     std::string cache_key,
     const GlueTextureAlphaMode alpha_mode,
-    const std::vector<std::uint8_t>& source_bytes) {
+    const std::vector<std::uint8_t>& source_bytes,
+    const std::vector<std::uint8_t>* const derived_cache_bytes) {
   PreparedTexture prepared{
       .path = std::move(path),
       .cache_key = std::move(cache_key),
@@ -620,12 +658,46 @@ GlueTextureStream::PreparedTexture GlueTextureStream::PrepareTexture(
   }
 
   if (alpha_mode == GlueTextureAlphaMode::kStraight &&
+      derived_cache_bytes != nullptr && !derived_cache_bytes->empty()) {
+    openwow::data::DerivedTextureCacheImage image;
+    std::string cache_error;
+    if (openwow::data::ParseDerivedTextureCache(
+            *derived_cache_bytes, prepared.path, source_bytes, image,
+            &cache_error) &&
+        image.format == openwow::data::DerivedTextureFormat::kAstc4x4 &&
+        image.payload.size() <= std::numeric_limits<std::uint32_t>::max()) {
+      const std::uint64_t upload_size = image.complete_mip_chain
+                                            ? image.payload.size()
+                                            : BlpUploadMipSize(
+                                                  image.width, image.height, 0u,
+                                                  BlpUploadFormat::kAstc4x4)
+                                                  .value_or(0u);
+      if (upload_size > 0u && upload_size <= image.payload.size()) {
+        prepared.width = image.width;
+        prepared.height = image.height;
+        prepared.upload_size = static_cast<std::uint32_t>(upload_size);
+        prepared.complete_mip_chain = image.complete_mip_chain;
+        prepared.rgba = std::move(image.payload);
+        prepared.upload_format = BlpUploadFormat::kAstc4x4;
+        prepared.valid = true;
+        return prepared;
+      }
+    } else {
+      TraceTexture("derived texture rejected: " + prepared.path +
+                   " error=" + cache_error);
+    }
+  }
+
+  if (alpha_mode == GlueTextureAlphaMode::kStraight &&
       openwow::data::BLPTextureLoader::IsValidBLP(source_bytes)) {
     const auto blp = openwow::data::BLPTextureLoader::Load(source_bytes);
     if (blp.isValid && blp.header.width > 0 && blp.header.height > 0) {
 
       auto mip_upload = openwow::render::BuildBlpRgbaMipUpload(
-          blp, openwow::render::CurrentBlockCompressionSupport());
+          blp, openwow::render::CurrentBlockCompressionSupport(),
+          {.max_uncompressed_dimension =
+               openwow::render::PlatformTextureRuntimePolicy()
+                   .max_ui_uncompressed_blp_dimension});
       if (mip_upload.decoded_mip_count > 0 && !mip_upload.bytes.empty() &&
           !mip_upload.mip_sizes.empty() && mip_upload.width > 0 && mip_upload.height > 0 &&
           mip_upload.width <= std::numeric_limits<std::uint16_t>::max() &&

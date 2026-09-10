@@ -99,11 +99,13 @@ float ComputeOwnScale(const UiFrame& frame) {
 
 float ComputeEffectiveScale(
     const UiFrame& frame,
-    const std::unordered_map<std::string, const UiFrame*>& frames_by_name) {
+    const std::unordered_map<std::string, const UiFrame*>& frames_by_name,
+    const float ui_parent_scale) {
   float effective = 1.0f;
   const UiFrame* current = &frame;
   for (int depth = 0; current != nullptr && depth < 64; ++depth) {
-    effective *= ComputeOwnScale(*current);
+    effective *= openwow::ui::framexml::ResolveLocalFrameScale(
+        current->name, ComputeOwnScale(*current), ui_parent_scale);
     if (current->parent.empty()) {
       break;
     }
@@ -211,7 +213,9 @@ ComputeNearestMatchingFramePointPlacement(
 std::string SerializeLayoutCache(
     const std::vector<openwow::ui::framexml::UiFrame>& frames,
     int viewport_width,
-    int viewport_height) {
+    int viewport_height,
+    const openwow::ui::framexml::ViewportInsets insets,
+    const float root_scale) {
   std::ostringstream out;
   out << "Version: 1\n";
 
@@ -221,7 +225,7 @@ std::string SerializeLayoutCache(
 
   const float ui_scale = static_cast<float>(viewport_height) / 768.0f;
   const auto layout = openwow::ui::framexml::ResolveLayout(
-      frames, viewport_width, viewport_height, ui_scale);
+      frames, viewport_width, viewport_height, ui_scale, insets, root_scale);
 
   std::unordered_map<std::string, const UiFrame*> frames_by_name;
   frames_by_name.reserve(frames.size());
@@ -252,7 +256,7 @@ std::string SerializeLayoutCache(
         relative_rect_it->second);
 
     const float frame_effective_scale =
-        ui_scale * ComputeEffectiveScale(frame, frames_by_name);
+        ui_scale * ComputeEffectiveScale(frame, frames_by_name, root_scale);
     if (frame_effective_scale <= 0.0f) {
       continue;
     }

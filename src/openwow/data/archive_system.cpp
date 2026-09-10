@@ -5,8 +5,10 @@
 #include "openwow/data/startup_archive_mount.h"
 #include "openwow/data/startup_filesystem_state.h"
 #include "openwow/data/streaming_init.h"
+#include "openwow/foundation/diagnostics/logging.h"
 #include "openwow/ui/game/cvar_system.h"
 #include "openwow/storage/persistence/profile_reader.h"
+#include "openwow/vfs/virtual_file_system.h"
 #include "openwow/vfs/retail/sfile_archive.h"
 #include "openwow/vfs/retail/sfile_configuration.h"
 #include "openwow/vfs/retail/sound_cache/sound_cache.h"
@@ -137,7 +139,9 @@ void DefaultSetCVarString(const std::string& name, const std::string& value) {
 
 }
 
-void DefaultLoadLoginConfigs(const int reload, const char* locale) {
+void DefaultLoadLoginConfigs(
+    const int reload, const char* locale,
+    const openwow::vfs::VirtualFileSystem* content_vfs) {
   auto& cvars = openwow::ui::game::CVarSystem::Instance();
   cvars.RegisterCVar("decorateAccountName", "0",
                      openwow::ui::game::CVarFlags::None,
@@ -159,6 +163,17 @@ void DefaultLoadLoginConfigs(const int reload, const char* locale) {
     return;
   }
 
+  const auto load_config = [content_vfs](const std::string& path) {
+    if (content_vfs) {
+      if (const auto content = content_vfs->ReadTextFile(path);
+          content.has_value()) {
+        openwow::core::ida::CVar_ParseConfigBuffer(*content);
+        return true;
+      }
+    }
+    return openwow::core::ida::CVar_LoadFromFile(path) != 0;
+  };
+
   std::string locale_prefix;
   if (locale && *locale) {
     locale_prefix = "data\\";
@@ -168,20 +183,29 @@ void DefaultLoadLoginConfigs(const int reload, const char* locale) {
 
   if (!locale_prefix.empty()) {
     const std::string battlenet_path = locale_prefix + "realmlistbn.wtf";
-    if (!openwow::core::ida::CVar_LoadFromFile(battlenet_path)) {
-      openwow::core::ida::CVar_LoadFromFile("realmlistbn.wtf");
+    if (!load_config(battlenet_path)) {
+      load_config("realmlistbn.wtf");
     }
   } else {
-    openwow::core::ida::CVar_LoadFromFile("realmlistbn.wtf");
+    load_config("realmlistbn.wtf");
   }
 
+  bool loaded_realm_list = false;
   if (!locale_prefix.empty()) {
     const std::string realm_list_path = locale_prefix + "realmlist.wtf";
-    if (!openwow::core::ida::CVar_LoadFromFile(realm_list_path)) {
-      openwow::core::ida::CVar_LoadFromFile("realmlist.wtf");
+    loaded_realm_list = load_config(realm_list_path);
+    if (!loaded_realm_list) {
+      loaded_realm_list = load_config("realmlist.wtf");
     }
   } else {
-    openwow::core::ida::CVar_LoadFromFile("realmlist.wtf");
+    loaded_realm_list = load_config("realmlist.wtf");
+  }
+  if (!loaded_realm_list) {
+    openwow::diagnostics::Log(
+        openwow::diagnostics::LogLevel::kWarn,
+        "Login realm list configuration not found: locale=" +
+            std::string(locale && *locale ? locale : "<none>") +
+            "; using registered realmList default");
   }
 }
 
@@ -203,7 +227,6 @@ std::string ResolveWowIniArchiveLocale(const std::string& locale_token,
   g_current_locale.country = read_wow_ini("Country");
 
   if (g_current_locale.language.empty() || g_current_locale.country.empty()) {
-
     g_current_locale.locale_index = FindWowLocaleIndex(locale_token);
     return locale_token;
   }

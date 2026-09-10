@@ -8,7 +8,7 @@
 
 #include <cmath>
 
-#if defined(__APPLE__)
+#if defined(__APPLE__) && !defined(OPENWOW_PLATFORM_IOS)
 #include <ApplicationServices/ApplicationServices.h>
 #endif
 
@@ -26,6 +26,16 @@ void ApplyMinimumClientSize(SDL_Window* window,
     SDL_SetWindowMinimumSize(window,
                              static_cast<int>(min_width),
                              static_cast<int>(min_height));
+}
+
+WindowMode WindowModeFromFlags(const Uint32 flags) {
+    if ((flags & SDL_WINDOW_FULLSCREEN_DESKTOP) == SDL_WINDOW_FULLSCREEN_DESKTOP) {
+        return WindowMode::WindowedFullscreen;
+    }
+    if ((flags & SDL_WINDOW_FULLSCREEN) != 0) {
+        return WindowMode::Fullscreen;
+    }
+    return WindowMode::Windowed;
 }
 
 }
@@ -97,6 +107,7 @@ bool WindowManager::Initialize(const WindowConfig& config) {
     title_       = config.title;
     initialized_ = true;
     owns_window_ = true;
+    virtual_cursor_position_.reset();
     title_was_set_explicitly_ = true;
     mouse_button_capture_mask_ = 0;
     EndRelativeCursorMode();
@@ -115,6 +126,7 @@ void WindowManager::AdoptExternalWindow(void* sdl_window) {
     initialized_ = sdl_window != nullptr;
     mouse_button_capture_mask_ = 0;
     cursor_anchor_.reset();
+    virtual_cursor_position_.reset();
     EndRelativeCursorMode();
     pending_windowed_size_.reset();
     pending_windowed_retried_ = false;
@@ -146,13 +158,7 @@ void WindowManager::AdoptExternalWindow(void* sdl_window) {
     const Uint32 flags = SDL_GetWindowFlags(sdl_window_ptr);
     minimized_ = (flags & SDL_WINDOW_MINIMIZED) != 0;
     focused_ = (flags & SDL_WINDOW_INPUT_FOCUS) != 0;
-    if ((flags & SDL_WINDOW_FULLSCREEN_DESKTOP) != 0) {
-        mode_ = WindowMode::WindowedFullscreen;
-    } else if ((flags & SDL_WINDOW_FULLSCREEN) != 0) {
-        mode_ = WindowMode::Fullscreen;
-    } else {
-        mode_ = WindowMode::Windowed;
-    }
+    mode_ = WindowModeFromFlags(flags);
 }
 
 void WindowManager::Shutdown() {
@@ -183,6 +189,7 @@ void WindowManager::Shutdown() {
     close_cb_    = nullptr;
     mouse_button_capture_mask_ = 0;
     cursor_anchor_.reset();
+    virtual_cursor_position_.reset();
     pending_windowed_size_.reset();
     pending_windowed_retried_ = false;
 }
@@ -200,7 +207,14 @@ float WindowManager::GetAspectRatio() const {
 }
 
 bool WindowManager::IsFullscreen() const {
-    return mode_ == WindowMode::Fullscreen || mode_ == WindowMode::WindowedFullscreen;
+    if (initialized_ && window_ != nullptr) {
+        const auto actual_mode =
+            WindowModeFromFlags(SDL_GetWindowFlags(static_cast<SDL_Window*>(window_)));
+        return actual_mode == WindowMode::Fullscreen ||
+               actual_mode == WindowMode::WindowedFullscreen;
+    }
+    return mode_ == WindowMode::Fullscreen ||
+           mode_ == WindowMode::WindowedFullscreen;
 }
 
 bool WindowManager::IsMinimized() const { return minimized_; }
@@ -219,9 +233,14 @@ std::string WindowManager::GetTitle() const {
 }
 
 void WindowManager::SetWindowMode(WindowMode mode) {
-    if (!initialized_ || mode == mode_) return;
+    if (!initialized_ || window_ == nullptr) return;
 
     auto* sdl_win = static_cast<SDL_Window*>(window_);
+    const WindowMode actual_mode = WindowModeFromFlags(SDL_GetWindowFlags(sdl_win));
+    if (mode == actual_mode) {
+        mode_ = mode;
+        return;
+    }
     uint32_t flag = 0;
 
     switch (mode) {
@@ -237,7 +256,12 @@ void WindowManager::SetWindowMode(WindowMode mode) {
             break;
     }
 
-    SDL_SetWindowFullscreen(sdl_win, flag);
+    if (SDL_SetWindowFullscreen(sdl_win, flag) != 0) {
+        openwow::diagnostics::Log(
+            openwow::diagnostics::LogLevel::kWarn,
+            std::string("WindowManager: SDL_SetWindowFullscreen failed: ") + SDL_GetError());
+        return;
+    }
     mode_ = mode;
 
     int w = 0, h = 0;
@@ -272,7 +296,7 @@ void WindowManager::SetResolution(uint32_t width, uint32_t height) {
     int drawable_width = 0;
     int drawable_height = 0;
     SDL_GetWindowSize(sdl_win, &logical_width, &logical_height);
-    SDL_GL_GetDrawableSize(sdl_win, &drawable_width, &drawable_height);
+    SDL_GetWindowSizeInPixels(sdl_win, &drawable_width, &drawable_height);
     const double scale_x = logical_width > 0 && drawable_width > 0
                                ? static_cast<double>(drawable_width) / logical_width
                                : 1.0;
@@ -326,7 +350,7 @@ bool WindowManager::ApplyDisplayMode(const DisplayModeRequest& request) {
             SDL_SetWindowFullscreen(sdl_window, SDL_WINDOW_FULLSCREEN) != 0) {
             return false;
         }
-    } else if (mode != mode_) {
+    } else if (mode != WindowModeFromFlags(SDL_GetWindowFlags(sdl_window))) {
         const uint32_t fullscreen_flag =
             mode == WindowMode::WindowedFullscreen
                 ? SDL_WINDOW_FULLSCREEN_DESKTOP
@@ -422,6 +446,10 @@ void WindowManager::SaveCursorAnchorIfUnlocked(const int x, const int y) {
 
 void WindowManager::SetCursorPosition(int x, int y) {
     SaveCursorAnchorIfUnlocked(x, y);
+    if (virtual_cursor_position_) {
+        virtual_cursor_position_ = std::pair<int, int>{x, y};
+        return;
+    }
     if (cursor_position_override_.has_value()) {
         cursor_position_override_ = std::pair<int, int>{x, y};
     }
@@ -431,6 +459,11 @@ void WindowManager::SetCursorPosition(int x, int y) {
 }
 
 std::optional<std::pair<int, int>> WindowManager::GetCursorPositionInWindow() {
+    if (virtual_cursor_position_) {
+        SaveCursorAnchorIfUnlocked(virtual_cursor_position_->first,
+                                   virtual_cursor_position_->second);
+        return virtual_cursor_position_;
+    }
     if (cursor_position_override_.has_value()) {
         SaveCursorAnchorIfUnlocked(cursor_position_override_->first,
                                    cursor_position_override_->second);
@@ -454,6 +487,19 @@ std::optional<std::pair<int, int>> WindowManager::ResolveLogicalCursorPosition()
     return GetCursorPositionInWindow();
 }
 
+void WindowManager::SetVirtualCursorPosition(const int x, const int y) {
+    virtual_cursor_position_ = std::pair<int, int>{x, y};
+    SaveCursorAnchorIfUnlocked(x, y);
+}
+
+void WindowManager::ClearVirtualCursorPosition() {
+    virtual_cursor_position_.reset();
+}
+
+bool WindowManager::HasVirtualCursorPosition() const {
+    return virtual_cursor_position_.has_value();
+}
+
 std::optional<std::pair<int, int>>
 WindowManager::ResolveLogicalCursorPositionInDrawablePixels() {
     const auto cursor = ResolveLogicalCursorPosition();
@@ -469,7 +515,7 @@ WindowManager::ResolveLogicalCursorPositionInDrawablePixels() {
     int drawable_width = 0;
     int drawable_height = 0;
     SDL_GetWindowSize(sdl_win, &logical_width, &logical_height);
-    SDL_GL_GetDrawableSize(sdl_win, &drawable_width, &drawable_height);
+    SDL_GetWindowSizeInPixels(sdl_win, &drawable_width, &drawable_height);
     if (logical_width <= 0 || logical_height <= 0) {
         return cursor;
     }
@@ -492,7 +538,7 @@ bool WindowManager::BeginRelativeCursorMode() {
         return true;
     }
 
-#if defined(__APPLE__)
+#if defined(__APPLE__) && !defined(OPENWOW_PLATFORM_IOS)
 
     if (window_ != nullptr) {
         (void)CGAssociateMouseAndMouseCursorPosition(false);
@@ -521,7 +567,7 @@ void WindowManager::EndRelativeCursorMode() {
         return;
     }
 
-#if defined(__APPLE__)
+#if defined(__APPLE__) && !defined(OPENWOW_PLATFORM_IOS)
 
     (void)CGAssociateMouseAndMouseCursorPosition(true);
 #else
@@ -542,7 +588,7 @@ RelativeCursorMotion WindowManager::HandleRelativeCursorMotion() {
         return motion;
     }
 
-#if defined(__APPLE__)
+#if defined(__APPLE__) && !defined(OPENWOW_PLATFORM_IOS)
     if (window_ != nullptr) {
 
         int32_t dx = 0;
@@ -657,9 +703,15 @@ void* WindowManager::GetNativeHandle() const {
     }
 #endif
 #if defined(__APPLE__)
+#if defined(OPENWOW_PLATFORM_IOS)
+    if (wmi.subsystem == SDL_SYSWM_UIKIT) {
+        return wmi.info.uikit.window;
+    }
+#else
     if (wmi.subsystem == SDL_SYSWM_COCOA) {
         return wmi.info.cocoa.window;
     }
+#endif
 #endif
 
     return nullptr;
@@ -754,6 +806,7 @@ void WindowManager::Reset() {
     Shutdown();
     cursor_position_override_.reset();
     cursor_anchor_.reset();
+    virtual_cursor_position_.reset();
 }
 
 }

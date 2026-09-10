@@ -25,6 +25,10 @@ class WorldSession;
 class WorldStateManager;
 }
 
+namespace openwow::world {
+class WorldMap;
+}
+
 namespace openwow::ui {
 
 struct MapZoneInfo {
@@ -103,6 +107,9 @@ public:
 
   void BindWorldSession(const openwow::game::WorldSession* session) noexcept {
     world_session_ = session;
+  }
+  void BindWorldMap(const openwow::world::WorldMap* world_map) noexcept {
+    world_map_ = world_map;
   }
 
   void SetCurrentMapId(std::uint32_t map_id);
@@ -367,6 +374,7 @@ private:
   mutable std::int32_t dungeon_map_chunk_cache_index_ = 0;
   const openwow::data::dbc::DbcLoader *dbc_loader_ = nullptr;
   const openwow::game::WorldSession* world_session_ = nullptr;
+  const openwow::world::WorldMap* world_map_ = nullptr;
   std::function<void()> map_update_callback_;
   std::uint64_t active_player_exploration_callback_handle_ = 0;
 

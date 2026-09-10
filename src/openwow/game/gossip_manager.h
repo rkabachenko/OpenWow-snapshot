@@ -2,6 +2,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <utility>
@@ -76,9 +77,14 @@ struct TrainerList {
 
 class GossipManager {
  public:
-  bool HandleGossipMessage(const std::uint8_t* data, std::size_t len);
-  bool HandleTrainerList(const std::uint8_t* data, std::size_t len);
-  bool HandleListInventory(const std::uint8_t* data, std::size_t len);
+  // Called only after successful decoding, while the previous service still
+  // owns its state so that interaction-close callbacks observe the old data.
+  bool HandleGossipMessage(const std::uint8_t* data, std::size_t len,
+                          const std::function<void(ObjectGuid)>& before_publish);
+  bool HandleTrainerList(const std::uint8_t* data, std::size_t len,
+                        const std::function<void(ObjectGuid)>& before_publish);
+  bool HandleListInventory(const std::uint8_t* data, std::size_t len,
+                          const std::function<void(ObjectGuid)>& before_publish);
 
   [[nodiscard]] static net::wotlk::WorldPacket BuildGossipHello(
       const ObjectGuid& npc);
@@ -97,10 +103,7 @@ class GossipManager {
 
   [[nodiscard]] bool has_gossip() const { return gossip_.has_value(); }
   [[nodiscard]] const GossipDialogData& gossip() const { return gossip_.value(); }
-  [[nodiscard]] const ObjectGuid& interaction_guid() const { return interaction_guid_; }
-  void BeginTrainerRequest(ObjectGuid trainer_guid) {
-    interaction_guid_ = trainer_guid;
-  }
+  [[nodiscard]] const ObjectGuid& gossip_guid() const { return gossip_guid_; }
   [[nodiscard]] const std::string& display_text() const { return display_text_; }
   void SetDisplayText(std::string text) { display_text_ = std::move(text); }
   [[nodiscard]] bool has_trainer() const { return trainer_.has_value(); }
@@ -130,11 +133,16 @@ class GossipManager {
     display_text_.clear();
   }
 
-  void DismissAll() {
-    gossip_.reset();
-    display_text_.clear();
-    interaction_guid_ = {};
+  void DismissGossip() {
+    ClearGossipDialog();
+    gossip_guid_ = {};
+  }
+  void DismissTrainer() {
     trainer_.reset();
+  }
+  void DismissAll() {
+    DismissGossip();
+    DismissTrainer();
     merchant_.Close();
   }
   void Clear() { DismissAll(); }
@@ -151,7 +159,7 @@ class GossipManager {
  private:
   std::optional<GossipDialogData> gossip_;
   std::string display_text_;
-  ObjectGuid interaction_guid_{};
+  ObjectGuid gossip_guid_{};
   std::optional<TrainerList> trainer_;
   std::int32_t trainer_type_ = -1;
   MerchantInteraction merchant_;

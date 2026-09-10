@@ -2402,7 +2402,7 @@ void UpdateSpellVisualLightingEnvelope(const std::uint32_t now) {
 void SpellVisuals_UpdateAll(WorldSession& session, const float delta_seconds) {
   const std::uint32_t now = SpellVisualNowMs();
   UpdateSpellVisualLightingEnvelope(now);
-  CEffect_C::UpdateAll(now);
+  CEffect_C::UpdateAll(now, delta_seconds);
 
   auto& lightning_registry = LightningObjectRegistry::Get();
   for (const auto handle : lightning_registry.SnapshotHandles()) {

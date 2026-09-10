@@ -448,6 +448,7 @@ class CMovementData {
   std::uint32_t RecalculateStateFlags();
 
   bool TryInitRemoteMovement();
+  void StopFalling();
 
   [[nodiscard]] bool IsMovementInitSuppressed() const;
 

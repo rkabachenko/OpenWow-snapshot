@@ -3,6 +3,7 @@
 #include "openwow/ui/game/framescript/core/frame_color_runtime.h"
 #include "openwow/ui/game/framescript/core/frame_font_runtime.h"
 #include "openwow/ui/game/framescript/core/frame_font_face.h"
+#include "openwow/ui/game/framescript/core/frame_input_state.h"
 #include "openwow/ui/game/framescript/core/frame_script_dispatch.h"
 #include "openwow/ui/game/framescript/core/frame_script_object_runtime.h"
 
@@ -163,13 +164,43 @@ void ApplySimpleHTMLMethods(lua_State *L) {
   int f = lua_absindex(L, -1);
 
   lua_pushcclosure(L, [](lua_State *Ls) -> int {
-    if (lua_istable(Ls, 1)) {
-      lua_pushvalue(Ls, 2);
-      lua_setfield(Ls, 1, "__ow_html_text");
-    }
+    const int self = ValidateFrameObjectSelf(Ls, "SimpleHTML");
+    const char *text = luaL_checkstring(Ls, 2);
+    lua_pushstring(Ls, text);
+    lua_setfield(Ls, self, "__ow_html_text");
+    lua_pushstring(Ls, text);
+    lua_setfield(Ls, self, "__ow_text");
+    NotifyFrameInputMutation(Ls, self, false);
     return 0;
   }, 0);
   lua_setfield(L, f, "SetText");
+
+  lua_pushcclosure(L, [](lua_State *Ls) -> int {
+    const int self = ValidateFrameObjectSelf(Ls, "SimpleHTML");
+    lua_getfield(Ls, self, "__ow_html_text");
+    if (!lua_isstring(Ls, -1)) {
+      lua_pop(Ls, 1);
+      lua_pushnil(Ls);
+    }
+    return 1;
+  }, 0);
+  lua_setfield(L, f, "GetText");
+
+  lua_pushcclosure(L, [](lua_State *Ls) -> int {
+    const int self = ValidateFrameObjectSelf(Ls, "SimpleHTML");
+    const auto measurement = MeasureLuaFontStringMetrics(Ls, self, false);
+    lua_pushnumber(Ls, measurement.has_value() ? measurement->height : 0.0);
+    return 1;
+  }, 0);
+  lua_setfield(L, f, "GetContentHeight");
+
+  lua_pushcclosure(L, [](lua_State *Ls) -> int {
+    const int self = ValidateFrameObjectSelf(Ls, "SimpleHTML");
+    const auto measurement = MeasureLuaFontStringMetrics(Ls, self, false);
+    lua_pushnumber(Ls, measurement.has_value() ? measurement->width : 0.0);
+    return 1;
+  }, 0);
+  lua_setfield(L, f, "GetContentWidth");
 
   lua_pushcclosure(L, [](lua_State *Ls) -> int {
     if (lua_istable(Ls, 1)) {

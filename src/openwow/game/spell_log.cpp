@@ -6,6 +6,7 @@
 #include "openwow/game/chat_message_formatters.h"
 #include "openwow/game/combat_log_display.h"
 #include "openwow/game/world_session.h"
+#include "openwow/foundation/diagnostics/logging.h"
 
 namespace openwow::game {
 
@@ -15,6 +16,7 @@ bool ConsumeSpellLogExecuteRecord(WorldSession& session, PacketReader& reader,
                                   const std::uint32_t effect_type,
                                   const std::uint32_t spell_id,
                                   const ObjectGuid& caster_guid,
+                                  const bool is_periodic,
                                   std::vector<SpellLogExecuteResurrect>&
                                       execute_resurrects,
                                   std::vector<SpellLogExecuteDrain>&
@@ -48,7 +50,7 @@ bool ConsumeSpellLogExecuteRecord(WorldSession& session, PacketReader& reader,
           value1,
           value0,
           float_value,
-          false,
+          is_periodic,
       });
       return true;
 
@@ -70,7 +72,6 @@ bool ConsumeSpellLogExecuteRecord(WorldSession& session, PacketReader& reader,
     case 76:
     case 81:
     case 83:
-    case 68:
     case 104:
     case 105:
     case 106:
@@ -90,7 +91,7 @@ bool ConsumeSpellLogExecuteRecord(WorldSession& session, PacketReader& reader,
           caster_guid.GetRawValue(), target_guid.GetRawValue(), spell_id, value0});
       return true;
 
-    case 44:
+    case 68:
       if (!reader.ReadPackedGuid(target_guid) || !reader.ReadU32(value0)) {
         return false;
       }
@@ -113,19 +114,26 @@ bool ConsumeSpellLogExecuteRecord(WorldSession& session, PacketReader& reader,
       return true;
 
     case 33:
-
-      return reader.ReadPackedGuid(target_guid);
+      if (!reader.ReadPackedGuid(target_guid)) {
+        return false;
+      }
+      HandleOpenLockEvent(session, caster_guid.GetRawValue(),
+                          target_guid.GetRawValue(), spell_id);
+      return true;
 
     case 102:
-
-      return reader.ReadPackedGuid(target_guid);
+      if (!reader.ReadPackedGuid(target_guid)) {
+        return false;
+      }
+      FormatSpellDismissPet(session, caster_guid.GetRawValue(), target_guid.GetRawValue());
+      return true;
 
     case 111: {
       if (!reader.ReadPackedGuid(target_guid) || !reader.ReadU32(value0) ||
           !reader.ReadU32(value1)) {
         return false;
       }
-      if (value0 != 0xFFFFFFFFu) {
+      if (value0 != 0xFFFFFFFFu || value1 != 0xFFFFFFFFu) {
         execute_durability_damages.push_back({
             caster_guid.GetRawValue(),
             target_guid.GetRawValue(),
@@ -334,18 +342,32 @@ bool SpellLogHandler::HandleSpellLogExecute(WorldSession& session, PacketReader&
   std::uint32_t effect_count = 0;
   if (!r.ReadU32(effect_count)) return false;
 
-  for (std::uint32_t effect_index = 0; effect_index < effect_count; ++effect_index) {
+  const auto* spell = dbc_ != nullptr ? dbc_->spell().LookupEntry(last_log_execute_spell_) : nullptr;
+  if (spell == nullptr) {
+    diagnostics::Log(diagnostics::LogLevel::kWarn,
+        "Spell execute preparation failed opcode=SMSG_SPELLLOGEXECUTE spell=" +
+            std::to_string(last_log_execute_spell_) + " caster=" +
+            std::to_string(caster.GetRawValue()) + " reason=missing Spell record");
+    r.Skip(r.Remaining());
+    return true;
+  }
+  const bool is_periodic = (spell->attributes_ex4 & 0x02000000u) != 0;
+  for (std::int32_t effect_index = 0;
+       effect_index < static_cast<std::int32_t>(effect_count); ++effect_index) {
     std::uint32_t effect_type = 0;
     std::uint32_t record_count = 0;
     if (!r.ReadU32(effect_type)) return false;
     if (!r.ReadU32(record_count)) return false;
 
-    for (std::uint32_t record_index = 0; record_index < record_count; ++record_index) {
+    for (std::int32_t record_index = 0;
+         record_index < static_cast<std::int32_t>(record_count); ++record_index) {
+      const auto record_start = r.Position();
       if (!ConsumeSpellLogExecuteRecord(
               session, r,
               effect_type,
               last_log_execute_spell_,
               caster,
+              is_periodic,
               last_execute_resurrects_,
               last_execute_drains_,
               last_execute_extra_attacks_,
@@ -354,6 +376,10 @@ bool SpellLogHandler::HandleSpellLogExecute(WorldSession& session, PacketReader&
               last_execute_durability_damages_,
               last_execute_durability_damage_alls_)) {
         return false;
+      }
+      if (r.Position() == record_start) {
+        // Unrecognized effects have no record payload or presentation side effect.
+        break;
       }
     }
   }

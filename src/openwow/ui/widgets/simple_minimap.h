@@ -4,7 +4,6 @@
 #include "openwow/ui/widgets/simple_frame.h"
 #include "openwow/ui/widgets/simple_texture.h"
 
-#include <array>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -40,6 +39,8 @@ class CSimpleMinimap : public CSimpleFrame {
   }
 
   void FireOnLeave(bool motion = false, bool clearDragState = true) override;
+  void ClearHoverTooltip();
+  bool TrackPresentedMouseMove(const void* inputEvent);
   bool RefreshScaleCascade(bool force) override;
 
   bool OnMouseMove(const void* inputEvent) override;
@@ -112,8 +113,7 @@ class CSimpleMinimap : public CSimpleFrame {
 
   CSimpleTexture* compassTexture_{nullptr};
 
-  std::uint32_t tooltipPinHitMask_{0};
-  std::array<std::uint32_t, 23> tooltipCategoryHitMasks_{};
+  std::string tooltipText_;
   bool tooltipVisible_{false};
 
   static CSimpleMinimap* s_primaryInstance_;

@@ -146,11 +146,20 @@ struct MinimapPoiInfoSlot {
 static_assert(sizeof(MinimapPoiInfoSlot) == 64);
 
 struct MinimapDirectionalArrowSlot {
+  ObjectGuid guid;
   float lastSubmittedCenterX{0.0f};
   float lastSubmittedCenterY{0.0f};
   float angleRadians{0.0f};
   bool visible{false};
   std::array<std::byte, 3> reserved{};
+
+  void SetGuid(const ObjectGuid value) noexcept {
+    guid = value;
+  }
+
+  [[nodiscard]] ObjectGuid GetGuid() const noexcept {
+    return guid;
+  }
 
   void SetProjectedCoords(const float x, const float y) noexcept {
     SetSubmittedCenter(x, y);
@@ -202,6 +211,7 @@ struct MinimapDirectionalArrowSlot {
   }
 
   void Reset() noexcept {
+    guid = ObjectGuid{};
     lastSubmittedCenterX = 0.0f;
     lastSubmittedCenterY = 0.0f;
     angleRadians = 0.0f;
@@ -562,6 +572,9 @@ public:
 
   void SetBlipHalfExtents(float blipHalfExtent,
                           float vehicleStateBlipHalfExtent) noexcept;
+  [[nodiscard]] float GetPresentedBlipHalfExtent() const noexcept;
+  [[nodiscard]] float GetPresentedObjectInfoHalfExtent(
+      std::uint32_t categoryIndex) const noexcept;
 
   [[nodiscard]] MinimapDirectionalArrowSlot *GetVehicleIconSlot(std::uint32_t index) noexcept;
   [[nodiscard]] const MinimapDirectionalArrowSlot *

@@ -205,6 +205,12 @@ ModelPortraitResult ModelPortrait::SynchronizeVisualClone() {
   if (clone.status != m2::M2ResultStatus::kReady || !clone.lease.valid()) {
     return MakeResult(clone.status, clone.reason, std::move(clone.detail));
   }
+  if (m2_system_.SetVisualCloneAlpha(clone.lease, 1.0f) !=
+      m2::M2ResultStatus::kReady) {
+    return MakeResult(m2::M2ResultStatus::kFailed,
+                      m2::M2ResultReason::kInvalidQuery,
+                      "portrait clone opacity override failed");
+  }
 
   visual_clone_ = std::move(clone.lease);
   stable_camera_pose_.reset();
