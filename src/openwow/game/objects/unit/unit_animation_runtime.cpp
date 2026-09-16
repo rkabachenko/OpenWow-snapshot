@@ -1824,19 +1824,34 @@ void UnitAnimationRuntime::HandleMovementAnimation(
       return;
     }
 
-    owner_.Sound().PlayCreatureSound(
-        owner_, static_cast<std::uint32_t>(CreatureSoundType::JumpEnd), true);
-    const bool running_forward =
-        (current_flags & kMoveFlagForward) != 0u &&
-        (current_flags & (kMoveFlagBackward | kMoveFlagWalking |
-                          kMoveFlagSwimming | kMoveFlagFlying)) == 0u;
-    RequestPlayback(running_forward ? 187u : render::AnimId::kJumpEnd,
-                    false, true);
-    return;
+    // Landing in water/air: stock goes straight to swim/fly locomotion — no
+    // dry-land JumpEnd / JumpLandRun crouch (that played then blended to swim).
+    if ((current_flags & (kMoveFlagSwimming | kMoveFlagFlying)) != 0u) {
+      // Fall through to ResolveDirectionalLocomotionAnimation below.
+    } else {
+      owner_.Sound().PlayCreatureSound(
+          owner_, static_cast<std::uint32_t>(CreatureSoundType::JumpEnd), true);
+      const bool running_forward =
+          (current_flags & kMoveFlagForward) != 0u &&
+          (current_flags & (kMoveFlagBackward | kMoveFlagWalking |
+                            kMoveFlagSwimming | kMoveFlagFlying)) == 0u;
+      RequestPlayback(running_forward ? 187u : render::AnimId::kJumpEnd,
+                      false, true);
+      return;
+    }
   }
 
   if ((current_flags & (kMoveFlagFalling | kMoveFlagFallingFar)) != 0u) {
-    stand_selector_refresh_pending_ = true;
+    // Keep refresh pending only until a jump/fall preserving anim is active.
+    // Continuous pending + ApplySelectedStandAnimation(restart) froze JumpStart.
+    const auto current = GetCurrentAnimationId();
+    const bool preserve =
+        current.has_value() &&
+        IsMovementStandPreservingBehaviorId(
+            ResolveAnimationBehaviorId(owner_, *current));
+    if (!preserve) {
+      stand_selector_refresh_pending_ = true;
+    }
     return;
   }
   std::uint16_t locomotion_animation_id = 0u;
@@ -3385,9 +3400,11 @@ bool UnitAnimationRuntime::HasMovementDrivenStandAnimationOverride(
     const WorldSession &session) const {
   const auto &movement_info = owner_.GetMovementInfo();
 
-  if ((movement_info.flags & kMoveFlagFalling) != 0u &&
-      ((movement_info.flags & kMoveFlagFallingFar) != 0u ||
-       movement_info.jump.z_speed != 0.0f)) {
+  // Treat any falling/jump flag as airborne for stand selection. Requiring
+  // FallingFar or non-zero jump.z_speed dropped the override near apex, so the
+  // selector fell through to directional Walk/Run and froze a locomotion pose
+  // mid-air.
+  if ((movement_info.flags & (kMoveFlagFalling | kMoveFlagFallingFar)) != 0u) {
     return true;
   }
   static_cast<void>(session);
@@ -3518,8 +3535,17 @@ bool UnitAnimationRuntime::ApplyMovementDrivenStandAnimationOverride(
   const auto current = GetCurrentAnimationId();
   const bool preserve = current.has_value() && IsMovementStandPreservingBehaviorId(
                                                   ResolveAnimationBehaviorId(owner_, *current));
-  ApplySelectedStandAnimation(
-      preserve ? *current : static_cast<std::uint16_t>(kFallAnimationId), 0u);
+  const std::uint16_t target =
+      preserve ? *current : static_cast<std::uint16_t>(kFallAnimationId);
+  // JumpStart/Jump/JumpEnd/Fall are non-looping or short; ApplySelectedStandAnimation
+  // requests playback with restart=!looping. Re-requesting JumpStart every stand-
+  // selector tick (refresh_pending while falling) rewound takeoff forever so the
+  // sequence-end follow-up to Jump never ran. Skip when already on the target.
+  if (current.has_value() && *current == target &&
+      playback_request_.animation_id == target) {
+    return true;
+  }
+  ApplySelectedStandAnimation(target, 0u);
   return true;
 }
 

@@ -139,9 +139,8 @@ constexpr std::array<std::uint32_t, 4> kCharacterReplaceableTextureTypes{
   case AnimId::kShuffleLeft:
   case AnimId::kShuffleRight:
   case AnimId::kWalkBackwards:
-  case AnimId::kJumpStart:
-  case AnimId::kJump:
-  case AnimId::kJumpEnd:
+  // Jump/Fall family plays at authored rate (not locomotion speed). Scaling by
+  // near-zero mid-air speed froze takeoff/air poses.
   case AnimId::kSwim:
   case AnimId::kSwimLeft:
   case AnimId::kSwimRight:
@@ -149,7 +148,6 @@ constexpr std::array<std::uint32_t, 4> kCharacterReplaceableTextureTypes{
   case AnimId::kStealthWalk:
   case AnimId::kFly:
   case AnimId::kSprint:
-  case AnimId::kJumpLandRun:
   case AnimId::kStealthRun:
     return true;
   default:
